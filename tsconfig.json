@@ -1,19 +1,13 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
-    "strict": true,
+    "target": "es2015",
+    "module": "commonjs",
+    "moduleResolution": "node16",
+    "esModuleInterop": true,
     "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "jsx": "react-jsx",
-    "allowImportingTsExtensions": true,
-    "noEmit": true
-  }
+    "strict": true,
+    "outDir": "./dist"
+  },
+  "include": ["server.ts", "src/**/*.ts"],
+  "exclude": ["node_modules"]
 }

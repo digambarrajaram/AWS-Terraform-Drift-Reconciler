@@ -11,7 +11,7 @@
  *   {project}-locks-{account_id}
  */
 
-import path from 'path';
+import * as path from 'path';
 import * as fs from 'fs';
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import {

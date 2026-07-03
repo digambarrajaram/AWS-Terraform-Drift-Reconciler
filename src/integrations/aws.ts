@@ -495,7 +495,10 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
 
 function extractChangedFields(before: Record<string, any>, after: Record<string, any>, prefix = ''): { field: string; expected: any; actual: any }[] {
   const changes: { field: string; expected: any; actual: any }[] = [];
-  const allKeys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+  const beforeKeys = Object.keys(before || {});
+  const afterKeys = Object.keys(after || {});
+  // Build a unique key list without using Set/iteration of Set to avoid TS2802.
+  const allKeys = beforeKeys.concat(afterKeys.filter(k => beforeKeys.indexOf(k) === -1));
   for (const key of allKeys) {
     const path = prefix ? `${prefix}.${key}` : key;
     const bVal = before?.[key];

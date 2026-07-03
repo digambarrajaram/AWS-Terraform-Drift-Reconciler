@@ -413,10 +413,13 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
         try {
           const results: PlanDriftResult[] = [];
           const lines = stdout.split('\n').filter(l => l.trim());
+          const rawEvents: any[] = [];
 
           for (const line of lines) {
             try {
               const entry = JSON.parse(line);
+              rawEvents.push(entry);
+
               if (entry['@level'] === 'error') {
                 console.error(`[aws] terraform plan diagnostic: ${entry.diagnostic?.summary || line.slice(0, 200)}`);
                 continue;
@@ -479,6 +482,19 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
               }
             } catch { /* skip non-JSON lines */ }
           }
+
+          // Dump raw events for debugging
+          const rawDriftCount = rawEvents.filter(e => e.type === 'resource_drift').length;
+          const driftActionCount = rawEvents.filter(e => e.type === 'resource_drift' && e.change?.action && e.change.action !== 'no-op').length;
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const outPath = `/tmp/plan-events-${ts}.json`;
+          try {
+            fs.writeFileSync(outPath, JSON.stringify(rawEvents, null, 2), 'utf-8');
+            console.log(`[aws] plan events dumped to ${outPath}; raw resource_drift events = ${rawDriftCount}, after action filter = ${driftActionCount}`);
+          } catch (writeErr: any) {
+            console.error(`[aws] failed to write plan events: ${writeErr.message}`);
+          }
+
           console.log(`[aws] terraform plan exit=${exitCode}, drift=${results.length} resources`);
           resolve({ results, exitCode });
         } catch (e: any) {

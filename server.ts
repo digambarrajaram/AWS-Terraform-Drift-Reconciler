@@ -436,6 +436,10 @@ async function startServer() {
 
     setTimeout(async () => {
       if (!systemState.scanning) return;
+
+      // Log current drift flags before a fresh plan is run
+      console.log('[scan] existing drift flags before new plan:', JSON.stringify(systemState.resources.map(r => ({ id: r.id, isDrifted: r.isDrifted }))));
+
       let foundDrift = false;
       const nowStr = new Date().toISOString();
 

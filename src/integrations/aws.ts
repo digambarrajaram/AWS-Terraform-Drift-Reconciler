@@ -13,7 +13,6 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   CostExplorerClient,
@@ -437,11 +436,16 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
                 // Only treat as drift when action indicates a real change.
                 // Skip no-op and falsy actions; do NOT default to "update".
                 if (action && action !== 'no-op') {
+                  const before = entry.change.before || {};
+                  const after  = entry.change.after  || {};
                   results.push({
-                    address: addr, type: rtype, name: rname, actions: [action],
-                    desiredState: {},
-                    actualState: {},
-                    changedFields: [{ field: '_terraform_drift', expected: 'compliant', actual: action }],
+                    address: addr,
+                    type: rtype,
+                    name: rname,
+                    actions: [action],
+                    desiredState: before,
+                    actualState: after,
+                    changedFields: extractChangedFields(before, after),
                   });
                 }
                 continue;
@@ -484,11 +488,24 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
             } catch { /* skip non-JSON lines */ }
           }
 
+          // Honour the plan's own summary: if the plan says "0 to add, 0 to change, 0 to destroy",
+          // ignore any resource_drift events that may have been emitted as refresh-only noise.
+          const summaryEvent = rawEvents.find(e => e.type === 'change_summary');
+          if (summaryEvent && summaryEvent.changes) {
+            const totalChanges =
+              (summaryEvent.changes.add || 0) +
+              (summaryEvent.changes.change || 0) +
+              (summaryEvent.changes.remove || 0);
+            if (totalChanges === 0) {
+              results.length = 0;
+            }
+          }
+
           // Dump raw events for debugging
           const rawDriftCount = rawEvents.filter(e => e.type === 'resource_drift').length;
           const driftActionCount = rawEvents.filter(e => e.type === 'resource_drift' && e.change?.action && e.change.action !== 'no-op').length;
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const outPath = path.join(os.tmpdir(), 'plan-events-' + ts + '.json');
+          const outPath = `/tmp/plan-events-${ts}.json`;
           try {
             fs.writeFileSync(outPath, JSON.stringify(rawEvents, null, 2), 'utf-8');
             console.log(`[aws] plan events dumped to ${outPath}; raw resource_drift events = ${rawDriftCount}, after action filter = ${driftActionCount}`);

@@ -428,13 +428,18 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
                 const addr = rc.addr || '';
                 const rtype = rc.resource_type || rc.type || '';
                 const rname = rc.resource_name || rc.name || addr.split('.').pop() || '';
-                const action = entry.change.action || 'update';
-                results.push({
-                  address: addr, type: rtype, name: rname, actions: [action],
-                  desiredState: {},
-                  actualState: {},
-                  changedFields: [{ field: '_terraform_drift', expected: 'compliant', actual: action }],
-                });
+                const action = entry.change.action;
+
+                // Only treat as drift when action indicates a real change.
+                // Skip no-op and falsy actions; do NOT default to "update".
+                if (action && action !== 'no-op') {
+                  results.push({
+                    address: addr, type: rtype, name: rname, actions: [action],
+                    desiredState: {},
+                    actualState: {},
+                    changedFields: [{ field: '_terraform_drift', expected: 'compliant', actual: action }],
+                  });
+                }
                 continue;
               }
 

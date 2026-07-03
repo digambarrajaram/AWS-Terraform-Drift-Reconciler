@@ -679,8 +679,10 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   // POST /api/reset
   app.post('/api/reset', rateLimitMiddleware(10, 60000), requireDemoToken, (req, res) => {
     const savedConfig = systemState.alertConfig;
+    const resetResources = JSON.parse(JSON.stringify(systemState.resources.map((r: AwsResource) => ({ ...r, actualState: JSON.parse(JSON.stringify(r.desiredState)), isDrifted: false, driftDetails: undefined }))));
     systemState = {
-      resources: JSON.parse(JSON.stringify(systemState.resources.map((r: AwsResource) => ({ ...r, actualState: JSON.parse(JSON.stringify(r.desiredState)), isDrifted: false, driftDetails: undefined })))),
+      ...systemState,
+      resources: resetResources,
       prs: [],
       timeline: JSON.parse(JSON.stringify(initialTimeline)),
       lastScanTime: new Date().toISOString(),
@@ -709,13 +711,11 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
 
   // POST /api/alerts/config — simplified PagerDuty-only config
   app.post('/api/alerts/config', (req, res) => {
-    const { pagerDutyRoutingKey, enabled } = req.body;
-    systemState.alertConfig = {
-      pagerDutyRoutingKey: pagerDutyRoutingKey || systemState.alertConfig?.pagerDutyRoutingKey || process.env.PAGERDUTY_ROUTING_KEY || '',
-      enabled: enabled !== undefined ? !!enabled : true,
-    };
+    const { enabled } = req.body;
+    const finalEnabled = enabled !== undefined ? !!enabled : true;
+    systemState.alertConfig = { enabled: finalEnabled };
     console.log('[alerts] PagerDuty config updated');
-    auditLog('alert-config', { enabled: systemState.alertConfig.enabled });
+    auditLog('alert-config', { enabled: finalEnabled });
     res.json(systemState);
   });
 
@@ -726,7 +726,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
     if (!resource) return res.status(404).json({ error: 'No resources available' });
     sendDriftAlertsOnDetection(resource).catch(() => {});
     console.log('[alerts] Test alert triggered via PagerDuty');
-    res.json({ success: true, message: 'PagerDuty alert triggered.', routingKey: systemState.alertConfig?.pagerDutyRoutingKey ? 'configured' : 'not set' });
+    res.json({ success: true, message: 'PagerDuty alert triggered.', routingKey: getPagerDutyKey() ? 'configured' : 'not set' });
   });
 
   // ── Serve frontend ──────────────────────────────────────────────

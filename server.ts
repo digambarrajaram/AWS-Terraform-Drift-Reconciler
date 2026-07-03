@@ -445,12 +445,10 @@ async function startServer() {
       if (planOutcome.error) {
         console.error(`[aws] terraform plan FAILED during state load: ${planOutcome.error}`);
         systemState.integrationStatus.terraformState = 'not_configured';
-        systemState.scanning = false;
-        metrics.scan_failures_total++;
-        res.status(502).json({ error: 'Terraform plan failed', detail: planOutcome.error, exitCode: planOutcome.exitCode });
-        return;
+        // do not abort — continue with EC2 describe fallback and deep-diff
       }
-      if (planOutcome.results.length > 0) {
+
+      if (!planOutcome.error && planOutcome.results.length > 0) {
         for (const pd of planOutcome.results) {
           const match = systemState.resources.find(r => r.type === pd.type && r.name === pd.name);
           if (match) {
@@ -466,7 +464,7 @@ async function startServer() {
           }
         }
       } else {
-        // Fallback: EC2-only describe
+        // EC2 describe fallback (plan had zero results OR plan errored)
         if (await isAwsConfigured()) {
           const actualResources = await describeActualResources();
           for (const actual of actualResources) {

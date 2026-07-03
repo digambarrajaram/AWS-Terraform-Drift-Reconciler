@@ -13,6 +13,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   CostExplorerClient,
@@ -487,7 +488,7 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
           const rawDriftCount = rawEvents.filter(e => e.type === 'resource_drift').length;
           const driftActionCount = rawEvents.filter(e => e.type === 'resource_drift' && e.change?.action && e.change.action !== 'no-op').length;
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const outPath = `/tmp/plan-events-${ts}.json`;
+          const outPath = path.join(os.tmpdir(), 'plan-events-' + ts + '.json');
           try {
             fs.writeFileSync(outPath, JSON.stringify(rawEvents, null, 2), 'utf-8');
             console.log(`[aws] plan events dumped to ${outPath}; raw resource_drift events = ${rawDriftCount}, after action filter = ${driftActionCount}`);

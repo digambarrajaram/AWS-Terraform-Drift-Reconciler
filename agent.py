@@ -9,7 +9,7 @@ import re
 
 # ponytail: single shared keyword list for severity classification.
 # server.ts's determineSeverity mirrors this; keep in sync.
-CRITICAL_KEYWORDS = ["public", "acl", "cidr", "port_22", "0.0.0.0", "admin", "all_traffic"]
+CRITICAL_KEYWORDS = ["public", "acl", "cidr", "port_22", "0.0.0.0", "admin", "all_traffic", "full-access"]
 HIGH_KEYWORDS = ["encrypt", "key", "policy", "password", "tls", "ssl", "credentials"]
 
 # ponytail: classification labels renamed to reflect what we actually detect (keyword risk, not actor intent).

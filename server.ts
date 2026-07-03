@@ -8,12 +8,17 @@
  * Agent self-corrects: retries with error feedback until validation passes.
  */
 
-import * as express from 'express';
+import express, { type Request, type Response, type NextFunction, type RequestHandler } from 'express';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { randomUUID } from 'crypto';
 import * as dotenv from 'dotenv';
 import { spawn } from 'child_process';
+
+interface RequestWithMeta extends Request {
+  requestId?: string;
+  startTime?: number;
+}
 import { createServer as createViteServer } from 'vite';
 import {
   AwsResource, PullRequest, TimelineEvent, SystemState, DriftAnalysis, RiskLevel, DriftType,
@@ -299,7 +304,7 @@ async function startServer() {
   app.use(express.json({ limit: '500kb' }));
 
   // security headers──────────────────────────────────────────
-  app.use((_req, res, next) => {
+  app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '0');
@@ -318,37 +323,37 @@ async function startServer() {
   }
   const API_ACCESS_TOKEN = process.env.API_ACCESS_TOKEN || '';
 
-  function requireApiToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  function requireApiToken(req: RequestWithMeta, res: Response, next: NextFunction) {
     // Header name: X-Api-Access-Token
     if (API_ACCESS_TOKEN && String(req.headers['x-api-access-token'] || '') !== API_ACCESS_TOKEN) {
       return res.status(401).json({ error: 'Invalid API access token' });
     }
     next();
   }
-  function rateLimitMiddleware(max: number, windowMs: number) {
-    return (req: any, res: any, next: any) => {
+  function rateLimitMiddleware(max: number, windowMs: number): RequestHandler {
+    return (req, res, next) => {
       if (!rateLimit(req.ip || '127.0.0.1', max, windowMs)) return res.status(429).json({ error: 'Rate limited' });
       next();
     };
   }
-  app.use((err: any, _req: any, res: any, next: any) => {
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Body too large' });
     next(err);
   });
-  app.use((req: any, _res: any, next: any) => { req.requestId = randomUUID(); next(); });
-  function blockInProduction(req: any, res: any, next: any) { if (IS_PRODUCTION) return res.status(403).json({ error: 'Not available in prod' }); next(); }
+  app.use((req: RequestWithMeta, _res: Response, next: NextFunction) => { req.requestId = randomUUID(); next(); });
+  function blockInProduction(req: Request, res: Response, next: NextFunction) { if (IS_PRODUCTION) return res.status(403).json({ error: 'Not available in prod' }); next(); }
 
   // ── request ID middleware ──────────────────────────────────────────
-  app.use((req: any, _res: any, next: any) => {
+  app.use((req: RequestWithMeta, _res: Response, next: NextFunction) => {
     req.requestId = randomUUID();
     req.startTime = Date.now();
     next();
   });
 
   // ── health / readiness / metrics ───────────────────────────────────
-  app.get('/health', (_req, res) => { res.json({ status: 'ok', uptime: process.uptime() }); });
+  app.get('/health', (_req: Request, res: Response) => { res.json({ status: 'ok', uptime: process.uptime() }); });
 
-  app.get('/ready', async (_req, res) => {
+  app.get('/ready', async (_req: Request, res: Response) => {
     const checks = {
       aws: false, s3: false, github: false, pagerduty: false,
     };
@@ -360,7 +365,7 @@ async function startServer() {
     res.status(allOk ? 200 : 503).json({ status: allOk ? 'ready' : 'not_ready', checks });
   });
 
-  app.get('/metrics', (_req, res) => {
+  app.get('/metrics', (_req: Request, res: Response) => {
     res.json({
       drift_count: metrics.drift_count,
       scans_total: metrics.scans_total,
@@ -407,7 +412,7 @@ async function startServer() {
   // ═════════════════════════════════════════════════════════════
 
   // GET /api/state — returns masked data, never exposes secrets
-  app.get('/api/state', (req: any, res) => {
+  app.get('/api/state', (req: RequestWithMeta, res: Response) => {
     const visible = systemState.maskAccountIds
       ? maskAccountIds(JSON.parse(JSON.stringify(systemState)))
       : JSON.parse(JSON.stringify(systemState));
@@ -416,14 +421,15 @@ async function startServer() {
   });
 
   // POST /api/state/unmask — toggle ARN masking (audited)
-  app.post('/api/state/unmask', requireApiToken, (req: any, res) => {
+  // This mutates server-visible state and is protected by API_ACCESS_TOKEN.
+  app.post('/api/state/unmask', requireApiToken, (req: RequestWithMeta, res: Response) => {
     systemState.maskAccountIds = !systemState.maskAccountIds;
     recordAudit({ action: 'arn_reveal', details: { unmasked: !systemState.maskAccountIds } });
     res.json({ maskAccountIds: systemState.maskAccountIds });
   });
 
   // POST /api/scan — deep-diff all resources
-  app.post('/api/scan', (req, res) => {
+  app.post('/api/scan', (req: Request, res: Response) => {
     if (systemState.scanning) return res.status(409).json({ error: 'Scan already in progress' });
     systemState.scanning = true;
     const scanDelay = parseInt(process.env.DEMO_SCAN_DELAY_MS || '0', 10);
@@ -509,7 +515,8 @@ async function startServer() {
   });
 
   // POST /api/analyze — run agent with self-correction loop
-  app.post('/api/analyze', requireApiToken, async (req, res) => {
+  // Generates and persists a Pull Request object, so this action requires API_ACCESS_TOKEN.
+  app.post('/api/analyze', requireApiToken, async (req: Request, res: Response) => {
     const { resourceId } = req.body;
     const resource = systemState.resources.find(r => r.id === resourceId);
     if (!resource || !resource.isDrifted) {
@@ -540,6 +547,7 @@ async function startServer() {
     const baseBranch = process.env.GITHUB_BRANCH || 'drift';
     const branchName = `reconcile/drift-${resource.name}-${randomUUID().slice(0, 8)}`;
 
+    const validationStatusLabel = (analysisResult.validationStatus ?? 'unknown').toUpperCase();
     const validationNote = analysisResult.validationStatus === 'failed'
       ? `\n> ⚠️ **Validation:** Agent output did not pass all checks after ${analysisResult.correctionAttempts} correction attempts. Manual review required.`
       : analysisResult.validationStatus === 'passed' && analysisResult.correctionAttempts > 1
@@ -551,7 +559,7 @@ async function startServer() {
 **Resource:** \`${resource.type}.${resource.name}\`
 **Classification:** ${analysisResult.classification} | **Risk:** ${analysisResult.riskScore}
 **Generated:** ${new Date().toLocaleTimeString()}
-**Validation:** ${analysisResult.validationStatus.toUpperCase()} (${analysisResult.correctionAttempts} correction attempt(s))
+**Validation:** ${validationStatusLabel} (${analysisResult.correctionAttempts} correction attempt(s))
 ${validationNote}
 
 ---
@@ -602,7 +610,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/merge-pr — with approval gate for high-risk
-  app.post('/api/merge-pr', requireApiToken, rateLimitMiddleware(20, 60000), (req, res) => {
+  app.post('/api/merge-pr', requireApiToken, rateLimitMiddleware(20, 60000), (req: Request, res: Response) => {
     const { prId, approvedBy } = req.body;
     const pr = systemState.prs.find(p => p.id === prId);
     if (!pr) return res.status(404).json({ error: 'PR not found' });
@@ -636,7 +644,8 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/merge-pr/reject — reject with reason (audited)
-  app.post('/api/merge-pr/reject', requireApiToken, rateLimitMiddleware(20, 60000), (req, res) => {
+  // Destructive/decision action and therefore gated by API_ACCESS_TOKEN like merge-pr and reset.
+  app.post('/api/merge-pr/reject', requireApiToken, rateLimitMiddleware(20, 60000), (req: Request, res: Response) => {
     const { prId, rejectedBy, reason } = req.body;
     const pr = systemState.prs.find(p => p.id === prId);
     if (!pr) return res.status(404).json({ error: 'PR not found' });
@@ -663,7 +672,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/reset
-  app.post('/api/reset', requireApiToken, rateLimitMiddleware(10, 60000), (req, res) => {
+  app.post('/api/reset', requireApiToken, rateLimitMiddleware(10, 60000), (req: Request, res: Response) => {
     const savedConfig = systemState.alertConfig;
     const resetResources = JSON.parse(JSON.stringify(systemState.resources.map((r: AwsResource) => ({ ...r, actualState: JSON.parse(JSON.stringify(r.desiredState)), isDrifted: false, driftDetails: undefined }))));
     systemState = {
@@ -681,7 +690,8 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
 
 
   // POST /api/resource — create custom tracked resource
-  app.post('/api/resource', requireApiToken, (req, res) => {
+  // This mutates persisted state, so it is protected by API_ACCESS_TOKEN.
+  app.post('/api/resource', requireApiToken, (req: Request, res: Response) => {
     const { name, type, service, terraformCode, desiredState } = req.body;
     if (!name || !type || !service || !terraformCode || !desiredState)
       return res.status(400).json({ error: 'Missing required fields' });
@@ -696,7 +706,8 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/alerts/config — simplified PagerDuty-only config
-  app.post('/api/alerts/config', requireApiToken, (req, res) => {
+  // This mutates persistent alert configuration and therefore requires API access token authorization.
+  app.post('/api/alerts/config', requireApiToken, (req: Request, res: Response) => {
     const { enabled } = req.body;
     const finalEnabled = enabled !== undefined ? !!enabled : true;
     systemState.alertConfig = { enabled: finalEnabled };
@@ -706,7 +717,8 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/alerts/test — test PagerDuty alert
-  app.post('/api/alerts/test', (req, res) => {
+  // This endpoint does not mutate server state; it only exercises alert delivery and is intentionally left ungated.
+  app.post('/api/alerts/test', (req: Request, res: Response) => {
     const { resourceId } = req.body;
     const resource = systemState.resources.find(r => r.id === resourceId) || systemState.resources[0];
     if (!resource) return res.status(404).json({ error: 'No resources available' });

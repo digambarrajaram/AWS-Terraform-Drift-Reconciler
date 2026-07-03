@@ -137,8 +137,8 @@ const initialTimeline: TimelineEvent[] = [{
   id: 't_init',
   timestamp: new Date().toISOString(),
   type: 'scan_clean',
-  title: 'System Boot',
-  message: 'AWS Drift Reconciler started — loading terraform state from S3 backend.',
+  title: 'Hey! Drift Reconciler Started',
+  message: 'Hey! Just booted up, loading terraform state from S3 backend.',
 }];
 
 // Server-side secrets — never returned to frontend

@@ -11,6 +11,7 @@
 import * as express from 'express';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { randomUUID } from 'crypto';
 import * as dotenv from 'dotenv';
 import { spawn } from 'child_process';
 import { createServer as createViteServer } from 'vite';
@@ -59,7 +60,7 @@ function getMTTR() { return metrics.mttr_samples.length ? metrics.mttr_samples.r
 // ── audit trail (persisted to DynamoDB when AWS is configured) ──────
 const auditTrail: AuditRecord[] = [];
 async function recordAudit(r: Omit<AuditRecord, 'id'|'timestamp'>) {
-  const e: AuditRecord = { ...r, id: crypto.randomUUID(), timestamp: new Date().toISOString() };
+  const e: AuditRecord = { ...r, id: randomUUID(), timestamp: new Date().toISOString() };
   auditTrail.push(e); if (auditTrail.length > 1000) auditTrail.shift();
 
   // Persist to DynamoDB audit table when available
@@ -330,7 +331,7 @@ async function startServer() {
     if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Body too large' });
     next(err);
   });
-  app.use((req: any, _res: any, next: any) => { req.requestId = crypto.randomUUID(); next(); });
+  app.use((req: any, _res: any, next: any) => { req.requestId = randomUUID(); next(); });
   function blockInProduction(req: any, res: any, next: any) { if (IS_PRODUCTION) return res.status(403).json({ error: 'Not available in prod' }); next(); }
   app.get('/health', (_req, res) => { res.json({ status: 'ok' }); });
   app.get('/ready', async (_req, res) => {
@@ -346,7 +347,7 @@ async function startServer() {
 
   // ── request ID middleware ──────────────────────────────────────────
   app.use((req: any, _res: any, next: any) => {
-    req.requestId = crypto.randomUUID();
+    req.requestId = randomUUID();
     req.startTime = Date.now();
     next();
   });
@@ -498,7 +499,7 @@ async function startServer() {
       systemState.lastScanTime = nowStr;
       systemState.scanning = false;
 
-      const eventId = `t_scan_${crypto.randomUUID()}`;
+      const eventId = `t_scan_${randomUUID()}`;
       if (foundDrift) {
         const drifted = systemState.resources.filter(r => r.isDrifted);
         for (const r of drifted) await sendDriftAlertsOnDetection(r);
@@ -550,7 +551,7 @@ async function startServer() {
     const gitHubConfigured = isGitHubConfigured();
     const repo = process.env.GITHUB_REPO || 'digambarrajaram/AWS-Terraform-Drift-Reconciler';
     const baseBranch = process.env.GITHUB_BRANCH || 'drift';
-    const branchName = `reconcile/drift-${resource.name}-${crypto.randomUUID().slice(0, 8)}`;
+    const branchName = `reconcile/drift-${resource.name}-${randomUUID().slice(0, 8)}`;
 
     const validationNote = analysisResult.validationStatus === 'failed'
       ? `\n> ⚠️ **Validation:** Agent output did not pass all checks after ${analysisResult.correctionAttempts} correction attempts. Manual review required.`
@@ -593,7 +594,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
 
     const prNumber = ghResult.prNumber || systemState.prs.length + 101;
     const newPr: PullRequest = {
-      id: `pr_${crypto.randomUUID()}`, number: prNumber,
+      id: `pr_${randomUUID()}`, number: prNumber,
       title: `fix(terraform): reconcile drift on ${resource.name}`,
       branch: ghResult.branchName || branchName, description: prDescription,
       status: 'Open', createdAt: nowStr, hclChanges: analysisResult.hclFix,
@@ -602,7 +603,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
 
     systemState.prs.unshift(newPr);
     systemState.timeline.unshift({
-      id: `t_pr_${crypto.randomUUID()}`, timestamp: nowStr, type: 'pr_created',
+      id: `t_pr_${randomUUID()}`, timestamp: nowStr, type: 'pr_created',
       title: `${gitHubConfigured ? 'GitHub' : 'Simulated'} PR #${prNumber} Opened`,
       message: `Agent analyzed ${resource.name}. ${gitHubConfigured ? 'Real' : 'Simulated'} PR #${prNumber}${ghResult.prUrl ? ` at ${ghResult.prUrl}` : ''}. Validation: ${analysisResult.validationStatus}.`,
       resourceId: resource.id,
@@ -637,7 +638,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
     }
 
     systemState.timeline.unshift({
-      id: `t_merge_${crypto.randomUUID()}`, timestamp: nowStr, type: 'pr_merged',
+      id: `t_merge_${randomUUID()}`, timestamp: nowStr, type: 'pr_merged',
       title: `PR #${pr.number} Merged`,
       message: `PR #${pr.number} merged${approvedBy ? ` (approved by ${approvedBy})` : ''}. State reconciled.`,
       resourceId: resource?.id, details: { prNumber: pr.number, approvedBy: approvedBy || 'auto' },
@@ -662,7 +663,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
 
     recordAudit({ action: 'pr_rejected', resourceId: pr.analysis.resourceId, prNumber: pr.number, details: { rejectedBy: pr.rejectedBy, reason: pr.rejectionReason } });
     systemState.timeline.unshift({
-      id: `t_reject_${crypto.randomUUID()}`,
+      id: `t_reject_${randomUUID()}`,
       timestamp: new Date().toISOString(), type: 'pr_rejected',
       title: `PR #${pr.number} Rejected`,
       message: `PR #${pr.number} rejected by ${pr.rejectedBy}: ${pr.rejectionReason}`,
@@ -697,13 +698,13 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
     const { name, type, service, terraformCode, desiredState } = req.body;
     if (!name || !type || !service || !terraformCode || !desiredState)
       return res.status(400).json({ error: 'Missing required fields' });
-    const newId = `custom_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${crypto.randomUUID().slice(0, 8)}`;
+    const newId = `custom_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${randomUUID().slice(0, 8)}`;
     const newResource: AwsResource = {
       id: newId, name, type, service, terraformCode, desiredState,
       actualState: JSON.parse(JSON.stringify(desiredState)), isDrifted: false, lastChecked: new Date().toISOString(),
     };
     systemState.resources.push(newResource);
-    systemState.timeline.unshift({ id: `t_res_${crypto.randomUUID()}`, timestamp: new Date().toISOString(), type: 'scan_clean', title: 'Resource Registered', message: `Custom resource '${name}' tracked.`, resourceId: newId });
+    systemState.timeline.unshift({ id: `t_res_${randomUUID()}`, timestamp: new Date().toISOString(), type: 'scan_clean', title: 'Resource Registered', message: `Custom resource '${name}' tracked.`, resourceId: newId });
     res.json(systemState);
   });
 
@@ -836,7 +837,7 @@ async function loadStateFromAws() {
     systemState.integrationStatus.terraformState = 'loaded';
     console.log(`[aws] ${stateResources.length} resources, ${stateResources.filter(r => r.isDrifted).length} drifted`);
     systemState.timeline.unshift({
-      id: `t_load_${crypto.randomUUID()}`,
+      id: `t_load_${randomUUID()}`,
       timestamp: new Date().toISOString(), type: 'scan_drift',
       title: 'State Loaded from S3',
       message: `${stateResources.length} resources parsed. ${stateResources.filter(r => r.isDrifted).length} drifted.`,

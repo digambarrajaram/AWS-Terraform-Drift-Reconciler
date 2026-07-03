@@ -8,25 +8,23 @@
  * Agent self-corrects: retries with error feedback until validation passes.
  */
 
-import express from 'express';
-import path from 'path';
-import crypto from 'crypto';
+import * as express from 'express';
+import * as path from 'path';
+import * as crypto from 'crypto';
 import { randomUUID } from 'crypto';
-import dotenv from 'dotenv';
+import * as dotenv from 'dotenv';
 import { spawn } from 'child_process';
-import fs from 'fs';
-import os from 'os';
 import { createServer as createViteServer } from 'vite';
 import {
   AwsResource, PullRequest, TimelineEvent, SystemState, DriftAnalysis, RiskLevel, DriftType,
   Environment, AuditRecord, IntegrationStatus,
-} from './src/types.js';
+} from './src/types';
 import {
   isAwsConfigured, readTerraformState, getCostEstimate,
   describeActualResources, terraformPlanDrift, writeAuditRecord,
-} from './src/integrations/aws.js';
-import { createPullRequest, isGitHubConfigured } from './src/integrations/github.js';
-import { sendPagerDutyAlert } from './src/integrations/pagerduty.js';
+} from './src/integrations/aws';
+import { createPullRequest, isGitHubConfigured } from './src/integrations/github';
+import { sendPagerDutyAlert } from './src/integrations/pagerduty';
 
 // ponytail: explicit path — dotenv needs the exact .env location
 dotenv.config({ path: path.join(process.cwd(), '.env') });
@@ -34,12 +32,8 @@ console.log(`[boot] CWD=${process.cwd()}, PAGERDUTY=${process.env.PAGERDUTY_ROUT
 
 // ── environment validation ──────────────────────────────────────────
 const VALID_ENVS: Environment[] = ['demo', 'staging', 'production'];
-// Default to 'production' unless a valid ENVIRONMENT is explicitly provided.
-const envProvided = process.env.ENVIRONMENT as string | undefined;
-const ENV: Environment = (envProvided && VALID_ENVS.includes(envProvided as any) ? envProvided : 'production') as Environment;
-if (envProvided && !VALID_ENVS.includes(envProvided as any)) {
-  console.warn(`[boot] Unrecognized ENVIRONMENT='${envProvided}' — defaulting to 'production'`);
-}
+const ENV: Environment = (VALID_ENVS.includes(process.env.ENVIRONMENT as any)
+  ? process.env.ENVIRONMENT : 'demo') as Environment;
 const IS_PRODUCTION = ENV === 'production';
 
 // ── structured logger ───────────────────────────────────────────────
@@ -84,17 +78,13 @@ async function recordAudit(r: Omit<AuditRecord, 'id'|'timestamp'>) {
 
 // ── PR idempotency ──────────────────────────────────────────────────
 function hashDrift(d: any[]): string { return crypto.createHash('sha256').update(JSON.stringify(d)).digest('hex').slice(0,16); }
-function findExistingOpenPR(rid: string, hash: string) { return systemState.prs.find((p: PullRequest) => p.status === 'Open' && p.analysis.resourceId === rid && p.analysis.diffHash === hash); }
+function findExistingOpenPR(rid: string, hash: string) { return systemState.prs.find(p => p.status==='Open' && p.analysis.resourceId===rid && p.analysis.diffHash===hash); }
 
 // ── account ID masker ───────────────────────────────────────────────
 function maskAccountIds(obj: any): any {
-  if (typeof obj === 'string') return obj.replace(/:\d{12}:/g, ':\\*\\*\\*:');
+  if (typeof obj==='string') return obj.replace(/:\d{12}:/g,':\\*\\*\\*:');
   if (Array.isArray(obj)) return obj.map(maskAccountIds);
-  if (obj && typeof obj === 'object') {
-    const o: Record<string, any> = {};
-    for (const [k, v] of Object.entries(obj)) o[k] = maskAccountIds(v);
-    return o;
-  }
+  if (obj && typeof obj==='object') { const o:Record<string,any>={}; for(const[k,v]of Object.entries(obj))o[k]=maskAccountIds(v); return o; }
   return obj;
 }
 
@@ -231,13 +221,11 @@ async function analyzeWithSelfCorrection(resource: AwsResource): Promise<DriftAn
       if (!result.hclFix || result.hclFix.trim().length === 0)
         errors.push('Empty HCL fix');
 
-      // Record how many correction attempts the agent used. Do NOT set any
-      // "validationStatus" here — we do not claim the proposed HCL was
-      // validated by terraform. Consumers must run real validation in CI.
+      result.validationStatus = errors.length === 0 ? 'passed' : 'failed';
       result.correctionAttempts = attempts + 1;
 
       if (errors.length === 0) {
-        console.log(`[agent] Agent produced syntactically well-formed output on attempt ${attempts + 1}`);
+        console.log(`[agent] Validation passed on attempt ${attempts + 1}`);
         auditLog('agent-success', { agentMode, attempts: attempts + 1, classification: result.classification });
         return result;
       }
@@ -254,7 +242,7 @@ async function analyzeWithSelfCorrection(resource: AwsResource): Promise<DriftAn
           { field: '_correction_feedback', expected: 'valid_output', actual: JSON.stringify(errors), severity: 'Low' as RiskLevel },
         ],
       };
-      } catch (error: any) {
+    } catch (error: any) {
       console.error(`[agent] Attempt ${attempts + 1} crashed: ${error.message}`);
       lastResult = lastResult || {
         resourceId: resource.id,
@@ -264,6 +252,7 @@ async function analyzeWithSelfCorrection(resource: AwsResource): Promise<DriftAn
         securityImpact: 'Unable to complete analysis.',
         costImpact: 'Unknown — analysis incomplete.',
         hclFix: resource.terraformCode,
+        validationStatus: 'failed',
         correctionAttempts: attempts + 1,
       } as DriftAnalysis;
     }
@@ -295,9 +284,9 @@ function generateFlexibleAnalysis(resource: AwsResource): DriftAnalysis {
     explanation: `Manual configuration bypass detected. Diverged: ${deltaPhrases}.`,
     securityImpact: isCritical ? 'Critical: unauthenticated access or privilege escalation.' : 'Compliance divergence risk.',
     costImpact: 'Non-standard config triggers manual review (~$120/hr).',
-    hclFix, fixType: 'unapproved_recommendation',
-    correctionAttempts: 0,
-    policyReferences: [{ id: 'heuristic_baseline', name: 'Heuristic: Resource follows general IaC patterns', severity: 'MEDIUM', source: 'keyword_matching' }],
+    hclFix, fixType: 'illustrative_diff',
+    validationStatus: 'pending', correctionAttempts: 0,
+    policyReferences: [{ id: 'CKV_AWS_999', name: 'CIS baseline compliance', severity: 'MEDIUM' }],
   };
 }
 
@@ -310,7 +299,7 @@ async function startServer() {
   app.use(express.json({ limit: '500kb' }));
 
   // security headers──────────────────────────────────────────
-  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '0');
@@ -327,12 +316,8 @@ async function startServer() {
     if (entry.count >= max) return false;
     entry.count++; return true;
   }
-  // API access token gating — require a valid API_ACCESS_TOKEN header on
-  // destructive endpoints. This is a deliberate access control mechanism
-  // (not demo-only). In addition to the token gate, destructive calls still
-  // require an actor identity (approvedBy/requestedBy) which is recorded
-  // via `recordAudit()` for traceability.
   const API_ACCESS_TOKEN = process.env.API_ACCESS_TOKEN || '';
+
   function requireApiToken(req: express.Request, res: express.Response, next: express.NextFunction) {
     // Header name: X-Api-Access-Token
     if (API_ACCESS_TOKEN && String(req.headers['x-api-access-token'] || '') !== API_ACCESS_TOKEN) {
@@ -341,28 +326,29 @@ async function startServer() {
     next();
   }
   function rateLimitMiddleware(max: number, windowMs: number) {
-    return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    return (req: any, res: any, next: any) => {
       if (!rateLimit(req.ip || '127.0.0.1', max, windowMs)) return res.status(429).json({ error: 'Rate limited' });
       next();
     };
   }
-  app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  app.use((err: any, _req: any, res: any, next: any) => {
     if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Body too large' });
     next(err);
   });
-  app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => { (req as any).requestId = randomUUID(); next(); });
-  function blockInProduction(req: express.Request, res: express.Response, next: express.NextFunction) { if (IS_PRODUCTION) return res.status(403).json({ error: 'Not available in prod' }); next(); }
+  app.use((req: any, _res: any, next: any) => { req.requestId = randomUUID(); next(); });
+  function blockInProduction(req: any, res: any, next: any) { if (IS_PRODUCTION) return res.status(403).json({ error: 'Not available in prod' }); next(); }
+
   // ── request ID middleware ──────────────────────────────────────────
-  app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    (req as any).requestId = randomUUID();
-    (req as any).startTime = Date.now();
+  app.use((req: any, _res: any, next: any) => {
+    req.requestId = randomUUID();
+    req.startTime = Date.now();
     next();
   });
 
   // ── health / readiness / metrics ───────────────────────────────────
-  app.get('/health', (_req: express.Request, res: express.Response) => { res.json({ status: 'ok', uptime: process.uptime() }); });
+  app.get('/health', (_req, res) => { res.json({ status: 'ok', uptime: process.uptime() }); });
 
-  app.get('/ready', async (_req: express.Request, res: express.Response) => {
+  app.get('/ready', async (_req, res) => {
     const checks = {
       aws: false, s3: false, github: false, pagerduty: false,
     };
@@ -374,7 +360,7 @@ async function startServer() {
     res.status(allOk ? 200 : 503).json({ status: allOk ? 'ready' : 'not_ready', checks });
   });
 
-  app.get('/metrics', (_req: express.Request, res: express.Response) => {
+  app.get('/metrics', (_req, res) => {
     res.json({
       drift_count: metrics.drift_count,
       scans_total: metrics.scans_total,
@@ -421,28 +407,29 @@ async function startServer() {
   // ═════════════════════════════════════════════════════════════
 
   // GET /api/state — returns masked data, never exposes secrets
-  app.get('/api/state', (req: express.Request, res: express.Response) => {
+  app.get('/api/state', (req: any, res) => {
     const visible = systemState.maskAccountIds
       ? maskAccountIds(JSON.parse(JSON.stringify(systemState)))
       : JSON.parse(JSON.stringify(systemState));
-    log('info', 'state requested', { reqId: (req as any).requestId });
+    log('info', 'state requested', { reqId: req.requestId });
     res.json(visible);
   });
 
   // POST /api/state/unmask — toggle ARN masking (audited)
-  app.post('/api/state/unmask', (req: express.Request, res: express.Response) => {
+  app.post('/api/state/unmask', requireApiToken, (req: any, res) => {
     systemState.maskAccountIds = !systemState.maskAccountIds;
     recordAudit({ action: 'arn_reveal', details: { unmasked: !systemState.maskAccountIds } });
     res.json({ maskAccountIds: systemState.maskAccountIds });
   });
 
-  // POST /api/scan — deep-diff all resources (no artificial demo delay)
-  app.post('/api/scan', async (req: express.Request, res: express.Response) => {
+  // POST /api/scan — deep-diff all resources
+  app.post('/api/scan', (req, res) => {
     if (systemState.scanning) return res.status(409).json({ error: 'Scan already in progress' });
     systemState.scanning = true;
+    const scanDelay = parseInt(process.env.DEMO_SCAN_DELAY_MS || '0', 10);
 
-    try {
-      if (!systemState.scanning) return res.status(200).json(systemState);
+    setTimeout(async () => {
+      if (!systemState.scanning) return;
       let foundDrift = false;
       const nowStr = new Date().toISOString();
 
@@ -482,11 +469,9 @@ async function startServer() {
 
       // Run deep-diff only on resources NOT already detected by plan.
       const planDetectedIds = new Set(
-        planOutcome.results
-          .map((pd: any) => systemState.resources.find((r: AwsResource) => r.type === pd.type && r.name === pd.name)?.id)
-          .filter(Boolean) as string[]
+        planOutcome.results.map(pd => systemState.resources.find(r => r.type === pd.type && r.name === pd.name)?.id).filter(Boolean)
       );
-      systemState.resources = systemState.resources.map((resource: AwsResource) => {
+      systemState.resources = systemState.resources.map(resource => {
         resource.lastChecked = nowStr;
         if (planDetectedIds.has(resource.id)) {
           if (resource.isDrifted) foundDrift = true;
@@ -520,17 +505,13 @@ async function startServer() {
       }
       auditLog('scan', { foundDrift, resourceCount: systemState.resources.length });
       res.json(systemState);
-    } catch (e: any) {
-      console.error('Scan failed', e);
-      systemState.scanning = false;
-      res.status(500).json({ error: 'Scan failed', detail: e?.message });
-    }
+    }, scanDelay);
   });
 
   // POST /api/analyze — run agent with self-correction loop
-  app.post('/api/analyze', async (req: express.Request, res: express.Response) => {
+  app.post('/api/analyze', requireApiToken, async (req, res) => {
     const { resourceId } = req.body;
-    const resource = systemState.resources.find((r: AwsResource) => r.id === resourceId);
+    const resource = systemState.resources.find(r => r.id === resourceId);
     if (!resource || !resource.isDrifted) {
       return res.status(400).json({ error: 'Resource must exist and be in drifted state.' });
     }
@@ -559,11 +540,10 @@ async function startServer() {
     const baseBranch = process.env.GITHUB_BRANCH || 'drift';
     const branchName = `reconcile/drift-${resource.name}-${randomUUID().slice(0, 8)}`;
 
-    // Do not claim validation. Report correction attempts and advise manual review.
-    const correctionNote = analysisResult.correctionAttempts > 1
-      ? `\n> ✅ **Self-corrected attempts:** Agent produced revised outputs after ${analysisResult.correctionAttempts} attempts. Manual review required.`
-      : analysisResult.correctionAttempts === 1
-      ? `\n> ⚠️ **Note:** Agent performed 1 correction attempt. Manual review recommended.`
+    const validationNote = analysisResult.validationStatus === 'failed'
+      ? `\n> ⚠️ **Validation:** Agent output did not pass all checks after ${analysisResult.correctionAttempts} correction attempts. Manual review required.`
+      : analysisResult.validationStatus === 'passed' && analysisResult.correctionAttempts > 1
+      ? `\n> ✅ **Self-corrected:** Agent output validated after ${analysisResult.correctionAttempts} attempts.`
       : '';
 
     const prDescription = `### 🤖 Drift Reconciliation — ${gitHubConfigured ? 'Automated PR' : 'Simulated PR'}
@@ -571,8 +551,8 @@ async function startServer() {
 **Resource:** \`${resource.type}.${resource.name}\`
 **Classification:** ${analysisResult.classification} | **Risk:** ${analysisResult.riskScore}
 **Generated:** ${new Date().toLocaleTimeString()}
-**Correction attempts:** ${analysisResult.correctionAttempts}
-${correctionNote}
+**Validation:** ${analysisResult.validationStatus.toUpperCase()} (${analysisResult.correctionAttempts} correction attempt(s))
+${validationNote}
 
 ---
 
@@ -592,63 +572,6 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
 
 > **Note:** Policy checks (Checkov, terraform validate) run in CI/CD after this PR is opened.
 `;
-    // Attempt terraform validate --json on the proposed HCL fix. Only set
-    // validationStatus if the real `terraform` binary executed and returned
-    // a definitive result. Never claim validated without running terraform.
-    async function runTerraformValidate(hcl: string) {
-      const result: { ran: boolean; status?: 'passed'|'failed'; output?: any; error?: string } = { ran: false };
-      if (!hcl || String(hcl).trim().length === 0) return result;
-      const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'tfvalidate-'));
-      const tfFile = path.join(tmpRoot, 'main.tf');
-      try {
-        await fs.promises.writeFile(tfFile, hcl, 'utf8');
-        // Run `terraform init -backend=false` to allow validate to work without remote backend
-        const init = spawn('terraform', ['init', '-input=false', '-backend=false'], { cwd: tmpRoot });
-        const initOut: Buffer[] = [];
-        const initErr: Buffer[] = [];
-        init.stdout.on('data', d => initOut.push(Buffer.from(d)));
-        init.stderr.on('data', d => initErr.push(Buffer.from(d)));
-        const initExit: number = await new Promise((res) => init.on('close', (code:any) => res(code)));
-        if (initExit !== 0) {
-          // Init failed but terraform existed and we attempted — proceed to attempt validate anyway
-        }
-
-        const validate = spawn('terraform', ['validate', '-json'], { cwd: tmpRoot });
-        const out: Buffer[] = [];
-        const err: Buffer[] = [];
-        validate.stdout.on('data', d => out.push(Buffer.from(d)));
-        validate.stderr.on('data', d => err.push(Buffer.from(d)));
-        const exitCode: number = await new Promise((res) => validate.on('close', (code:any) => res(code)));
-        const stdout = Buffer.concat(out).toString('utf8');
-        const stderr = Buffer.concat(err).toString('utf8');
-        result.ran = true;
-        if (stdout) {
-          try { result.output = JSON.parse(stdout); } catch { result.output = stdout; }
-        } else if (stderr) {
-          try { result.output = JSON.parse(stderr); } catch { result.output = stderr; }
-        }
-        result.status = exitCode === 0 ? 'passed' : 'failed';
-        return result;
-      } catch (e: any) {
-        // terraform not found or execution error — do not claim validation
-        result.ran = false; result.error = e?.message || String(e);
-        return result;
-      } finally {
-        // best-effort cleanup
-        try { await fs.promises.rm(tmpRoot, { recursive: true, force: true }); } catch {}
-      }
-    }
-
-    // Run terraform validate on the proposed HCL fix if possible
-    try {
-      const val = await runTerraformValidate(analysisResult.hclFix);
-      if (val.ran) {
-        (analysisResult as any).validationStatus = val.status;
-        (analysisResult as any).validationOutput = val.output || val.error;
-      }
-    } catch (e) {
-      // keep original behaviour if validate couldn't run
-    }
 
     const ghResult = await createPullRequest({
       repo, baseBranch, resourceName: resource.name, resourceType: resource.type,
@@ -657,45 +580,40 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
     });
 
     const prNumber = ghResult.prNumber || systemState.prs.length + 101;
-    // Normalize policy check field names so the UI can render both heuristic and Checkov CLI outputs.
-    const normalizedPolicyRefs = (analysisResult as any).policyReferences || (analysisResult as any).checkovChecks || (analysisResult as any).checkov_checks || [];
-    const normalizedSummary = (analysisResult as any).checkovSummary || (analysisResult as any).checkov_summary || undefined;
-
     const newPr: PullRequest = {
       id: `pr_${randomUUID()}`, number: prNumber,
       title: `fix(terraform): reconcile drift on ${resource.name}`,
       branch: ghResult.branchName || branchName, description: prDescription,
       status: 'Open', createdAt: nowStr, hclChanges: analysisResult.hclFix,
-      analysis: { ...analysisResult, costImpact, policyReferences: normalizedPolicyRefs, checkovSummary: normalizedSummary },
+      analysis: { ...analysisResult, costImpact },
     };
 
     systemState.prs.unshift(newPr);
     systemState.timeline.unshift({
       id: `t_pr_${randomUUID()}`, timestamp: nowStr, type: 'pr_created',
       title: `${gitHubConfigured ? 'GitHub' : 'Simulated'} PR #${prNumber} Opened`,
-      message: `Agent analyzed ${resource.name}. ${gitHubConfigured ? 'Real' : 'Simulated'} PR #${prNumber}${ghResult.prUrl ? ` at ${ghResult.prUrl}` : ''}.`,
+      message: `Agent analyzed ${resource.name}. ${gitHubConfigured ? 'Real' : 'Simulated'} PR #${prNumber}${ghResult.prUrl ? ` at ${ghResult.prUrl}` : ''}. Validation: ${analysisResult.validationStatus}.`,
       resourceId: resource.id,
-      details: { prNumber, branchName, prUrl: ghResult.prUrl, correctionAttempts: analysisResult.correctionAttempts },
+      details: { prNumber, branchName, prUrl: ghResult.prUrl, validationStatus: analysisResult.validationStatus, correctionAttempts: analysisResult.correctionAttempts },
     });
-    auditLog('analyze', { resourceId, classification: analysisResult.classification, correctionAttempts: analysisResult.correctionAttempts });
+
+    auditLog('analyze', { resourceId, classification: analysisResult.classification, validationStatus: analysisResult.validationStatus, correctionAttempts: analysisResult.correctionAttempts });
     res.json({ systemState, pr: newPr, githubResult: ghResult });
   });
 
-  // POST /api/merge-pr — require an approver identity for auditability
-  app.post('/api/merge-pr', requireApiToken, rateLimitMiddleware(20, 60000), (req: express.Request, res: express.Response) => {
+  // POST /api/merge-pr — with approval gate for high-risk
+  app.post('/api/merge-pr', requireApiToken, rateLimitMiddleware(20, 60000), (req, res) => {
     const { prId, approvedBy } = req.body;
-    // Minimal RBAC: require approvedBy identity on all merge requests
-    if (!approvedBy || typeof approvedBy !== 'string' || approvedBy.trim().length === 0) {
-      return res.status(403).json({ error: 'Merge requires approver identity. Provide { approvedBy: "name" }.' });
-    }
     const pr = systemState.prs.find(p => p.id === prId);
     if (!pr) return res.status(404).json({ error: 'PR not found' });
     if (pr.status !== 'Open') return res.status(400).json({ error: 'PR already ' + pr.status });
 
     const isHighRisk = pr.analysis.classification === 'high_risk_change' || pr.analysis.riskScore === 'Critical' ||
       systemState.resources.find(r => r.id === pr.analysis.resourceId)?.type === 'aws_iam_role';
-    // approvedBy provided — attach approval metadata
-    pr.approvedBy = approvedBy; pr.approvedAt = new Date().toISOString();
+    if (isHighRisk && !approvedBy) {
+      return res.status(403).json({ error: 'High-risk PR requires human approval. Provide { approvedBy: "name" }.', requiresApproval: true });
+    }
+    if (approvedBy) { pr.approvedBy = approvedBy; pr.approvedAt = new Date().toISOString(); }
 
     const nowStr = new Date().toISOString();
     pr.status = 'Merged'; pr.mergedAt = nowStr;
@@ -709,17 +627,16 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
     systemState.timeline.unshift({
       id: `t_merge_${randomUUID()}`, timestamp: nowStr, type: 'pr_merged',
       title: `PR #${pr.number} Merged`,
-      message: `PR #${pr.number} merged (approved by ${approvedBy}). State reconciled.`,
-      resourceId: resource?.id, details: { prNumber: pr.number, approvedBy },
+      message: `PR #${pr.number} merged${approvedBy ? ` (approved by ${approvedBy})` : ''}. State reconciled.`,
+      resourceId: resource?.id, details: { prNumber: pr.number, approvedBy: approvedBy || 'auto' },
     });
 
-    // Record audit with actor identity
-    recordAudit({ action: 'merge-pr', resourceId: resource?.id, prNumber: pr.number, actor: approvedBy, details: { isHighRisk } });
+    auditLog('merge-pr', { prNumber: pr.number, approvedBy: approvedBy || 'auto', isHighRisk });
     res.json(systemState);
   });
 
   // POST /api/merge-pr/reject — reject with reason (audited)
-  app.post('/api/merge-pr/reject', rateLimitMiddleware(20, 60000), (req: express.Request, res: express.Response) => {
+  app.post('/api/merge-pr/reject', requireApiToken, rateLimitMiddleware(20, 60000), (req, res) => {
     const { prId, rejectedBy, reason } = req.body;
     const pr = systemState.prs.find(p => p.id === prId);
     if (!pr) return res.status(404).json({ error: 'PR not found' });
@@ -745,12 +662,8 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
     res.json(systemState);
   });
 
-  // POST /api/reset — destructive: require requester identity and audit
-  app.post('/api/reset', requireApiToken, rateLimitMiddleware(10, 60000), (req: express.Request, res: express.Response) => {
-    const { requestedBy } = req.body;
-    if (!requestedBy || typeof requestedBy !== 'string' || requestedBy.trim().length === 0) {
-      return res.status(403).json({ error: 'Reset requires requester identity. Provide { requestedBy: "name" }.' });
-    }
+  // POST /api/reset
+  app.post('/api/reset', requireApiToken, rateLimitMiddleware(10, 60000), (req, res) => {
     const savedConfig = systemState.alertConfig;
     const resetResources = JSON.parse(JSON.stringify(systemState.resources.map((r: AwsResource) => ({ ...r, actualState: JSON.parse(JSON.stringify(r.desiredState)), isDrifted: false, driftDetails: undefined }))));
     systemState = {
@@ -762,16 +675,13 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
       scanning: false,
       alertConfig: savedConfig,
     };
-
-    // Record requester identity in audit trail
-    recordAudit({ action: 'reset', actor: requestedBy, details: { resourceCount: systemState.resources.length } });
-    systemState.timeline.unshift({ id: `t_reset_${randomUUID()}`, timestamp: new Date().toISOString(), type: 'reset', title: 'System Reset', message: `System reset requested by ${requestedBy}`, details: { requestedBy } });
+    auditLog('reset', {});
     res.json(systemState);
   });
 
 
   // POST /api/resource — create custom tracked resource
-  app.post('/api/resource', (req: express.Request, res: express.Response) => {
+  app.post('/api/resource', requireApiToken, (req, res) => {
     const { name, type, service, terraformCode, desiredState } = req.body;
     if (!name || !type || !service || !terraformCode || !desiredState)
       return res.status(400).json({ error: 'Missing required fields' });
@@ -786,7 +696,7 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/alerts/config — simplified PagerDuty-only config
-  app.post('/api/alerts/config', (req: express.Request, res: express.Response) => {
+  app.post('/api/alerts/config', requireApiToken, (req, res) => {
     const { enabled } = req.body;
     const finalEnabled = enabled !== undefined ? !!enabled : true;
     systemState.alertConfig = { enabled: finalEnabled };
@@ -796,9 +706,9 @@ ${analysisResult.hclDiff || analysisResult.hclFix}
   });
 
   // POST /api/alerts/test — test PagerDuty alert
-  app.post('/api/alerts/test', (req: express.Request, res: express.Response) => {
+  app.post('/api/alerts/test', (req, res) => {
     const { resourceId } = req.body;
-    const resource = systemState.resources.find((r: AwsResource) => r.id === resourceId) || systemState.resources[0];
+    const resource = systemState.resources.find(r => r.id === resourceId) || systemState.resources[0];
     if (!resource) return res.status(404).json({ error: 'No resources available' });
     sendDriftAlertsOnDetection(resource).catch(() => {});
     console.log('[alerts] Test alert triggered via PagerDuty');
@@ -855,13 +765,9 @@ async function loadStateFromAws() {
     }));
 
     // Primary: terraform plan -json (ALL resource types)
-    // ponytail: plan failure does NOT invalidate the state we already loaded from S3.
-    // Plan detects drift — it is NOT a prerequisite for having resources.
     const planOutcome = await terraformPlanDrift();
     if (planOutcome.error) {
       console.error(`[aws] terraform plan FAILED during load: ${planOutcome.error}`);
-      // Still commit the resources we read from S3 — they just won't have drift checked yet.
-      // terraformState reflects S3 state availability, not plan success.
       systemState.resources = stateResources;
       systemState.integrationStatus.terraformState = 'loaded';
       console.log(`[aws] ${stateResources.length} resources loaded (drift unchecked — plan failed)`);

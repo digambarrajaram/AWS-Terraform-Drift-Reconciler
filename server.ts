@@ -417,8 +417,6 @@ async function startServer() {
     const visible = systemState.maskAccountIds
       ? maskAccountIds(JSON.parse(JSON.stringify(systemState)))
       : JSON.parse(JSON.stringify(systemState));
-    // Never return routing key to frontend
-    if (visible.alertConfig) delete (visible.alertConfig as any).pagerDutyRoutingKey;
     log('info', 'state requested', { reqId: req.requestId });
     res.json(visible);
   });

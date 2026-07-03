@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+build/
+dist/
+/dist
+
+# Coverage & testing
+coverage/
+
+# Environment & secrets (regenerate from .env.example)
+.env*
+!.env.example
+
+# OS & IDE
+.DS_Store
+.aider*
+
+# Logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Terraform state backups (local; remote state is in S3)
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl

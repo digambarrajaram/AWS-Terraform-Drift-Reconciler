@@ -455,8 +455,23 @@ async function startServer() {
         for (const pd of planOutcome.results) {
           const match = systemState.resources.find(r => r.type === pd.type && r.name === pd.name);
           if (match) {
-            match.actualState = pd.actualState;
-            match.desiredState = pd.desiredState || match.desiredState;
+            // Prefer explicit before/after payloads from plan results when present.
+            if (pd.actualState && Object.keys(pd.actualState).length > 0) {
+              match.actualState = pd.actualState;
+            }
+            if (pd.desiredState && Object.keys(pd.desiredState).length > 0) {
+              match.desiredState = pd.desiredState;
+            } else if (pd.changedFields && pd.changedFields.length > 0) {
+              // Fill in minimal attribute-level diff so UI reviewers see concrete values
+              const derivedDesired: Record<string, any> = {};
+              const derivedActual: Record<string, any> = {};
+              for (const f of pd.changedFields) {
+                derivedDesired[f.field] = f.expected;
+                derivedActual[f.field] = f.actual;
+              }
+              match.desiredState = { ...match.desiredState, ...derivedDesired };
+              match.actualState = { ...match.actualState, ...derivedActual };
+            }
             match.isDrifted = true;
             match.driftDetails = pd.changedFields.map(f => ({
               field: f.field, expected: f.expected, actual: f.actual,
@@ -794,8 +809,22 @@ async function loadStateFromAws() {
       for (const pd of planOutcome.results) {
         const match = stateResources.find(r => r.type === pd.type && r.name === pd.name);
         if (match) {
-          match.actualState = pd.actualState;
-          match.desiredState = pd.desiredState || match.desiredState;
+          // Prefer explicit before/after payloads from plan results when present.
+          if (pd.actualState && Object.keys(pd.actualState).length > 0) {
+            match.actualState = pd.actualState;
+          }
+          if (pd.desiredState && Object.keys(pd.desiredState).length > 0) {
+            match.desiredState = pd.desiredState;
+          } else if (pd.changedFields && pd.changedFields.length > 0) {
+            const derivedDesired: Record<string, any> = {};
+            const derivedActual: Record<string, any> = {};
+            for (const f of pd.changedFields) {
+              derivedDesired[f.field] = f.expected;
+              derivedActual[f.field] = f.actual;
+            }
+            match.desiredState = { ...match.desiredState, ...derivedDesired };
+            match.actualState = { ...match.actualState, ...derivedActual };
+          }
           match.isDrifted = true;
           match.driftDetails = pd.changedFields.map(f => ({
             field: f.field, expected: f.expected, actual: f.actual,
@@ -807,7 +836,9 @@ async function loadStateFromAws() {
             id: `${pd.type}_${pd.name}`.replace(/[^a-zA-Z0-9_-]/g, '_'),
             name: pd.name, type: pd.type,
             service: pd.type.includes('route53') ? 'Route53' : pd.type.includes('lambda') ? 'Lambda' : pd.type.includes('s3') ? 'S3' : 'Other',
-            desiredState: pd.desiredState, actualState: pd.actualState,
+            // If desired/actual objects are empty, derive minimal attribute maps from changedFields
+            desiredState: (pd.desiredState && Object.keys(pd.desiredState).length > 0) ? pd.desiredState : (pd.changedFields ? Object.fromEntries(pd.changedFields.map(f => [f.field, f.expected])) : pd.desiredState),
+            actualState: (pd.actualState && Object.keys(pd.actualState).length > 0) ? pd.actualState : (pd.changedFields ? Object.fromEntries(pd.changedFields.map(f => [f.field, f.actual])) : pd.actualState),
             isDrifted: true,
             driftDetails: pd.changedFields.map(f => ({
               field: f.field, expected: f.expected, actual: f.actual,

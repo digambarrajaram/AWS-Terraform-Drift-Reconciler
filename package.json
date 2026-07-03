@@ -1,0 +1,47 @@
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "preview": "vite preview",
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit",
+    "drift:infra": "node scripts/check-infra-drift.mjs",
+    "drift:operational": "node scripts/check-operational-drift.mjs",
+    "drift:config": "node scripts/check-config-drift.mjs",
+    "drift:app": "node scripts/check-application-drift.mjs",
+    "drift:env": "node scripts/check-environment-drift.mjs",
+    "drift:schema": "node scripts/check-schema-drift.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cost-explorer": "^3.1077.0",
+    "@aws-sdk/client-dynamodb": "^3.1077.0",
+    "@aws-sdk/client-ec2": "^3.1077.0",
+    "@aws-sdk/client-s3": "^3.1077.0",
+    "@aws-sdk/client-sts": "^3.1077.0",
+    "@octokit/rest": "^22.0.1",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  }
+}

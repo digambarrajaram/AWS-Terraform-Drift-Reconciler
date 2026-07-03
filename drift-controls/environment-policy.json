@@ -1,0 +1,9 @@
+{
+  "environments": [
+    {
+      "name": "staging",
+      "file": ".env.example",
+      "expected": "AWS_REGION=\"us-east-1\""
+    }
+  ]
+}

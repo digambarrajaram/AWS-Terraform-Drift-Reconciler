@@ -1,0 +1,5 @@
+{
+  "sourceBranch": "main",
+  "deploymentMode": "gitops",
+  "artifactDigest": "sha256:placeholder"
+}

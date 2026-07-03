@@ -1,13 +1,13 @@
 {
   "compilerOptions": {
-    "target": "es2015",
-    "module": "Node16",
-    "moduleResolution": "node16",
+    "target": "es2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": true,
-    "outDir": "./dist",
-    "downlevelIteration": true
+    "outDir": "./dist"
   },
   "include": ["server.ts", "src/**/*.ts"],
   "exclude": ["node_modules"]

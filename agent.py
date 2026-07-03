@@ -133,76 +133,150 @@ def hcl_reconciliation_node(state: dict) -> dict:
     return {
         "hcl_fix": hcl_fix,
         "hcl_diff": hcl_diff,
-        "fixType": "illustrative_diff"
+        "fixType": "unapproved_recommendation"
     }
 
 
 def security_scan_node(state: dict) -> dict:
-    """Simulated policy checklist. Computes PASSED/FAILED based on actual substring
-    checks of the proposed HCL — no unconditional PASSED results."""
+    """Policy scan node.
+    Attempt to run the `checkov` CLI against the proposed HCL when available. If the
+    `checkov` binary is not available or the invocation fails, fall back to
+    clearly-labeled heuristic checks. Never fabricate Checkov-style IDs when the
+    CLI is not run; heuristic checks use `heuristic_*` ids and `source: "keyword_matching"`.
+    """
     name = state.get("name", "")
     type_ = state.get("type", "")
     hcl_fix = state.get("hcl_fix", "")
     hcl_lower = hcl_fix.lower()
 
+    # Prepare a simple fallback heuristic generator
+    def heuristic_checks_for(kind: str):
+        if kind == 's3':
+            return [
+                {"id": "heuristic_s3_encryption", "name": "Heuristic: S3 bucket appears to have SSE encryption configured",
+                 "severity": "HIGH",
+                 "status": "PASSED" if any(k in hcl_lower for k in ["sse_algorithm", "encryption", "encrypt"]) else "FAILED",
+                 "impact": "Unencrypted S3 requires encryption at rest.",
+                 "source": "keyword_matching"},
+                {"id": "heuristic_s3_public_access", "name": "Heuristic: S3 bucket appears to block public access",
+                 "severity": "CRITICAL",
+                 "status": "PASSED" if any(k in hcl_lower for k in ["block_public_acls = true", "block_public_policy = true", "private"]) else "FAILED",
+                 "impact": "Public buckets expose files to internet scraping.",
+                 "source": "keyword_matching"},
+                {"id": "heuristic_s3_versioning", "name": "Heuristic: S3 bucket appears to have versioning configured",
+                 "severity": "LOW",
+                 "status": "PASSED" if "versioning" in hcl_lower else "FAILED",
+                 "impact": "Versioning protects against accidental deletions.",
+                 "source": "keyword_matching"},
+            ]
+        if kind == 'sg':
+            return [
+                {"id": "heuristic_sg_ssh_open", "name": "Heuristic: Security group does not expose SSH (port 22) to 0.0.0.0/0",
+                 "severity": "CRITICAL",
+                 "status": "FAILED" if "0.0.0.0/0" in hcl_lower and "port = 22" in hcl_lower else "PASSED",
+                 "impact": "Open SSH ingress allows global brute-force attacks.",
+                 "source": "keyword_matching"},
+                {"id": "heuristic_sg_admin_ports", "name": "Heuristic: Security group does not allow wide-open ingress on admin ports",
+                 "severity": "HIGH",
+                 "status": "FAILED" if "0.0.0.0/0" in hcl_lower and ("port" in hcl_lower or "ingress" in hcl_lower) else "PASSED",
+                 "impact": "Wide-open admin ports increase lateral scanning surface.",
+                 "source": "keyword_matching"},
+            ]
+        if kind == 'iam':
+            return [
+                {"id": "heuristic_iam_wildcards", "name": "Heuristic: IAM policy does not contain wildcard (*) actions",
+                 "severity": "CRITICAL",
+                 "status": "FAILED" if '"*"' in hcl_fix or "'*'" in hcl_fix else "PASSED",
+                 "impact": "Wildcard permissions violate Principle of Least Privilege.",
+                 "source": "keyword_matching"},
+                {"id": "heuristic_iam_admin_access", "name": "Heuristic: IAM policy does not grant full administrator access",
+                 "severity": "HIGH",
+                 "status": "FAILED" if "administratoraccess" in hcl_lower or "full" in hcl_lower else "PASSED",
+                 "impact": "Admin privileges allow complete infrastructure control from compromised code.",
+                 "source": "keyword_matching"},
+            ]
+        if kind == 'rds':
+            return [
+                {"id": "heuristic_rds_encryption", "name": "Heuristic: RDS database appears to have storage encryption enabled",
+                 "severity": "HIGH",
+                 "status": "PASSED" if "storage_encrypted = true" in hcl_lower or "encrypted" in hcl_lower else "FAILED",
+                 "impact": "Unencrypted database storage is vulnerable to physical theft.",
+                 "source": "keyword_matching"},
+                {"id": "heuristic_rds_not_public", "name": "Heuristic: RDS database is not publicly accessible",
+                 "severity": "CRITICAL",
+                 "status": "FAILED" if "publicly_accessible = true" in hcl_lower else "PASSED",
+                 "impact": "Public DB instances are exposed to internet-wide connection attacks.",
+                 "source": "keyword_matching"},
+            ]
+        return [{"id": "heuristic_baseline", "name": "Heuristic: Resource adheres to general IaC configuration patterns",
+                 "severity": "MEDIUM", "status": "PASSED",
+                 "impact": "Non-standard configurations may create audit visibility gaps.",
+                 "source": "keyword_matching"}]
+
+    # Try to run real Checkov CLI if available. Write HCL to a temp file and shell out.
+    try:
+        import subprocess, tempfile, os
+
+        tf_ext = '.tf'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=tf_ext, mode='w', encoding='utf-8') as tf:
+            tf.write(hcl_fix or '')
+            tf.flush()
+            tfpath = tf.name
+
+        cmd = ["checkov", "-f", tfpath, "--output", "json"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        os.unlink(tfpath)
+
+        if proc.returncode == 0 or proc.stdout:
+            try:
+                payload = json.loads(proc.stdout)
+                # Parse Checkov JSON results — merge passed and failed checks
+                results = []
+                if isinstance(payload, dict):
+                    failed = payload.get('results', {}).get('failed_checks', []) or payload.get('failed_checks', [])
+                    passed_checks = payload.get('results', {}).get('passed_checks', []) or payload.get('passed_checks', [])
+                    for c in (failed or []) + (passed_checks or []):
+                        # Map to unified check format
+                        cid = c.get('check_id') or c.get('check_name') or c.get('check')
+                        name = c.get('check_name') or c.get('check') or c.get('message') or ''
+                        sev = c.get('check_severity') or c.get('severity') or 'MEDIUM'
+                        status = 'FAILED' if c in (failed or []) else 'PASSED'
+                        impact = c.get('guideline') or c.get('message') or ''
+                        results.append({
+                            'id': cid,
+                            'name': name,
+                            'severity': sev.upper(),
+                            'status': status,
+                            'impact': impact,
+                            'source': 'checkov_cli'
+                        })
+                summary = f"Checkov CLI executed: {len(results)} checks parsed."
+                return { 'checkov_checks': results, 'checkov_summary': summary }
+            except Exception:
+                # fall through to heuristic
+                pass
+    except FileNotFoundError:
+        # checkov not installed — fall back to heuristics
+        pass
+    except Exception:
+        # any runtime issue — fall back
+        pass
+
+    # Fallback: heuristic substring checks (clearly labeled)
     if "s3" in type_ or "s3" in name.lower():
-        checks = [
-            {"id": "CKV_AWS_19", "name": "Ensure S3 bucket has SSE encryption at rest",
-             "severity": "HIGH",
-             "status": "PASSED" if any(k in hcl_lower for k in ["sse_algorithm", "encryption", "encrypt"]) else "FAILED",
-             "impact": "Unencrypted S3 volumes are vulnerable to unauthenticated snapshot access."},
-            {"id": "CKV_AWS_144", "name": "Ensure S3 bucket blocks public ACLs/policies",
-             "severity": "CRITICAL",
-             "status": "PASSED" if any(k in hcl_lower for k in ["block_public_acls = true", "block_public_policy = true", "private"]) else "FAILED",
-             "impact": "Public buckets expose files to internet scraping scripts."},
-            {"id": "CKV_AWS_21", "name": "Ensure S3 bucket has versioning enabled",
-             "severity": "LOW",
-             "status": "PASSED" if "versioning" in hcl_lower else "FAILED",
-             "impact": "Without versioning, accidental deletions cause data loss."},
-        ]
+        checks = heuristic_checks_for('s3')
     elif "security_group" in type_ or "sg" in name.lower():
-        checks = [
-            {"id": "CKV_AWS_24", "name": "Ensure no SG allows ingress 0.0.0.0/0 to SSH port 22",
-             "severity": "CRITICAL",
-             "status": "FAILED" if "0.0.0.0/0" in hcl_lower and "port = 22" in hcl_lower else "PASSED",
-             "impact": "Open SSH ingress allows global brute-force attacks."},
-            {"id": "CKV_AWS_260", "name": "Ensure SGs do not allow wide-open ingress to admin ports",
-             "severity": "HIGH",
-             "status": "FAILED" if "0.0.0.0/0" in hcl_lower and ("port" in hcl_lower or "ingress" in hcl_lower) else "PASSED",
-             "impact": "Wide-open ports increase lateral scanning surface."},
-        ]
+        checks = heuristic_checks_for('sg')
     elif "iam" in type_ or "role" in name.lower():
-        checks = [
-            {"id": "CKV_AWS_1", "name": "Ensure IAM policies do not allow wildcard actions",
-             "severity": "CRITICAL",
-             "status": "FAILED" if '"*"' in hcl_fix or "'*'" in hcl_fix else "PASSED",
-             "impact": "Wildcard permissions violate the Principle of Least Privilege."},
-            {"id": "CKV_AWS_60", "name": "Ensure IAM policies do not allow full admin privileges",
-             "severity": "HIGH",
-             "status": "FAILED" if "administratoraccess" in hcl_lower or "full" in hcl_lower else "PASSED",
-             "impact": "Admin privileges allow full infrastructure control from compromised code."},
-        ]
+        checks = heuristic_checks_for('iam')
     elif "rds" in type_ or "db" in name.lower():
-        checks = [
-            {"id": "CKV_AWS_16", "name": "Ensure RDS has storage encryption enabled",
-             "severity": "HIGH",
-             "status": "PASSED" if "storage_encrypted = true" in hcl_lower or "encrypted" in hcl_lower else "FAILED",
-             "impact": "Unencrypted database storage is transparent to volume snatching."},
-            {"id": "CKV_AWS_89", "name": "Ensure RDS is not publicly accessible",
-             "severity": "CRITICAL",
-             "status": "FAILED" if "publicly_accessible = true" in hcl_lower else "PASSED",
-             "impact": "Public DB instances allow connection attacks from internet scanners."},
-        ]
+        checks = heuristic_checks_for('rds')
     else:
-        checks = [
-            {"id": "CKV_AWS_999", "name": "Verify IaC resources comply with CIS secure baselines",
-             "severity": "MEDIUM", "status": "PASSED",
-             "impact": "Non-standard configurations create audit visibility gaps."},
-        ]
+        checks = heuristic_checks_for('other')
 
     passed = sum(1 for c in checks if c["status"] == "PASSED")
     total = len(checks)
-    summary = f"Passed {passed}/{total} simulated policy checks (illustrative — not a real Checkov scan)"
+    summary = f"Passed {passed}/{total} heuristic checks (fallback; NOT a real Checkov scan)"
 
     return {
         "checkov_checks": checks,
@@ -238,7 +312,7 @@ def main():
             "costImpact": state.get("cost_impact", "Operational costs incurred"),
             "hclFix": state.get("hcl_fix", input_data.get("terraformCode", "")),
             "hclDiff": state.get("hcl_diff", ""),
-            "fixType": state.get("fixType", "illustrative_diff"),
+                "fixType": state.get("fixType", "unapproved_recommendation"),
             "checkovChecks": state.get("checkov_checks", []),
             "checkovSummary": state.get("checkov_summary",
                 "Simulated policy checks — illustrative only."),

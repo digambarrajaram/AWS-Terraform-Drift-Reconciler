@@ -412,6 +412,14 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
         // can't revert it (e.g. SG rules managed via separate resources).
         try {
           const results: PlanDriftResult[] = [];
+          const driftByAddress = new Map<string, PlanDriftResult>();
+          const changeAddresses = new Set<string>();
+          const confirmedChangeByAddress = new Map<string, {
+            desiredState: Record<string, any>;
+            actualState: Record<string, any>;
+            changedFields: { field: string; expected: any; actual: any }[];
+          }>();
+          const seenAddresses = new Set<string>();
           const lines = stdout.split('\n').filter(l => l.trim());
           const rawEvents: any[] = [];
 
@@ -433,12 +441,10 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
                 const rname = rc.resource_name || rc.name || addr.split('.').pop() || '';
                 const action = entry.change.action;
 
-                // Only treat as drift when action indicates a real change.
-                // Skip no-op and falsy actions; do NOT default to "update".
                 if (action && action !== 'no-op') {
                   const before = entry.change.before || {};
                   const after  = entry.change.after  || {};
-                  results.push({
+                  driftByAddress.set(addr, {
                     address: addr,
                     type: rtype,
                     name: rname,
@@ -459,12 +465,20 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
                 const rname = rc.resource_name || rc.name || addr.split('.').pop() || '';
                 const actions = entry.change.action ? [entry.change.action] : [];
                 if (actions.length === 0 || actions.includes('no-op')) continue;
-                results.push({
-                  address: addr, type: rtype, name: rname, actions,
-                  desiredState: entry.change.after || {},
-                  actualState: entry.change.before || {},
-                  changedFields: extractChangedFields(entry.change.before || {}, entry.change.after || {}),
-                });
+                changeAddresses.add(addr);
+                const desiredState = entry.change.after || {};
+                const actualState = entry.change.before || {};
+                const changedFields = extractChangedFields(entry.change.before || {}, entry.change.after || {});
+                confirmedChangeByAddress.set(addr, { desiredState, actualState, changedFields });
+                if (!seenAddresses.has(addr)) {
+                  seenAddresses.add(addr);
+                  results.push({
+                    address: addr, type: rtype, name: rname, actions,
+                    desiredState,
+                    actualState,
+                    changedFields,
+                  });
+                }
                 continue;
               }
 
@@ -476,28 +490,43 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
                 const addr = rc.address || '';
                 const rtype = rc.type || '';
                 const rname = rc.name || addr.split('.').pop() || '';
-                results.push({
-                  address: addr, type: rtype, name: rname, actions,
-                  desiredState: rc.change?.after || {},
-                  actualState: rc.change?.before || {},
-                  changedFields: (rc.change?.after_unknown || []).length > 0
-                    ? [{ field: '_after_unknown', expected: 'known', actual: 'computed' }]
-                    : extractChangedFields(rc.change?.before || {}, rc.change?.after || {}),
-                });
+                changeAddresses.add(addr);
+                const desiredState = rc.change?.after || {};
+                const actualState = rc.change?.before || {};
+                const changedFields = (rc.change?.after_unknown || []).length > 0
+                  ? [{ field: '_after_unknown', expected: 'known', actual: 'computed' }]
+                  : extractChangedFields(rc.change?.before || {}, rc.change?.after || {});
+                confirmedChangeByAddress.set(addr, { desiredState, actualState, changedFields });
+                if (!seenAddresses.has(addr)) {
+                  seenAddresses.add(addr);
+                  results.push({
+                    address: addr, type: rtype, name: rname, actions,
+                    desiredState,
+                    actualState,
+                    changedFields,
+                  });
+                }
               }
             } catch { /* skip non-JSON lines */ }
           }
 
-          // Honour the plan's own summary: if the plan says "0 to add, 0 to change, 0 to destroy",
-          // ignore any resource_drift events that may have been emitted as refresh-only noise.
-          const summaryEvent = rawEvents.find(e => e.type === 'change_summary');
-          if (summaryEvent && summaryEvent.changes) {
-            const totalChanges =
-              (summaryEvent.changes.add || 0) +
-              (summaryEvent.changes.change || 0) +
-              (summaryEvent.changes.remove || 0);
-            if (totalChanges === 0) {
-              results.length = 0;
+          // Correlate resource_drift events with change events by exact address.
+          // Only trust a drift entry when the same resource address also appears in
+          // the plan's change stream with a non-no-op action. When it does, prefer
+          // the explicit before/after values from the confirmed change event.
+          for (const [addr, driftResult] of driftByAddress) {
+            if (changeAddresses.has(addr) && !seenAddresses.has(addr)) {
+              const confirmed = confirmedChangeByAddress.get(addr);
+              if (confirmed) {
+                results.push({
+                  ...driftResult,
+                  desiredState: confirmed.desiredState,
+                  actualState: confirmed.actualState,
+                  changedFields: confirmed.changedFields,
+                });
+              } else {
+                results.push(driftResult);
+              }
             }
           }
 

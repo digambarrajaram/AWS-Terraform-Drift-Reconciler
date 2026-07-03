@@ -8,10 +8,10 @@
  * Agent self-corrects: retries with error feedback until validation passes.
  */
 
-import express from 'express';
-import path from 'path';
-import crypto from 'crypto';
-import dotenv from 'dotenv';
+import * as express from 'express';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import * as dotenv from 'dotenv';
 import { spawn } from 'child_process';
 import { createServer as createViteServer } from 'vite';
 import {
@@ -118,7 +118,7 @@ function getDeepDiff(obj1: any, obj2: any, path = '', seen = new WeakSet<object>
       }
       for (let i = 0; i < obj1.length; i++) diffs.push(...getDeepDiff(obj1[i], obj2[i], `${path}[${i}]`, seen));
     } else {
-      const allKeys = new Set([...Object.keys(obj1), ...Object.keys(obj2)]);
+      const allKeys = Array.from(new Set([...Object.keys(obj1), ...Object.keys(obj2)]));
       for (const key of allKeys) {
         const nextPath = path ? `${path}.${key}` : key;
         if (!(key in obj2)) diffs.push({ field: nextPath, expected: obj1[key], actual: undefined, severity: determineSeverity(nextPath, obj1[key], undefined) });

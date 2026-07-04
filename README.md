@@ -120,6 +120,14 @@ Developer notes
   2. Copy env template: `cp .env.example .env` and populate required variables for real integrations (AWS creds, GITHUB_TOKEN, etc.)
   3. Start dev server: `npm run dev` (Vite + Node dev server)
 
+Secrets and `.env`
+
+- Keep only `.env.example` committed in the repository. Do NOT commit a live `.env` file containing secrets.
+- For local development, copy `.env.example` to `.env` and populate values. Add `.env` to your personal Git ignore if your system doesn't already ignore it.
+- After any accidental commit of secrets: rotate the secret immediately (revoke and reissue credentials), then follow the repository history purge instructions in `HISTORY_PURGE_INSTRUCTIONS.md` (this repository contains a prepared guide and scripts).
+
+If you operate shared CI/CD or deploy pipelines, move sensitive values to a secrets manager (AWS Secrets Manager, GitHub Actions Secrets, or your CI provider) and reference them via the provider's secure mechanism rather than storing them in files.
+
 - Running the Python agent
 
   The agent runs as a subprocess. To test locally you can run `python3 agent.py` and pipe a resource JSON on stdin; the agent emits a `DriftAnalysis` object to stdout.

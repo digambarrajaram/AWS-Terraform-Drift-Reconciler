@@ -10,7 +10,10 @@ dist/
 coverage/
 
 # Environment & secrets (regenerate from .env.example)
-.env*
+# Keep the example in the repo, but never commit a real `.env` or tfstate files.
+.env
+.env.local
+.env.*.local
 !.env.example
 
 # OS & IDE
@@ -35,3 +38,11 @@ terraform/.terraform/
 terraform/*.tfstate
 terraform/*.tfstate.backup
 terraform/.terraform.lock.hcl
+
+# Ignore any tfstate produced by subfolders
+**/*.tfstate
+**/*.tfstate.backup
+
+# Ignore build artifacts emitted into repo
+dist/
+dist/*

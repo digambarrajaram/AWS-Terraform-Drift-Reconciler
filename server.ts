@@ -479,6 +479,9 @@ async function startServer() {
             }));
             match.lastChecked = nowStr;
             foundDrift = true;
+
+            // ponytail: diagnostic log to trace actual vs desired after plan-based drift assignment
+            console.log(`[scan/drift] resource ${match.id} (${match.type}.${match.name}) actualState=${JSON.stringify(match.actualState)} desiredState=${JSON.stringify(match.desiredState)}`);
           }
         }
       } else {
@@ -831,6 +834,9 @@ async function loadStateFromAws() {
             severity: determineSeverity(f.field, f.expected, f.actual),
           }));
           match.lastChecked = new Date().toISOString();
+
+          // ponytail: diagnostic log to trace actual vs desired after plan-based drift assignment
+          console.log(`[load/drift] resource ${match.id} (${match.type}.${match.name}) actualState=${JSON.stringify(match.actualState)} desiredState=${JSON.stringify(match.desiredState)}`);
         } else {
           stateResources.push({
             id: `${pd.type}_${pd.name}`.replace(/[^a-zA-Z0-9_-]/g, '_'),

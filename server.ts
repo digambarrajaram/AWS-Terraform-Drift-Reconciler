@@ -87,7 +87,7 @@ function findExistingOpenPR(rid: string, hash: string) { return systemState.prs.
 
 // ── account ID masker ───────────────────────────────────────────────
 function maskAccountIds(obj: any): any {
-  if (typeof obj==='string') return obj.replace(/:\d{12}:/g,':\\*\\*\\*:');
+  if (typeof obj==='string') return obj.replace(/:\d{12}:/g,':***:');
   if (Array.isArray(obj)) return obj.map(maskAccountIds);
   if (obj && typeof obj==='object') { const o:Record<string,any>={}; for(const[k,v]of Object.entries(obj))o[k]=maskAccountIds(v); return o; }
   return obj;

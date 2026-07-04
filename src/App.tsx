@@ -166,6 +166,7 @@ export default function App() {
       }, 500);
     } catch (e) {
       console.error('Failed scanning environment', e);
+      setPlanLogs(prev => [...prev, `❌ Scan failed: ${e instanceof Error ? e.message : 'network error, could not reach server'}`]);
       setState(prev => prev ? { ...prev, scanning: false } : null);
     }
   };

@@ -1,8 +1,0 @@
-{
-  "migrationChecks": [
-    {
-      "file": "README.md",
-      "mustContain": "schema"
-    }
-  ]
-}

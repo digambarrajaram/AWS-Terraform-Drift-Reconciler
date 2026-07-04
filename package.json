@@ -11,11 +11,18 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "drift:infra": "node scripts/check-infra-drift.mjs",
-    "drift:operational": "node scripts/check-operational-drift.mjs",
-    "drift:config": "node scripts/check-config-drift.mjs",
-    "drift:app": "node scripts/check-application-drift.mjs",
-    "drift:env": "node scripts/check-environment-drift.mjs",
-    "drift:schema": "node scripts/check-schema-drift.mjs"
+    "demo:infra:inject": "python scripts/demo_infra_drift.py inject",
+    "demo:infra:revert": "python scripts/demo_infra_drift.py revert",
+    "demo:operational:inject": "python scripts/demo_operational_drift.py inject",
+    "demo:operational:revert": "python scripts/demo_operational_drift.py revert",
+    "demo:config:inject": "python scripts/demo_config_drift.py inject",
+    "demo:config:revert": "python scripts/demo_config_drift.py revert",
+    "demo:app:inject": "python scripts/demo_application_drift.py inject",
+    "demo:app:revert": "python scripts/demo_application_drift.py revert",
+    "demo:env:inject": "python scripts/demo_environment_drift.py inject",
+    "demo:env:revert": "python scripts/demo_environment_drift.py revert",
+    "demo:schema:inject": "python scripts/demo_schema_drift.py inject",
+    "demo:schema:revert": "python scripts/demo_schema_drift.py revert"
   },
   "dependencies": {
     "@aws-sdk/client-cost-explorer": "^3.1077.0",

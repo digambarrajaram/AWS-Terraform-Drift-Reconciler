@@ -13,7 +13,8 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import * as os from 'os';
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   CostExplorerClient,
   GetCostAndUsageCommand,
@@ -303,24 +304,6 @@ async function enrichWithTerraformCode(resources: ParsedTerraformState["resource
   console.log(`[aws] Loaded ${Object.keys(allBlocks).length} HCL resource blocks from ${Object.keys(tfFiles).length} .tf files`);
 }
 
-export async function writeTerraformState(state: Record<string, any>): Promise<boolean> {
-  const s3 = getS3();
-  if (!s3) return false;
-  const bucket = getStateBucket();
-
-  try {
-    await s3.send(new PutObjectCommand({
-      Bucket: bucket,
-      Key: getStateKey(),
-      Body: JSON.stringify(state, null, 2),
-      ContentType: "application/json",
-    }));
-    return true;
-  } catch (err: any) {
-    console.log(`[aws] Could not write state: ${err.message}`);
-    return false;
-  }
-}
 
 function mapTerraformTypeToService(type: string): string {
   if (type.includes("s3") || type.includes("bucket")) return "S3";
@@ -384,170 +367,144 @@ export async function terraformPlanDrift(tfDir?: string): Promise<PlanDriftOutco
     const dir = tfDir || process.env.TERRAFORM_DIR || './terraform/ec2';
     let settled = false;
 
-    const child = execFile(findTerraform(), ['plan', '-json', '-detailed-exitcode', '-no-color'],
+    // Write plan binary to temp file, then read structured JSON from it.
+    // The streaming -json format does NOT include before/after values in
+    // resource_drift or planned_change events — only the structured output
+    // from "terraform show -json <planfile>" carries the actual state diffs.
+    const planFile = path.join(os.tmpdir(), `tfplan-${Date.now()}`);
+    const tfPath = findTerraform();
+
+    const child = execFile(tfPath,
+      ['plan', `-out=${planFile}`, '-detailed-exitcode', '-no-color'],
       { cwd: dir, maxBuffer: 10 * 1024 * 1024, timeout: 120000 },
-      (execErr, stdout, stderr) => {
+      (execErr, _stdout, stderr) => {
         if (settled) return;
         settled = true;
 
-        const exitCode: number | null = execErr ? ((execErr as any).code ?? null) : 0;
+        const planExitCode: number | null = execErr ? ((execErr as any).code ?? null) : 0;
 
-        // ── Exit code 1: terraform error (credentials, missing plugins, state locked, etc.) ──
-        if (exitCode === 1 || exitCode === null) {
+        // ── Exit code 1: terraform error ──
+        if (planExitCode === 1 || planExitCode === null) {
           const errorMsg = stderr?.slice(0, 500) || execErr?.message || 'Unknown terraform error';
-          console.error(`[aws] terraform plan FAILED (exit=${exitCode}): ${errorMsg}`);
-          resolve({ results: [], exitCode, error: errorMsg, stderr: stderr || '' });
+          console.error(`[aws] terraform plan FAILED (exit=${planExitCode}): ${errorMsg}`);
+          cleanupPlanFile(planFile);
+          resolve({ results: [], exitCode: planExitCode, error: errorMsg, stderr: stderr || '' });
           return;
         }
 
-        // Parse plan JSON — handles both planned changes and drift events.
-        // Terraform JSON streaming output uses these event types:
-        //   "resource_drift"   — infra differs from state (real drift)
-        //   "planned_change"   — config change would be applied
-        //   "resource_changes" — legacy array in older terraform versions
-        //
-        // resource_drift is real drift: terraform detected the actual AWS
-        // resource differs from what's recorded in the state file. The plan
-        // may still show 0 planned changes — that just means config alone
-        // can't revert it (e.g. SG rules managed via separate resources).
-        try {
-          const results: PlanDriftResult[] = [];
-          const driftByAddress = new Map<string, PlanDriftResult>();
-          const changeAddresses = new Set<string>();
-          const confirmedChangeByAddress = new Map<string, {
-            desiredState: Record<string, any>;
-            actualState: Record<string, any>;
-            changedFields: { field: string; expected: any; actual: any }[];
-          }>();
-          const seenAddresses = new Set<string>();
-          const lines = stdout.split('\n').filter(l => l.trim());
-          const rawEvents: any[] = [];
+        // Run terraform show -json <planFile> to get structured output with real before/after
+        execFile(tfPath, ['show', '-json', planFile],
+          { maxBuffer: 50 * 1024 * 1024, timeout: 30000 },
+          (showErr, showStdout, showStderr) => {
+            cleanupPlanFile(planFile);
 
-          for (const line of lines) {
+            if (showErr) {
+              console.error(`[aws] terraform show FAILED: ${showErr.message}`);
+              resolve({ results: [], exitCode: planExitCode, error: `terraform show failed: ${showErr.message}` });
+              return;
+            }
+
             try {
-              const entry = JSON.parse(line);
-              rawEvents.push(entry);
+              const plan: any = JSON.parse(showStdout);
 
-              if (entry['@level'] === 'error') {
-                console.error(`[aws] terraform plan diagnostic: ${entry.diagnostic?.summary || line.slice(0, 200)}`);
-                continue;
-              }
+              // ── DEBUG: dump raw plan to fixed path for investigation ──
+              const debugPath = path.join(os.tmpdir(), 'drift-plan-debug.json');
+              try { fs.writeFileSync(debugPath, showStdout, 'utf-8'); console.log(`[aws][debug] raw plan dumped to ${debugPath}`); } catch {}
 
-              // ── Terraform ≥1.5: resource_drift events ──────────
-              if (entry.type === 'resource_drift' && entry.change) {
-                const rc = entry.change.resource || {};
-                const addr = rc.addr || '';
-                const rtype = rc.resource_type || rc.type || '';
-                const rname = rc.resource_name || rc.name || addr.split('.').pop() || '';
-                const action = entry.change.action;
-
-                if (action && action !== 'no-op') {
-                  const before = entry.change.before || {};
-                  const after  = entry.change.after  || {};
-                  driftByAddress.set(addr, {
-                    address: addr,
-                    type: rtype,
-                    name: rname,
-                    actions: [action],
-                    desiredState: before,
-                    actualState: after,
-                    changedFields: extractChangedFields(before, after),
-                  });
+              // ── DEBUG: log ec2_from_bastion in raw resource_changes ──
+              for (const rc of (plan.resource_changes || [])) {
+                if ((rc.address || '').includes('ec2_from_bastion')) {
+                  console.log(`[aws][debug] RAW resource_changes ec2_from_bastion:`, JSON.stringify({ address: rc.address, type: rc.type, actions: rc.change?.actions, before: rc.change?.before, after: rc.change?.after }, null, 2));
                 }
-                continue;
               }
-
-              // ── Terraform ≥1.5: planned_change events ──────────
-              if (entry.type === 'planned_change' && entry.change) {
-                const rc = entry.change.resource || {};
-                const addr = rc.addr || '';
-                const rtype = rc.resource_type || rc.type || '';
-                const rname = rc.resource_name || rc.name || addr.split('.').pop() || '';
-                const actions = entry.change.action ? [entry.change.action] : [];
-                if (actions.length === 0 || actions.includes('no-op')) continue;
-                changeAddresses.add(addr);
-                const desiredState = entry.change.after || {};
-                const actualState = entry.change.before || {};
-                const changedFields = extractChangedFields(entry.change.before || {}, entry.change.after || {});
-                confirmedChangeByAddress.set(addr, { desiredState, actualState, changedFields });
-                if (!seenAddresses.has(addr)) {
-                  seenAddresses.add(addr);
-                  results.push({
-                    address: addr, type: rtype, name: rname, actions,
-                    desiredState,
-                    actualState,
-                    changedFields,
-                  });
+              // ── DEBUG: log ec2_from_bastion in raw resource_drift ──
+              for (const rd of (plan.resource_drift || [])) {
+                if ((rd.address || '').includes('ec2_from_bastion')) {
+                  console.log(`[aws][debug] RAW resource_drift ec2_from_bastion:`, JSON.stringify({ address: rd.address, type: rd.type, actions: rd.change?.actions, before: rd.change?.before, after: rd.change?.after }, null, 2));
                 }
-                continue;
               }
 
-              // ── Legacy: resource_changes array ──────────────────
-              const changes = entry.resource_changes || [];
-              for (const rc of changes) {
-                const actions = rc.change?.actions || [];
+              const results: PlanDriftResult[] = [];
+              const seenAddresses = new Set<string>();
+
+              // ── Process resource_changes (structured output) ──────────
+              // before = current actual state, after = desired config state
+              const changeByAddress = new Map<string, {
+                desiredState: Record<string, any>;
+                actualState: Record<string, any>;
+                changedFields: { field: string; expected: any; actual: any }[];
+              }>();
+              for (const rc of (plan.resource_changes || [])) {
+                const actions: string[] = rc.change?.actions || [];
                 if (actions.length === 0 || actions.includes('no-op')) continue;
-                const addr = rc.address || '';
-                const rtype = rc.type || '';
-                const rname = rc.name || addr.split('.').pop() || '';
-                changeAddresses.add(addr);
+                const addr: string = rc.address || '';
+                const rtype: string = rc.type || '';
+                const rname: string = rc.name || addr.split('.').pop() || '';
                 const desiredState = rc.change?.after || {};
                 const actualState = rc.change?.before || {};
+                // ponytail: desired (after) = expected, live (before) = actual
                 const changedFields = (rc.change?.after_unknown || []).length > 0
                   ? [{ field: '_after_unknown', expected: 'known', actual: 'computed' }]
-                  : extractChangedFields(rc.change?.before || {}, rc.change?.after || {});
-                confirmedChangeByAddress.set(addr, { desiredState, actualState, changedFields });
-                if (!seenAddresses.has(addr)) {
-                  seenAddresses.add(addr);
-                  results.push({
-                    address: addr, type: rtype, name: rname, actions,
-                    desiredState,
-                    actualState,
-                    changedFields,
-                  });
+                  : extractChangedFields(rc.change?.after || {}, rc.change?.before || {});
+                // ── DEBUG ──
+                if (addr.includes('ec2_from_bastion')) {
+                  console.log(`[aws][debug] PROCESSED resource_changes ec2_from_bastion: desiredState.to_port=${desiredState?.to_port}, actualState.to_port=${actualState?.to_port}, changedFields=`, JSON.stringify(changedFields));
                 }
-              }
-            } catch { /* skip non-JSON lines */ }
-          }
-
-          // Correlate resource_drift events with change events by exact address.
-          // Only trust a drift entry when the same resource address also appears in
-          // the plan's change stream with a non-no-op action. When it does, prefer
-          // the explicit before/after values from the confirmed change event.
-          for (const [addr, driftResult] of driftByAddress) {
-            if (changeAddresses.has(addr) && !seenAddresses.has(addr)) {
-              const confirmed = confirmedChangeByAddress.get(addr);
-              if (confirmed) {
+                changeByAddress.set(addr, { desiredState, actualState, changedFields });
+                seenAddresses.add(addr);
                 results.push({
-                  ...driftResult,
-                  desiredState: confirmed.desiredState,
-                  actualState: confirmed.actualState,
-                  changedFields: confirmed.changedFields,
+                  address: addr, type: rtype, name: rname, actions,
+                  desiredState, actualState, changedFields,
                 });
-              } else {
-                results.push(driftResult);
               }
+
+              // ── Process resource_drift (structured output) ───────────
+              // before = state-file value (desired), after = live AWS value (actual)
+              for (const rd of (plan.resource_drift || [])) {
+                const actions: string[] = rd.change?.actions || [];
+                if (actions.length === 0 || actions.includes('no-op')) continue;
+                const addr: string = rd.address || '';
+                // ── DEBUG ──
+                if (addr.includes('ec2_from_bastion')) {
+                  console.log(`[aws][debug] PROCESSING resource_drift ec2_from_bastion: seenAddresses.has=${seenAddresses.has(addr)}, before.to_port=${rd.change?.before?.to_port}, after.to_port=${rd.change?.after?.to_port}`);
+                }
+                if (seenAddresses.has(addr)) continue;
+                const rtype: string = rd.type || '';
+                const rname: string = rd.name || addr.split('.').pop() || '';
+                const before = rd.change?.before || {};  // state-file (desired)
+                const after  = rd.change?.after  || {};  // live AWS (actual)
+                const changedFields = extractChangedFields(before, after);
+                // ── DEBUG ──
+                if (addr.includes('ec2_from_bastion')) {
+                  console.log(`[aws][debug] PROCESSED resource_drift ec2_from_bastion: desiredState.to_port=${before?.to_port}, actualState.to_port=${after?.to_port}, changedFields=`, JSON.stringify(changedFields));
+                }
+                seenAddresses.add(addr);
+                results.push({
+                  address: addr, type: rtype, name: rname, actions,
+                  desiredState: before,    // state-file = desired
+                  actualState: after,      // live AWS = actual
+                  changedFields,
+                });
+              }
+
+              // Dump structured plan for debugging
+              const ts = new Date().toISOString().replace(/[:.]/g, '-');
+              const dumpPath = path.join(os.tmpdir(), `plan-events-${ts}.json`);
+              try {
+                fs.mkdirSync(path.dirname(dumpPath), { recursive: true });
+                fs.writeFileSync(dumpPath, showStdout, 'utf-8');
+                console.log(`[aws] plan events dumped to ${dumpPath}; resource_changes=${plan.resource_changes?.length || 0}, resource_drift=${plan.resource_drift?.length || 0}`);
+              } catch (writeErr: any) {
+                console.error(`[aws] failed to write plan events: ${writeErr.message}`);
+              }
+
+              console.log(`[aws] terraform plan exit=${planExitCode}, drift=${results.length} resources`);
+              resolve({ results, exitCode: planExitCode });
+            } catch (e: any) {
+              console.error(`[aws] Failed to parse terraform show output: ${e.message}`);
+              resolve({ results: [], exitCode: planExitCode, error: `Parse error: ${e.message}` });
             }
-          }
-
-          // Dump raw events for debugging
-          const rawDriftCount = rawEvents.filter(e => e.type === 'resource_drift').length;
-          const driftActionCount = rawEvents.filter(e => e.type === 'resource_drift' && e.change?.action && e.change.action !== 'no-op').length;
-          const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const outPath = `/tmp/plan-events-${ts}.json`;
-          try {
-            fs.writeFileSync(outPath, JSON.stringify(rawEvents, null, 2), 'utf-8');
-            console.log(`[aws] plan events dumped to ${outPath}; raw resource_drift events = ${rawDriftCount}, after action filter = ${driftActionCount}`);
-          } catch (writeErr: any) {
-            console.error(`[aws] failed to write plan events: ${writeErr.message}`);
-          }
-
-          console.log(`[aws] terraform plan exit=${exitCode}, drift=${results.length} resources`);
-          resolve({ results, exitCode });
-        } catch (e: any) {
-          console.error(`[aws] Failed to parse terraform plan output: ${e.message}`);
-          resolve({ results: [], exitCode, error: `Parse error: ${e.message}` });
-        }
+          });
       });
 
     // Timeout guard

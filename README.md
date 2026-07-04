@@ -150,30 +150,4 @@ Security & operational guidance
 
 ---
 
-## Drift coverage guardrails
-
-The repository now includes automated drift guardrails for the previously uncovered or partially covered categories:
-
-- Infrastructure drift: `node scripts/check-infra-drift.mjs`
-- Operational drift: `node scripts/check-operational-drift.mjs`
-- Configuration drift: `node scripts/check-config-drift.mjs`
-- Application drift: `node scripts/check-application-drift.mjs`
-- Environment drift: `node scripts/check-environment-drift.mjs`
-- Schema drift: `node scripts/check-schema-drift.mjs`
-
-These checks run in CI via [.github/workflows/drift-coverage.yml](.github/workflows/drift-coverage.yml) and can also be executed locally. When a check fails, the workflow emits an alert through PagerDuty or a configured webhook and exits non-zero so the pipeline blocks until the issue is reviewed.
-
-### Responding to drift alerts
-
-1. Review the failing check output and the attached drift details.
-2. Confirm whether the finding is expected (for example, a planned maintenance event) or a real divergence.
-3. If the issue is real, correct the underlying source of truth in Terraform, configuration, or deployment metadata.
-4. Re-run the relevant guardrail locally and re-open or re-run the workflow.
-5. If remediation requires infrastructure changes, apply them through the existing Terraform/CI/CD process rather than changing live resources manually.
-
-If you want, I can:
-- Add optional server-side `terraform validate --json` for proposed fixes (requires Terraform binary and test harness).
-- Wire in Checkov CLI for policy scanning and attach its output to PRs.
-- Persist full `systemState` to DynamoDB so state survives restarts (requires schema and migration).
-
 *** End of README ***

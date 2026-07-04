@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { env } from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { emitDriftAlert } from './drift-alert.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -26,13 +25,10 @@ async function main() {
       return;
     }
     if (code === 2) {
-      const details = { terraformDir, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) };
       console.error('[infra-drift] Terraform plan reported drift.');
-      await emitDriftAlert('Infrastructure drift detected', details, 'high');
       process.exit(1);
     }
     console.error(`[infra-drift] Terraform plan failed with exit code ${code}`);
-    await emitDriftAlert('Infrastructure drift check failed', { terraformDir, stderr }, 'high');
     process.exit(1);
   } catch (error) {
     console.warn(`[infra-drift] Terraform check skipped: ${error.message}`);

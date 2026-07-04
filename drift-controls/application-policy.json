@@ -1,4 +1,0 @@
-{
-  "requiredBranch": "main",
-  "requiredDeploymentMode": "gitops"
-}

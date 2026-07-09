@@ -1,354 +1,153 @@
-# AWS Terraform Drift Reconciler — Simulation
+# AWS Terraform Drift Reconciler
 
-> **An in-memory simulation of an AI-powered IaC drift detection and auto-remediation pipeline.**
->
-> Detects configuration drift, classifies risk, generates illustrative HCL diffs, and manages simulated pull requests — all through a Human-in-the-Loop approval gate.
+A pragmatic tool that detects drift between Terraform desired state and live AWS resources, proposes HCL reconciliation suggestions, and opens GitHub pull requests with the proposed changes.
 
----
+This repository contains a demo-quality server, a small Python analysis agent, and a React UI for reviewing proposed reconciliations. The project mixes real integrations (when configured via environment variables) with an in-memory simulation layer for demos.
 
-## What this is
-
-This is a **full-stack demo** that simulates the complete lifecycle of infrastructure drift detection and remediation. Every component runs in-memory — no real AWS, no real Terraform, no real GitHub. It is designed to demonstrate the user experience, pipeline flow, and code architecture of such a system.
-
-**Real:** the React dashboard, the Express API, the Python drift-analysis agent, the TypeScript types, and the approval-gate logic.
-
-**Simulated:** AWS resources, `terraform plan` execution, GitHub PRs, Checkov scans, Slack/Email/PagerDuty alerting, DynamoDB persistence.
+Key design principle: this tool detects and proposes — it does NOT execute remediation on your infrastructure. Merging a PR created by this tool updates the reconciliation record and may mark a resource reconciled in the app's in-memory state, but it does not run `terraform apply`. Apply changes through your CI/CD pipeline (GitHub Actions, etc.).
 
 ---
 
-## Architecture
+What's real vs. recommendation-only
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    React SPA (Vite + Tailwind)              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐ │
-│  │ Resources│ │   PRs    │ │ Timeline │ │ Alerts + HITL │ │
-│  │   Tab    │ │   Tab    │ │   Tab    │ │     Tab       │ │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───────┬───────┘ │
-└───────┼────────────┼────────────┼────────────────┼─────────┘
-        │            │            │                │
-   GET/POST /api/*   │            │                │
-        │            │            │                │
-┌───────┴────────────┴────────────┴────────────────┴─────────┐
-│                 Express Server (server.ts)                  │
-│  ┌──────────┐ ┌──────────────┐ ┌────────────────────────┐  │
-│  │ In-Memory│ │  API Routes  │ │ Python Agent Bridge    │  │
-│  │  State   │ │ /api/state   │ │ spawn → agent.py       │  │
-│  │ (no DB)  │ │ /api/scan    │ │ stdin/stdout JSON      │  │
-│  │          │ │ /api/analyze │ │ timeout 10s            │  │
-│  │          │ │ /api/merge-pr│ └────────────────────────┘  │
-│  │          │ │ /api/reset   │                              │
-│  │          │ │ /api/demo/*  │                              │
-│  └──────────┘ └──────────────┘                              │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ spawn + JSON over stdin/stdout
-┌──────────────────────────────┴──────────────────────────────┐
-│                  Python Agent (agent.py)                     │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐  │
-│  │Classify  │→│ Security │→│  Cost    │→│   HCL Recon   │  │
-│  │  Node    │ │ Analysis │ │  Est.    │ │  (difflib)    │  │
-│  └──────────┘ └──────────┘ └──────────┘ └──────┬────────┘  │
-│                                                 │           │
-│                                          ┌──────┴────────┐  │
-│                                          │ Policy Scan   │  │
-│                                          │ (simulated)   │  │
-│                                          └───────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+- Real (when corresponding env vars are provided and configured):
+  - Terraform plan drift detection: the server can call `terraform plan -json` (via `terraformPlanDrift`) and use the plan output to detect changes.
+  - Terraform state storage in S3: state is read from S3 via `readTerraformState()` (S3 client).
+  - GitHub PR creation & branch updates: uses Octokit when `GITHUB_TOKEN` is set to create/update branches and open pull requests.
+  - PagerDuty alerts: when `PAGERDUTY_ROUTING_KEY` is configured, alerts are posted via the PagerDuty integration.
+  - Audit persistence: audit records are written to DynamoDB (best-effort) when AWS credentials are provided. Table naming uses the configured TF resource/project prefix and environment (see env vars).
 
-### Data flow for one drift cycle
-
-```
-1. Button click → POST /api/drift  (mutates in-memory actualState)
-2. Button click → POST /api/scan   (recursive deep-diff desired vs actual)
-3. Button click → POST /api/analyze
-   ├─ spawn python3 agent.py, pipe resource JSON to stdin
-   ├─ agent runs 5-node pipeline (classify → audit → cost → HCL → scan)
-   ├─ agent prints result JSON to stdout
-   └─ server wraps result into an in-memory PullRequest
-4. Review PR in UI → approve if high-risk → POST /api/merge-pr
-   └─ actualState ← deep-clone of desiredState (resource restored)
-```
-
-### Directory structure
-
-```
-.
-├── server.ts              # Express API server + in-memory state store
-├── agent.py               # Python drift-analysis agent (5-step pipeline)
-├── package.json           # Dependencies and scripts
-├── tsconfig.json          # TypeScript strict-mode config
-├── vite.config.ts         # Vite bundler config
-├── index.html             # SPA entry point
-├── .env.example           # Environment variable template
-├── README.md
-├── metadata.json          # AI Studio metadata
-└── src/
-    ├── main.tsx           # React entry point
-    ├── App.tsx            # Main dashboard component (tabs, state, handlers)
-    ├── types.ts           # Shared TypeScript interfaces
-    ├── index.css          # Tailwind imports + custom theme
-    └── components/
-        ├── Header.tsx              # Top bar (scan/reset buttons, status)
-        └── AlertsAndApproval.tsx   # Alert config + HITL flow + simulation
-```
+- Heuristic / recommendation-only (informational; do not assume enforcement):
+  - HCL fix suggestions: the Python agent generates illustrative HCL diffs (via difflib) as proposed reconciliations. These are recommendations only and have not been validated by `terraform validate` or `terraform plan` in the target environment.
+  - Policy checks: policy and security checks are heuristic keyword-based matches (policy IDs are labeled as heuristic and include a `source` field). They are useful guidance but not a substitute for a real policy scanner (e.g., Checkov) configured in CI.
 
 ---
 
-## Quick Start
+Quick architecture overview
 
-### Prerequisites
+- Frontend: React + Vite SPA (`src/`) — shows resources, PRs, timeline, and approval flow.
+- Backend: Express server (`server.ts`) — in-memory `systemState` that drives the UI, spawns the Python agent for analysis, creates PRs via GitHub integration, and writes audit records to DynamoDB when configured.
+- Agent: Python agent (`agent.py` / `agent_nova.py`) — 5-node pipeline: classification → security analysis → cost estimate → HCL reconciliation (diff) → policy scan (heuristic). The agent outputs a `DriftAnalysis` JSON object.
+- AWS integration layer: `src/integrations/aws.ts` — reads Terraform state from S3, describes live resources (EC2), writes audit records to DynamoDB, and exposes cost/STS helpers.
+- GitHub integration: `src/integrations/github.ts` — uses Octokit when `GITHUB_TOKEN` is set; falls back to a simulated PR response otherwise.
 
-| Tool | Version | Check |
-|------|---------|-------|
-| Node.js | ≥ 18 | `node --version` |
-| npm | ≥ 9 | `npm --version` |
-| Python | ≥ 3.9 | `python3 --version` |
-
-### Setup
-
-```bash
-# 1. Clone and enter the project
-git clone <repo-url>
-cd aws-terraform-drift-reconciler
-
-# 2. Install dependencies
-npm install
-
-# 3. (Optional) Copy the env template
-cp .env.example .env
-
-# 4. Start the dev server
-npm run dev
-```
-
-Open **http://localhost:3000** in your browser.
-
-### Environment variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PORT` | `3000` | Server listen port |
-| `NODE_ENV` | `development` | Set to `production` to serve built assets |
-| `DEMO_SCAN_DELAY_MS` | `400` | Artificial delay on scan (ms) — set lower for faster demos |
-| `DEMO_TOKEN` | _(empty)_ | If set, `POST /api/reset`, `/api/merge-pr`, and `/api/demo/*` require header `X-Demo-Token: <value>` |
-| `GEMINI_API_KEY` | _(unused)_ | Previously used for LLM calls; now the agent is deterministic |
+Important safety note: the server does not run `terraform apply`. The produced PRs are intended to be reviewed and applied by your CI/CD pipeline.
 
 ---
 
-## Demo Walkthrough
+Environment variables (summary)
 
-A complete demo cycle takes ~30 seconds:
+Configure these in your environment or an env file. Values marked mandatory depend on whether you want the integration to be "real" (versus simulated):
 
-### 1. Reset & inject drift
-Click **"Reset & Re-Drift Demo"** in the Resources tab sidebar. This resets all state and applies all 4 preset drift scenarios simultaneously:
-- **S3 bucket**: ACL changed to `public-read`, public access blocks disabled, encryption off
-- **Security group**: SSH port 22 opened to `0.0.0.0/0`
-- **IAM role**: `AdministratorAccess` policy attached
-- **RDS instance**: `publicly_accessible = true`, storage encryption off
+- `PORT` — (default: `3000`) server listen port.
+- `NODE_ENV` — (`development` | `production`).
+- `ENVIRONMENT` — (`demo` | `staging` | `production`). Default: `production`.
 
-### 2. Scan
-Click **"Scan Env"** in the header. The server runs a recursive deep-diff between `desiredState` and `actualState` for every resource. Results appear in the CLI console panel. All 4 resources should show as **DRIFTED**.
+AWS & Terraform state
 
-### 3. Review a resource
-Click any resource in the left panel. The right panel shows:
-- **Live State Editor** — edit the actual JSON directly for custom drift scenarios
-- **Desired vs Actual** side-by-side diff
-- **Desired Terraform (HCL)** — the reference configuration
+- `AWS_ACCESS_KEY_ID` — AWS credential (optional; required for real S3/DynamoDB/EC2 calls).
+- `AWS_SECRET_ACCESS_KEY` — AWS secret.
+- `AWS_REGION` — AWS region (default `us-east-1`).
+- `TF_STATE_BUCKET` — S3 bucket containing Terraform state. Example: `my-project-state-123456789012`.
+- `TF_STATE_KEY` — Key path to terraform state file in the bucket. Example: `ec2/terraform.tfstate`.
+- `TF_RESOURCE_PREFIX` or `TF_PROJECT_NAME` — Project prefix used to construct DynamoDB audit table name and lock table names. If neither provided, a fallback prefix is used.
+- `SCAN_HEARTBEAT_MS` — Milliseconds between scan heartbeats for scheduler health checks; defaults to `3600000` (1h).
+- `TERRAFORM_DIR` — Local Terraform working directory used by `terraform plan`; defaults to `./terraform/ec2`.
+- `TERRAFORM_PATH` — Explicit path to the Terraform binary if it is not on PATH; if unset the server searches common locations and then uses `terraform`.
 
-### 4. Run the agent
-Click **"Run Agent Reconciliation"** on a drifted resource. The Python agent:
-1. **Classifies** risk via keyword matching (field names + values → `high_risk_change` / `moderate_risk_change` / `low_risk_change`)
-2. **Audits** security impact based on resource type (S3, SG, IAM, RDS)
-3. **Estimates** cost/compliance overhead
-4. **Generates** an illustrative HCL diff using Python's `difflib`
-5. **Checks** simulated policy rules (Checkov-style pass/fail)
+GitHub
 
-The UI shows an animated 5-step progress indicator synced to agent completion.
+- `GITHUB_TOKEN` — Personal access token for Octokit. If missing, PR creation is simulated.
+- `GITHUB_REPO` — `owner/repo` used to create reconciliation branches and PRs.
+- `GITHUB_BRANCH` — Base branch for reconciliation PRs (e.g., `main` or `drift`).
 
-### 5. Review the PR
-The app switches to the **PRs** tab. Review:
-- **Reconciliation Report** — explanation, security impact, cost impact
-- **Agent Audit Trace** — per-node output from the pipeline
-- **Simulated Policy Checks** — illustrative pass/fail results
-- **Proposed HCL Diff** — side-by-side unified diff
+PagerDuty
 
-### 6. Approve and merge
-- **Low/Moderate risk**: Click **"Merge Pull Request"** to reconcile immediately
-- **High risk / Critical / IAM**: The server requires an approval. The merge button prompts for an operator name which is sent as `{ approvedBy: "name" }`. Without it, the API returns **403**.
+- `PAGERDUTY_ROUTING_KEY` — Routing key for PagerDuty Events API (optional). If missing, alerts log to console.
 
-After merge, the resource's `actualState` is restored to match `desiredState`, the drift is cleared, and the timeline records the event.
+Audit & DynamoDB
 
-### 7. Reset
-Click **"Reset"** to return all resources to compliant state (preserves alert configuration).
+- DynamoDB table naming convention (used by the app): `{TF_RESOURCE_PREFIX || TF_PROJECT_NAME || 'aws-terraform-drift-reconciler'}-{ENVIRONMENT}-drift-audit`.
+  - The app writes audit records via `writeAuditRecord(...)`; these writes are best-effort (fire-and-forget) and only performed when AWS credentials are available.
+  - A bootstrap/locks DynamoDB table may also be used by your Terraform backend; the repo's terraform bootstrap step documents lock table creation.
+
+Other
+
+- `AGENT_MODE` — `deterministic` (keyword-driven agent) or `nova` (future/LLM mode). Default: `deterministic`.
+
+- `API_ACCESS_TOKEN` — If set, destructive endpoints (`/api/reset`, `/api/merge-pr`) require header `X-Api-Access-Token: <value>`. This token is an access control guard for the server and should be managed like any other service credential.
 
 ---
 
-## API Reference
+API overview
 
-All endpoints return JSON. The state store is **not persistent** — server restart wipes everything.
+All endpoints return JSON. The server maintains an in-memory `systemState` that drives the UI; a server restart clears that in-memory state. Audit records are written to DynamoDB when available.
 
-### `GET /api/state`
-Returns the full system state. Credential fields (`slackWebhook`, `pagerDutyKey`) are masked with `••••`.
+Key endpoints
 
-### `POST /api/scan`
-Runs deep-diff on all resources. Returns updated state.
-- **409** if a scan is already in progress.
-- Artificial delay controlled by `DEMO_SCAN_DELAY_MS` (default 400ms).
+- `GET /api/state` — Returns masked application state (resources, PRs, timeline). Sensitive fields are masked.
+- `POST /api/scan` — Run a drift scan. The server attempts `terraform plan -json`, falls back to AWS describe calls and then runs a deep-diff on configured resources. Runs immediately (no artificial demo delays).
+- `GET /health` — Basic service health check. Returns `{ status: 'ok', uptime: ... }`.
+- `GET /ready` — Readiness check for AWS, S3, GitHub, and PagerDuty integrations.
+- `GET /metrics` — Export internal service metrics such as scan totals and PagerDuty alert counts.
+- `POST /api/analyze` — Invoke the Python agent to analyze a resource and propose an HCL fix. The agent output is wrapped into a Pull Request (simulated or real depending on GitHub config).
+- `POST /api/merge-pr` — Merge a PR. This is a destructive action and requires `{ approvedBy: "name" }` in the request body; the actor is recorded in the audit trail. Important: merging here updates the reconciliation record and can mark the resource reconciled in the app's in-memory state but does NOT execute `terraform apply` on your infrastructure.
+- `POST /api/merge-pr/reject` — Reject a PR with a reason; audited.
+- `POST /api/reset` — Reset all resources and timeline to initial state. Requires `{ requestedBy: "name" }` and is audited.
+- `POST /api/resource` — Register a custom tracked resource (name, type, terraformCode, desiredState).
+- `POST /api/alerts/config` — Toggle PagerDuty alerting on/off.
 
-### `POST /api/drift`
-Injects a preset drift scenario for a known resource.
-```json
-{ "resourceId": "s3_uploads" }
-```
-Known IDs: `s3_uploads`, `sg_web`, `role_lambda`, `rds_postgres`.
+Audit
 
-### `POST /api/drift/update`
-Applies a custom actual state to a resource. Validates that `updatedState` has the same keys and types as `desiredState`.
-```json
-{ "resourceId": "s3_uploads", "updatedState": { "acl": "public-read", ... } }
-```
-
-### `POST /api/analyze`
-Spawns the Python agent, pipes the resource as JSON to stdin, reads the analysis from stdout. Falls back to a generic TypeScript analysis if the agent fails.
-```json
-{ "resourceId": "s3_uploads" }
-```
-Returns `{ systemState, pr }`.
-
-### `POST /api/merge-pr`
-Merges a simulated PR. Requires `{ approvedBy: "name" }` for high-risk changes (classification `high_risk_change`, risk `Critical`, or IAM resource type).
-```json
-{ "prId": "pr_...", "approvedBy": "operator-name" }
-```
-- **403** if approval is required but missing.
-- **404** if PR not found.
-- **400** if PR already merged.
-
-### `POST /api/reset`
-Resets all resources, PRs, and timeline to initial state. Preserves alert config. Requires `X-Demo-Token` if `DEMO_TOKEN` is set.
-
-### `POST /api/demo/reset-and-redrift`
-Resets state then applies all 4 preset drifts. Requires `X-Demo-Token` if `DEMO_TOKEN` is set.
-
-### `POST /api/resource`
-Creates a custom tracked resource.
-```json
-{
-  "name": "my_queue",
-  "type": "aws_sqs_queue",
-  "service": "VPC",
-  "terraformCode": "resource \"aws_sqs_queue\" ...",
-  "desiredState": { "name": "...", ... }
-}
-```
-Valid services: `S3`, `VPC`, `IAM`, `RDS`.
-
-### `POST /api/alerts/config`
-Saves alerting configuration.
-```json
-{
-  "slackWebhook": "https://...",
-  "operatorEmail": "...",
-  "pagerDutyKey": "...",
-  "slackEnabled": true,
-  "emailEnabled": true,
-  "pagerDutyEnabled": false
-}
-```
-
-### `POST /api/alerts/test`
-Logs a simulated alert to the server console. Channel must be `slack`, `email`, or `pagerduty`.
-```json
-{ "resourceId": "s3_uploads", "channel": "slack" }
-```
+- The app records audit events (scan, pr_created, pr_merged, reset, etc.) in-memory and attempts to persist them to DynamoDB when AWS credentials are present.
+- DynamoDB audit table name follows the naming convention described above.
 
 ---
 
-## Agent Pipeline
+Agent semantics & guarantees
 
-The Python agent (`agent.py`) is the core analysis engine. It accepts a JSON resource on stdin and outputs a `DriftAnalysis` object on stdout.
-
-### Pipeline steps
-
-| Step | Function | Input | Output |
-|------|----------|-------|--------|
-| 1. Classify | `classification_node` | `drift_details[].field`, `.actual` | `classification`, `risk_score` |
-| 2. Security Audit | `security_analysis_node` | `name`, `type`, `drift_details` | `explanation`, `security_impact` |
-| 3. Cost Estimation | `cost_estimation_node` | `risk_score` | `cost_impact` |
-| 4. HCL Reconciliation | `hcl_reconciliation_node` | `terraform_code`, `drift_details` | `hcl_fix`, `hcl_diff`, `fixType` |
-| 5. Policy Scan | `security_scan_node` | `hcl_fix`, `name`, `type` | `checkov_checks[]`, `checkov_summary` |
-
-### Classification keywords
-
-| Risk Level | Classification | Field/value contains |
-|------------|---------------|---------------------|
-| **Critical** | `high_risk_change` | `public`, `acl`, `cidr`, `port_22`, `0.0.0.0`, `admin`, `all_traffic` |
-| **High** | `moderate_risk_change` | `encrypt`, `key`, `policy`, `password`, `tls`, `ssl`, `credentials` |
-| **Medium/Low** | `low_risk_change` | anything else with drift |
-
-The keyword lists are shared between `agent.py` and `server.ts` (`determineSeverity`). Both files have copies; keep them in sync.
-
-### HCL diff generation
-
-Uses Python's `difflib.unified_diff` to produce a standard unified diff between the original Terraform code and the proposed reconciliation. The `fixType: "illustrative_diff"` field signals that the output has not been validated by `terraform plan` or `terraform validate`.
-
-### Simulated policy checks
-
-The `security_scan_node` checks generated HCL against hardcoded rules (CKV_AWS_19, CKV_AWS_144, CKV_AWS_24, CKV_AWS_1, CKV_AWS_16, etc.). PASSED/FAILED is determined by substring matching against the HCL fix. These are illustrative — not real Checkov scans.
+- The Python agent produces a `DriftAnalysis` JSON object that includes classification, risk assessment, a proposed HCL diff (`hclFix`), a `fixType` set to `unapproved_recommendation`, and heuristic policy references.
+- Policy findings and IDs are heuristic and labeled accordingly (e.g., `source: "keyword_matching"`, IDs prefixed with `heuristic_`). Treat these as recommendations for human review or CI-based policy scanning.
+- The server intentionally does not set any `validationStatus` claiming that the agent's suggestion was validated. If you want authoritative validation, integrate `terraform validate --json` or a real policy scanner (Checkov) in your CI pipeline or ask to add server-side validation (requires Terraform binary and careful environment setup).
 
 ---
 
-## Scripts
+Developer notes
 
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start dev server with hot reload (tsx + Vite middleware) |
-| `npm run build` | Build frontend (vite) + bundle server (esbuild) |
-| `npm start` | Run the production build (`node dist/server.cjs`) |
-| `npm run lint` | TypeScript type check (`tsc --noEmit`) |
-| `npm run clean` | Remove build artifacts |
+- Local development
 
----
+  1. Install dependencies: `npm install`
+  2. Copy env template: `cp .env.example .env` and populate required variables for real integrations (AWS creds, GITHUB_TOKEN, etc.)
+  3. Start dev server: `npm run dev` (Vite + Node dev server)
 
-## Security
+Secrets and `.env`
 
-### In this demo
-- **Demo token**: Set `DEMO_TOKEN` in your environment to require `X-Demo-Token` header on destructive endpoints (`/api/reset`, `/api/merge-pr`, `/api/demo/*`).
-- **Rate limiting**: Mutation endpoints are rate-limited in-memory (10 req/min for reset, 20 req/min for merge).
-- **Credential masking**: `/api/state` masks `slackWebhook` and `pagerDutyKey` values.
-- **Input validation**: `/api/drift/update` validates state shape; `/api/resource` validates service type; JSON body size limited to 500KB.
-- **Security headers**: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` set on all responses.
-- **No outbound calls**: Alert integrations (`sendDriftAlertsOnDetection`) log to console only.
+- Keep only `.env.example` committed in the repository. Do NOT commit a live `.env` file containing secrets.
+- For local development, copy `.env.example` to `.env` and populate values. Add `.env` to your personal Git ignore if your system doesn't already ignore it.
+- After any accidental commit of secrets: rotate the secret immediately (revoke and reissue credentials), then follow the repository history purge instructions in `HISTORY_PURGE_INSTRUCTIONS.md` (this repository contains a prepared guide and scripts).
 
-### Before connecting to real infrastructure
-1. Replace `initialResources` with actual state pulled from an S3 backend or Terraform Cloud API.
-2. Replace `getDeepDiff` with `terraform plan -json` output parsing.
-3. Add DynamoDB for state persistence (the `SystemState` interface is already typed).
-4. Add GitHub App installation + API client for real PR creation.
-5. Wire alert integrations to actually POST to Slack/Email/PagerDuty.
-6. Run generated HCL through `terraform validate` before surfacing it.
-7. Add authentication (OAuth/OIDC) — the demo token is not production auth.
-8. Rotate all placeholder credentials in `alertConfig`.
+If you operate shared CI/CD or deploy pipelines, move sensitive values to a secrets manager (AWS Secrets Manager, GitHub Actions Secrets, or your CI provider) and reference them via the provider's secure mechanism rather than storing them in files.
+
+- Running the Python agent
+
+  The agent runs as a subprocess. To test locally you can run `python3 agent.py` and pipe a resource JSON on stdin; the agent emits a `DriftAnalysis` object to stdout.
+
+- Making integrations real
+
+  - To enable real S3/DynamoDB/EC2 runs, set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION`.
+  - Provide `TF_STATE_BUCKET` and `TF_STATE_KEY` pointing to your Terraform state file in S3.
+  - To persist audit logs, ensure a DynamoDB table named `${prefix}-${env}-drift-audit` exists and the provided AWS credentials can write to it.
+  - To enable real PR creation, set `GITHUB_TOKEN` and `GITHUB_REPO`.
+  - To send real alerts, set `PAGERDUTY_ROUTING_KEY`.
 
 ---
 
-## Extending
+Security & operational guidance
 
-### Adding a new resource type
+- This tool is intended to assist operators by detecting drift and proposing fixes. It is not an automatic remediation engine. Treat PRs generated by this tool as proposals that must be validated and applied by your existing CI/CD and change control workflows.
+- Do not store long-lived credentials in the app's in-memory state or in client-side responses. The server masks credential-like fields in `/api/state` responses.
+- If you require the server to perform authoritative validation of HCL fixes before creating PRs, we can add `terraform validate --json` and/or Checkov CLI invocation — note this requires the Terraform binary in the server environment and care around module resolution and backend config.
 
-1. **server.ts** — add a preset drift payload in `initialResources` and in `/api/drift` and `/api/demo/reset-and-redrift`.
-2. **agent.py** — add a branch in `security_analysis_node` for the new type's explanation text.
-3. **agent.py** — add Checkov rules in `security_scan_node` for the new type.
-4. **src/types.ts** — add the service to the `service` union type if needed.
+---
 
-### Connecting real AWS
-
-The `getDeepDiff` function in server.ts is the integration point. Replace it with a function that:
-1. Fetches desired state from your Terraform state backend (S3, Terraform Cloud, etc.)
-2. Fetches actual state via AWS SDK (`aws-sdk` or `@aws-sdk/client-*`)
-3. Returns the diff in the existing `{ field, expected, actual, severity }[]` format
-
-### Connecting a real LLM
-
-The agent's `classification_node` and `security_analysis_node` have comment placeholders where Gemini calls previously lived. Re-add `urllib` or the Google GenAI SDK calls at those points. The pipeline structure (5 sequential nodes) is already in place.
+*** End of README ***

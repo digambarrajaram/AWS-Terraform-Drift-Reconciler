@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+build/
+dist/
+/dist
+
+# Coverage & testing
+coverage/
+
+# Environment & secrets (regenerate from .env.example)
+.env*
+!.env.example
+
+# OS & IDE
+.DS_Store
+.aider*
+
+# Logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Terraform state backups (local; remote state is in S3)
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+
+# Drift reports
+drift_reconciliation_report_*.md
+
+
+Set-Content .gitignore @'
+# Ignore environment variables and credentials
+.env
+*.env
+
+# Ignore compiled python files
+**/__pycache__/
+*.pyc
+
+# Ignore python virtual environments
+test/Include/
+test/Lib/
+test/Scripts/
+test/pyvenv.cfg
+
+# Ignore ALL local terraform hidden directories and lock files everywhere
+**/.terraform/
+**/.terraform.lock.hcl
+
+# Ignore ALL local terraform state files everywhere
+**/*.tfstate
+**/*.tfstate.*
+**/tfplan
+**/plan.json
+'@

@@ -11,7 +11,8 @@ isn't present in this Terraform version's output.
 
 import json
 import sys
-
+import glob, re
+import os
 
 def load_plan(path):
     # Read raw bytes first, then detect encoding — PowerShell's `>` redirect
@@ -69,7 +70,7 @@ def get_prior_state_addresses(plan):
     return addresses
 
 
-def report_drift(plan) -> dict:
+def report_drift(plan, tf_dir: str) -> dict:
     drift_entries = plan.get("resource_drift")
     used_fallback = drift_entries is None
 
@@ -104,15 +105,27 @@ def report_drift(plan) -> dict:
             security_impact = "high"
         elif changes_dict:
             security_impact = "low"
-
+        file_index = build_resource_file_index(tf_dir)
         resources.append({
             "address": entry.get("address"),
             "changes": changes_dict,
             "sensitive": False,
             "security_impact": security_impact,
+            "file_path": file_index.get(entry.get("address")),
         })
+        return {"report_type": "drift", "resources": resources}
 
-    return {"report_type": "drift", "resources": resources}
+
+def build_resource_file_index(tf_dir: str) -> dict:
+    index = {}
+    pattern = re.compile(r'resource\s+"([^"]+)"\s+"([^"]+)"')
+    for filepath in glob.glob(f"{tf_dir}/**/*.tf", recursive=True):
+        with open(filepath, encoding="utf-8") as f:
+            content = f.read()
+        for m in pattern.finditer(content):
+            index[f"{m.group(1)}.{m.group(2)}"] = filepath
+    return index
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python formatting_drift_json.py <plan.json>")
@@ -120,5 +133,5 @@ if __name__ == "__main__":
 
     plan_file = sys.argv[1]
     plan_data = load_plan(plan_file)
-    result = report_drift(plan_data)
+    result = report_drift(plan_data, tf_dir=os.path.dirname(plan_file))
     print(json.dumps(result))  

@@ -128,9 +128,9 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
             "resource_id": resource["address"],
             "risk_level": map_risk(resource.get("security_impact")),
             "drift_summary": build_drift_summary(changes),
-            "plan_output": json.dumps(changes, indent=2),  # or slice raw plan text for this resource
-            "file_path": None,   # see note below — you don't have this mapping yet
-            "file_content": None,  # see note below
+            "plan_output": json.dumps(changes, indent=2),
+            "file_path": resource.get("file_path"),
+            "changes": changes,
         })
     return findings
 
@@ -177,16 +177,19 @@ def drift_pr_from_finding(state: State):
         return {"pr_urls": []}
     pr_urls = []
     for finding in state["drift_findings"]:
-        pr = gi.create_drift_pr(
-            resource_id=finding["resource_id"],
-            pr_title=f"Drift fix: {finding['resource_id']} [{finding['risk_level']}]",
-            drift_summary=finding["drift_summary"],
-            plan_output=finding["plan_output"],
-            file_path=f"drift-reports/{finding['resource_id'].replace('.', '-')}.md",
-            file_content=f"# Drift report: {finding['resource_id']}\n\n{finding['drift_summary']}\n\n```\n{finding['plan_output']}\n```",
-            risk_level=finding["risk_level"],
-        )
-        pr_urls.append(pr.html_url)
+        risk = finding["risk_level"]
+
+        if risk == "HIGH":
+            modes = ["reality_to_code"]       # revert AWS, no .tf change, human-gated
+        elif risk == "LOW":
+            modes = ["code_to_reality"]       # auto-patch .tf to accept live state
+        else:  # MEDIUM — ambiguous, let a human pick
+            modes = ["reality_to_code", "code_to_reality"]
+
+        for mode in modes:
+            pr = gi.create_drift_pr_for_mode(finding, mode)
+            pr_urls.append(pr.html_url)
+
     return {"pr_urls": pr_urls}
 
 

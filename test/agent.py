@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph, START, END
 import pagerduty_alert as pga
 import github_integration as gi
 import json
+from langchain_core.messages import AIMessage
 
 # ==========================================
 # CONFIGURATION: SET YOUR PATHS HERE
@@ -36,7 +37,7 @@ def get_terraform_drift_data() -> str:
             check=True, 
             capture_output=True, 
             text=True,
-            shell=True  # Added shell=True to safely locate the terraform binary
+            #shell=True  # Added shell=True to safely locate the terraform binary
         )
     except subprocess.CalledProcessError as e:
         return f"Terraform Plan Failed:\n{e.stderr}"
@@ -50,7 +51,7 @@ def get_terraform_drift_data() -> str:
             check=True, 
             capture_output=True, 
             text=True,
-            shell=True
+            #shell=True
         )
         
         # Write the JSON data exactly as requested (-NoNewline, UTF-8) using Python
@@ -77,7 +78,7 @@ def get_terraform_drift_data() -> str:
             check=True, 
             capture_output=True, 
             text=True,
-            shell=True
+            #shell=True
         )
         return result.stdout
     except subprocess.CalledProcessError as e:
@@ -106,39 +107,36 @@ def map_risk(security_impact) -> str:
     return {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(security_impact, "LOW")
 
 
-def build_drift_summary(changes: dict) -> str:
-    lines = []
-    for field, vals in changes.items():
-        lines.append(f"- `{field}`: before `{vals.get('before')}` → after `{vals.get('after')}`")
+def build_drift_summary(resource: dict) -> str:
+    if resource.get("status") == "deleted_externally":
+        return "Resource was deleted outside of Terraform (found in state, missing from AWS)."
+    changes = resource.get("changes", {})
+    lines = [f"- `{field}`: before `{v.get('before')}` → after `{v.get('after')}`" for field, v in changes.items()]
     return "\n".join(lines)
 
 
 def build_drift_findings(drift_report_json: dict) -> list[dict]:
-    """Source of truth for PR content — built straight from the terraform plan JSON,
-    not from LLM prose."""
     findings = []
     if drift_report_json.get("report_type") != "drift":
         return findings
 
     for resource in drift_report_json.get("resources", []):
-        changes = resource.get("changes")
-        if not changes:
+        # deleted_externally resources have no "changes" but are still real findings
+        if not resource.get("changes") and resource.get("status") != "deleted_externally":
             continue
         findings.append({
             "resource_id": resource["address"],
             "risk_level": map_risk(resource.get("security_impact")),
-            "drift_summary": build_drift_summary(changes),
-            "plan_output": json.dumps(changes, indent=2),
+            "drift_summary": build_drift_summary(resource),
+            "plan_output": json.dumps(resource.get("changes") or {"status": resource.get("status")}, indent=2),
             "file_path": resource.get("file_path"),
-            "changes": changes,
+            "changes": resource.get("changes", {}),
         })
     return findings
 
 
-def agent_node(state: State):
-    response = llm.invoke(state["messages"])
 
-    # Find the raw JSON drift report embedded in the user message (not LLM output)
+def agent_node(state: State):
     raw_report_str = ""
     for msg in state["messages"]:
         content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
@@ -146,7 +144,6 @@ def agent_node(state: State):
             raw_report_str = content
             break
 
-    # Extract just the JSON portion and parse it — this is your ground truth
     try:
         json_start = raw_report_str.index("{")
         json_end = raw_report_str.rindex("}") + 1
@@ -155,21 +152,34 @@ def agent_node(state: State):
         drift_report_json = {"report_type": "unknown", "resources": []}
 
     drift_detected = drift_report_json.get("report_type") == "drift"
-    findings = build_drift_findings(drift_report_json) if drift_detected else []
 
+    if not drift_detected:
+        return {
+            "messages": [AIMessage(content="STATUS: NO_DRIFT\nNo configuration drift detected.")],
+            "drift_detected": False,
+            "drift_findings": [],
+        }
+
+    response = llm.invoke(state["messages"])
+    findings = build_drift_findings(drift_report_json)
     return {
         "messages": [response],
-        "drift_detected": drift_detected,
+        "drift_detected": True,
         "drift_findings": findings,
     }
+
+
 def drift_alert(state: State):
     if not state["drift_detected"]:
         return {"messages": []}
-    pga.trigger_pagerduty_alert(
-        summary="Terraform Drift Engine Alert - Drift detected in environment",
-        severity="error",
-        source="terraform-drift-engine"
-    )
+    for finding in state["drift_findings"]:
+        result = pga.trigger_pagerduty_alert(
+            summary=f"Drift detected: {finding['resource_id']}",
+            severity="error",
+            source="terraform-drift-engine",
+            dedup_key=f"drift-{finding['resource_id']}",
+        )
+        #print(f"[DEBUG] PagerDuty response: {result}")
     return {"messages": []}
 
 def drift_pr_from_finding(state: State):
@@ -180,11 +190,11 @@ def drift_pr_from_finding(state: State):
         risk = finding["risk_level"]
 
         if risk == "HIGH":
-            modes = ["reality_to_code"]       # revert AWS, no .tf change, human-gated
+            modes = ["code_to_reality"]       # revert AWS, no .tf change, human-gated
         elif risk == "LOW":
             modes = ["code_to_reality"]       # auto-patch .tf to accept live state
         else:  # MEDIUM — ambiguous, let a human pick
-            modes = ["reality_to_code", "code_to_reality"]
+            modes = ["code_to_reality"]
 
         for mode in modes:
             pr = gi.create_drift_pr_for_mode(finding, mode)
@@ -263,8 +273,8 @@ if __name__ == "__main__":
         "- STATUS: PENDING_CHANGES (when only pending_operations exist)\n\n"
 
         "For NO_DRIFT:\n"
-        "- One concise paragraph confirming no configuration drift\n"
-        "- Optionally note any pending operations in one sentence\n\n"
+        "- Output exactly this and nothing else: 'No configuration drift detected. N resource(s) checked.'\n"
+        "- If pending_operations exist, append one sentence noting the count.\n\n"
 
         "For DRIFT_DETECTED:\n"
         "1. Begin with summary table:\n"

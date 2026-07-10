@@ -2,7 +2,8 @@ import os
 from datetime import datetime
 from github import Github, Auth, GithubException, UnknownObjectException
 from dotenv import load_dotenv
-
+import subprocess
+import json
 load_dotenv()
 
 def create_drift_pr(
@@ -75,6 +76,63 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
 
     print(f"🎉 PR Created: {pr.html_url}")
     return pr
+
+
+def create_drift_pr_for_mode(finding: dict, mode: str):
+    resource_id = finding["resource_id"]
+    risk_level = finding["risk_level"]
+
+    if mode == "code_to_reality" and finding.get("file_path"):
+        file_path = finding["file_path"]
+        original = get_resource_block_text(file_path, *resource_id.split(".", 1))
+        patched_file_content = apply_changes_to_file(file_path, resource_id, finding["changes"])
+        pr_title = f"Drift fix (accept live state): {resource_id} [{risk_level}]"
+        content = patched_file_content
+        target_path = file_path
+    else:
+        pr_title = f"Drift fix (revert to code): {resource_id} [{risk_level}]"
+        content = (f"# Drift report: {resource_id}\n\n{finding['drift_summary']}\n\n"
+                   f"```\n{finding['plan_output']}\n```\n\n"
+                   f"Merging is a no-op on code — run `terraform apply` to revert AWS.")
+        target_path = f"drift-reports/{resource_id.replace('.', '-')}.md"
+
+    return create_drift_pr(
+        resource_id=resource_id,
+        pr_title=pr_title,
+        drift_summary=finding["drift_summary"],
+        plan_output=finding["plan_output"],
+        file_path=target_path,
+        file_content=content,
+        risk_level=risk_level,
+    )
+
+def get_resource_block_text(file_path, resource_type, resource_name):
+    with open(file_path, encoding="utf-8") as f:
+        content = f.read()
+    pattern = re.compile(rf'resource\s+"{re.escape(resource_type)}"\s+"{re.escape(resource_name)}"\s*\{{')
+    m = pattern.search(content)
+    if not m:
+        return None
+    brace_pos = content.index("{", m.end() - 1)
+    depth, i = 1, brace_pos + 1
+    while depth > 0 and i < len(content):
+        depth += 1 if content[i] == "{" else -1 if content[i] == "}" else 0
+        i += 1
+    return content[m.start():i]
+
+
+def apply_changes_to_file(file_path, resource_id, changes):
+    """Patch scalar attribute values via hcledit; skip fields it can't handle cleanly."""
+    for field, vals in changes.items():
+        if "." in field or "[" in field:   # nested/list fields — too risky for auto-patch
+            continue
+        subprocess.run(
+            ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
+             json.dumps(vals["after"]), "-f", file_path, "-u"],
+            check=False,
+        )
+    with open(file_path, encoding="utf-8") as f:
+        return f.read()
 
 
 #if __name__ == "__main__":

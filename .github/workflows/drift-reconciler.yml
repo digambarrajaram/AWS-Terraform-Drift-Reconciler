@@ -33,10 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
 
-    defaults:
-      run:
-        working-directory: ./test/ec2_terraform/
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -46,6 +42,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -55,53 +52,40 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      # ─── SCENARIO A: ACCEPTED (Merged) ───
-      - name: Plan & Apply Accepted Drift
+      # =================================================================
+      # SCENARIO A: ACCEPTED (Merged) → Code already matches live state
+      # =================================================================
+      - name: "[ACCEPT] Apply Drift Fix"
         if: |
-          github.event.pull_request.merged == true || 
-          github.event.inputs.action_type == 'Accept (Align State)'
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
         run: |
-          echo "✅ ACCEPTED: Planning drift fix..."
+          echo "✅ ACCEPTED: Applying approved drift fix..."
           terraform plan -out=tfplan -input=false
-          echo "Applying approved changes..."
           terraform apply -auto-approve tfplan
 
-      - name: Label PR as Accepted
-        if: github.event.pull_request.merged == true
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.addLabels({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: ['drift-accepted']
-            });
-
-      # ─── SCENARIO B: REJECTED (Closed without merge) ───
-      - name: Plan & Revert Drift
+      # =================================================================
+      # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
+      # =================================================================
+      - name: "[REJECT] Refresh State + Revert Drift"
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
-          github.event.inputs.action_type == 'Reject (Revert Code)'
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
         run: |
-          echo "❌ REJECTED: Reverting unauthorized drift..."
+          echo "❌ REJECTED: Detecting live drift and reverting..."
+          
+          # CRITICAL: Refresh state to match LIVE AWS first
+          # Otherwise Terraform doesn't know drift exists
+          echo "Step 1: Refreshing state to match live AWS..."
+          terraform plan -refresh-only -input=false
+          
+          # Now state = live, code = original. Plan will show revert diff.
+          echo "Step 2: Planning revert to original code..."
           terraform plan -out=tfplan -input=false
-          echo "Applying revert to match original code..."
+          
+          echo "Step 3: Applying revert..."
           terraform apply -auto-approve tfplan
 
-      - name: Label PR as Rejected
-        if: github.event_name == 'pull_request' && github.event.pull_request.merged == false
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.addLabels({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: ['drift-rejected']
-            });
-
-      # ─── Final Comment ───
       - name: Comment Result
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -109,12 +93,11 @@ jobs:
           script: |
             const merged = '${{ github.event.pull_request.merged }}' === 'true';
             const outcome = merged 
-              ? '✅ **ACCEPTED**: Drift fix applied. Git now matches live AWS state.' 
-              : '❌ **REJECTED**: Unauthorized drift reverted. AWS restored to match original code.';
-            
+              ? '✅ **ACCEPTED**: Drift fix applied.' 
+              : '❌ **REJECTED**: Drift reverted. AWS restored to original code.';
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `${outcome}\n\n🔗 [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+              body: outcome
             });

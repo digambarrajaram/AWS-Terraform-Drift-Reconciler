@@ -35,7 +35,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: ./test/
+        working-directory: ./test/ec2_terraform/
 
     steps:
       - name: Checkout Code

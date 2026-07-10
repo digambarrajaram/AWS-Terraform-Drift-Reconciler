@@ -20,7 +20,8 @@ permissions:
 
 env:
   AWS_REGION: "us-east-1" 
-  TF_VERSION: "6.5"    
+  TF_VERSION: "6.0"    
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   reconcile-infra:
@@ -47,7 +48,7 @@ jobs:
 
       # Step 3: Setup Terraform
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
 

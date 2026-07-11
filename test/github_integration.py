@@ -11,6 +11,15 @@ import tempfile
 load_dotenv()
 
 
+REPO_ROOT = r"D:\aws-terraform-drift-reconciler"
+
+def to_repo_relative_path(local_path: str) -> str:
+    """Convert an absolute local path to a repo-relative, forward-slash path
+    that GitHub's API expects."""
+    rel = os.path.relpath(local_path, REPO_ROOT)
+    return rel.replace("\\", "/")
+
+
 def is_hcledit_available() -> bool:
     return shutil.which("hcledit") is not None
 
@@ -110,11 +119,11 @@ def create_drift_pr_for_mode(finding: dict, mode: str):
     if mode == "code_to_reality" and finding.get("file_path"):
         file_path = finding["file_path"]
         patched_file_content = apply_changes_to_file(file_path, resource_id, finding["changes"])
-        pr_title = f"Drift fix (accept live state): {resource_id} [{risk_level}]"
+        pr_title = f"Drift fix: {resource_id} [{risk_level}]"
         content = patched_file_content
-        target_path = file_path
+        target_path = to_repo_relative_path(file_path)   # <-- fix applied here
     else:
-        pr_title = f"Drift fix (revert to code): {resource_id} [{risk_level}]"
+        pr_title = f"Drift fix: {resource_id} [{risk_level}] (report only)"
         content = (f"# Drift report: {resource_id}\n\n{finding['drift_summary']}\n\n"
                    f"```\n{finding['plan_output']}\n```\n\n"
                    f"Merging is a no-op on code — run `terraform apply` to revert AWS.")

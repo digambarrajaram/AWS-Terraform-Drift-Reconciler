@@ -6,8 +6,12 @@ import subprocess
 import json
 import re
 import subprocess
+import shutil
 
 load_dotenv()
+
+def is_hcledit_available() -> bool:
+    return shutil.which("hcledit") is not None
 
 def create_drift_pr(
         resource_id: str,
@@ -124,16 +128,28 @@ def get_resource_block_text(file_path, resource_type, resource_name):
     return content[m.start():i]
 
 
+
 def apply_changes_to_file(file_path, resource_id, changes):
-    """Patch scalar attribute values via hcledit; skip fields it can't handle cleanly."""
+    """Patch scalar attribute values via hcledit; skip fields it can't handle cleanly.
+    Falls back to returning the file unmodified if hcledit isn't available on this machine."""
+    if not is_hcledit_available():
+        print(f"[WARN] hcledit not found on PATH — skipping auto-patch for {resource_id}. "
+              f"Install from https://github.com/minamijoyo/hcledit/releases to enable this.")
+        with open(file_path, encoding="utf-8") as f:
+            return f.read()
+
     for field, vals in changes.items():
-        if "." in field or "[" in field:   # nested/list fields — too risky for auto-patch
+        if "." in field or "[" in field:
             continue
-        subprocess.run(
-            ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-             json.dumps(vals["after"]), "-f", file_path, "-u"],
-            check=False,
-        )
+        try:
+            subprocess.run(
+                ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
+                 json.dumps(vals["after"]), "-f", file_path, "-u"],
+                check=False,
+            )
+        except FileNotFoundError:
+            print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
+
     with open(file_path, encoding="utf-8") as f:
         return f.read()
 

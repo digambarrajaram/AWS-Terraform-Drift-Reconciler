@@ -24,6 +24,7 @@ permissions:
 env:
   AWS_REGION: "us-east-1"
   TF_VERSION: "1.9.8"
+  TF_WORKING_DIR: "test/ec2_terraform"
 
 jobs:
   reconcile-infra:
@@ -50,6 +51,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform init
 
       # =================================================================
@@ -59,6 +61,7 @@ jobs:
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
+        working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           echo "✅ ACCEPTED: Applying approved drift fix..."
           terraform plan -out=tfplan -input=false
@@ -67,23 +70,15 @@ jobs:
       # =================================================================
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
       # =================================================================
-      - name: "[REJECT] Refresh State + Revert Drift"
+      - name: "[REJECT] Revert Drift to Match Code"
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
+        working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          echo "❌ REJECTED: Detecting live drift and reverting..."
-          
-          # CRITICAL: Refresh state to match LIVE AWS first
-          # Otherwise Terraform doesn't know drift exists
-          echo "Step 1: Refreshing state to match live AWS..."
-          terraform plan -refresh-only -input=false
-          
-          # Now state = live, code = original. Plan will show revert diff.
-          echo "Step 2: Planning revert to original code..."
+          echo "❌ REJECTED: Planning revert to original code..."
           terraform plan -out=tfplan -input=false
-          
-          echo "Step 3: Applying revert..."
+          echo "Applying revert..."
           terraform apply -auto-approve tfplan
 
       - name: Comment Result
@@ -92,8 +87,8 @@ jobs:
         with:
           script: |
             const merged = '${{ github.event.pull_request.merged }}' === 'true';
-            const outcome = merged 
-              ? '✅ **ACCEPTED**: Drift fix applied.' 
+            const outcome = merged
+              ? '✅ **ACCEPTED**: Drift fix applied.'
               : '❌ **REJECTED**: Drift reverted. AWS restored to original code.';
             github.rest.issues.createComment({
               issue_number: context.issue.number,

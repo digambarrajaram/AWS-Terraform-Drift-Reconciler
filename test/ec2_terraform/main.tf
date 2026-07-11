@@ -69,6 +69,10 @@ resource "aws_security_group" "drift_web_ssh_sg" {
   description = "Allow restricted SSH and public HTTPS"
   vpc_id      = data.aws_vpc.default.id
 
+  lifecycle {
+    ignore_changes = [ingress, egress]
+  }
+
   tags = {
     Name = "drift-web-ssh-sg"
   }

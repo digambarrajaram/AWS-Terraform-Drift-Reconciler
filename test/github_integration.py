@@ -13,6 +13,19 @@ load_dotenv()
 
 REPO_ROOT = r"D:\aws-terraform-drift-reconciler"
 
+UNPATCHABLE_BLOCK_FIELDS = {
+    "aws_security_group": {"ingress", "egress"},
+}
+
+def is_unpatchable_finding(resource_id: str, changes: dict) -> bool:
+    resource_type = resource_id.split(".")[0]
+    unpatchable = UNPATCHABLE_BLOCK_FIELDS.get(resource_type)
+    if not unpatchable:
+        return False
+    # True only if every changed field is one of the known-unpatchable block fields —
+    # if the SG has some other real attribute change mixed in, still create the PR.
+    return bool(changes) and all(field in unpatchable for field in changes)
+
 def to_repo_relative_path(local_path: str) -> str:
     """Convert an absolute local path to a repo-relative, forward-slash path
     that GitHub's API expects."""
@@ -65,6 +78,7 @@ def create_drift_pr(
 
     try:
         existing = repo.get_contents(file_path, ref=head_branch)
+        print(f"[DEBUG] existing file found, sha={existing.sha}")
         repo.update_file(
             path=file_path,
             message=pr_title,
@@ -72,13 +86,18 @@ def create_drift_pr(
             sha=existing.sha,
             branch=head_branch,
         )
+        print(f"[DEBUG] update_file succeeded for {file_path}")
     except UnknownObjectException:
+        print(f"[DEBUG] get_contents 404'd, creating new file at {file_path}")
         repo.create_file(
             path=file_path,
             message=pr_title,
             content=file_content,
             branch=head_branch,
         )
+    except GithubException as e:
+        print(f"[ERROR] Unexpected GitHub API failure: status={e.status} data={e.data}")
+        raise
 
     pr_body = f"""## Drift detected: `{resource_id}`
 
@@ -115,13 +134,22 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
 def create_drift_pr_for_mode(finding: dict, mode: str):
     resource_id = finding["resource_id"]
     risk_level = finding["risk_level"]
+    is_deleted = finding.get("status") == "deleted_externally"
+
+    if mode == "code_to_reality" and is_unpatchable_finding(resource_id, finding.get("changes", {})):
+        print(f"[SKIP] {resource_id}: drift is on a computed block field "
+              f"(ingress/egress) with no HCL block to patch — skipping PR, "
+              f"relying on lifecycle.ignore_changes + PagerDuty alert instead.")
+        return None
 
     if mode == "code_to_reality" and finding.get("file_path"):
         file_path = finding["file_path"]
-        patched_file_content = apply_changes_to_file(file_path, resource_id, finding["changes"])
+        patched_file_content = apply_changes_to_file(
+            file_path, resource_id, finding["changes"], deleted=is_deleted
+        )
         pr_title = f"Drift fix: {resource_id} [{risk_level}]"
         content = patched_file_content
-        target_path = to_repo_relative_path(file_path)   # <-- fix applied here
+        target_path = to_repo_relative_path(file_path)
     else:
         pr_title = f"Drift fix: {resource_id} [{risk_level}] (report only)"
         content = (f"# Drift report: {resource_id}\n\n{finding['drift_summary']}\n\n"
@@ -139,7 +167,6 @@ def create_drift_pr_for_mode(finding: dict, mode: str):
         risk_level=risk_level,
     )
 
-
 def get_resource_block_text(file_path, resource_type, resource_name):
     """Read-only lookup — safe to read the real local file directly, never writes."""
     with open(file_path, encoding="utf-8") as f:
@@ -156,7 +183,7 @@ def get_resource_block_text(file_path, resource_type, resource_name):
     return content[m.start():i]
 
 
-def apply_changes_to_file(file_path, resource_id, changes):
+def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
     """Patch a TEMP COPY of the file via hcledit — the real local file on disk
     is never modified. Returns the patched content as a string for upload to GitHub."""
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tf")
@@ -170,19 +197,27 @@ def apply_changes_to_file(file_path, resource_id, changes):
             with open(tmp_path, encoding="utf-8") as f:
                 return f.read()
 
-        for field, vals in changes.items():
-            if "." in field or "[" in field:
-                continue
-            try:
-                subprocess.run(
-                    ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                     json.dumps(vals["after"]), "-f", tmp_path, "-u"],
-                    check=False,
-                )
-            except FileNotFoundError:
-                print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
+        if deleted:
+            result = subprocess.run(
+                ["hcledit", "block", "rm", f"resource.{resource_id}", "-f", tmp_path, "-u"],
+                check=False, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"[WARN] hcledit block rm failed for {resource_id}: {result.stderr}")
+        else:
+            for field, vals in changes.items():
+                if "." in field or "[" in field:
+                    continue
+                try:
+                    subprocess.run(
+                        ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
+                         json.dumps(vals["after"]), "-f", tmp_path, "-u"],
+                        check=False,
+                    )
+                except FileNotFoundError:
+                    print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
 
         with open(tmp_path, encoding="utf-8") as f:
             return f.read()
     finally:
-        os.remove(tmp_path)   # always clean up, even if something above raised
+        os.remove(tmp_path)

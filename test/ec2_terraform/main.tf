@@ -74,15 +74,6 @@ resource "aws_security_group" "drift_web_ssh_sg" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "ssh_ingress" {
-  security_group_id = aws_security_group.drift_web_ssh_sg.id
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
-  cidr_ipv4         = var.allowed_ssh_cidr
-  description       = "SSH from admin IP only"
-}
-
 resource "aws_vpc_security_group_ingress_rule" "https_ingress" {
   security_group_id = aws_security_group.drift_web_ssh_sg.id
   from_port         = 443

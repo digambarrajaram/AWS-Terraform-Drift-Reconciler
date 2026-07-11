@@ -1,4 +1,5 @@
 name: "Process Drift PR Decision"
+run-name: "Drift PR Decision — ${{ github.event.pull_request.merged == true && 'ACCEPTED' || 'REJECTED' }} (#${{ github.event.pull_request.number }})"
 
 on:
   pull_request:

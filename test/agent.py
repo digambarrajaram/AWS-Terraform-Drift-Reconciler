@@ -181,24 +181,14 @@ def drift_alert(state: State):
         )
         #print(f"[DEBUG] PagerDuty response: {result}")
     return {"messages": []}
-
 def drift_pr_from_finding(state: State):
     if not state["drift_detected"]:
         return {"pr_urls": []}
     pr_urls = []
     for finding in state["drift_findings"]:
-        risk = finding["risk_level"]
-
-        if risk == "HIGH":
-            modes = ["code_to_reality"]       # revert AWS, no .tf change, human-gated
-        elif risk == "LOW":
-            modes = ["code_to_reality"]       # auto-patch .tf to accept live state
-        else:  # MEDIUM — ambiguous, let a human pick
-            modes = ["code_to_reality"]
-
-        for mode in modes:
-            pr = gi.create_drift_pr_for_mode(finding, mode)
-            pr_urls.append(pr.html_url)
+        # All risk levels auto-patch .tf to accept live AWS state.
+        pr = gi.create_drift_pr_for_mode(finding, "code_to_reality")
+        pr_urls.append(pr.html_url)
 
     return {"pr_urls": pr_urls}
 

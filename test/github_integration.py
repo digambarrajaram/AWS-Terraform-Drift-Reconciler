@@ -5,13 +5,28 @@ from dotenv import load_dotenv
 import subprocess
 import json
 import re
-import subprocess
 import shutil
+import tempfile
 
 load_dotenv()
 
+
 def is_hcledit_available() -> bool:
     return shutil.which("hcledit") is not None
+
+
+def close_superseded_prs(repo, resource_id: str, base_branch: str):
+    """Close older OPEN drift PRs for the same resource before opening a new one.
+    Only touches currently-open PRs — a resource that drifted, was fixed (PR merged
+    or closed), and later drifts again independently will NOT be suppressed, since
+    get_pulls(state='open') no longer sees the earlier resolved PR at all."""
+    safe_id = resource_id.replace(".", "-")
+    open_prs = repo.get_pulls(state="open", base=base_branch)
+    for pr in open_prs:
+        if pr.head.ref.startswith(f"drift-fix/{safe_id}-"):
+            pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
+            pr.edit(state="closed")
+
 
 def create_drift_pr(
         resource_id: str,
@@ -20,7 +35,7 @@ def create_drift_pr(
         plan_output: str,
         file_path: str,
         file_content: str,
-        risk_level: str = "LOW",   # LOW | MEDIUM | HIGH
+        risk_level: str = "LOW",
         base_branch: str = None):
     token = os.getenv("GITHUB_TOKEN")
     repo_name = os.getenv("GITHUB_REPO")
@@ -29,13 +44,16 @@ def create_drift_pr(
     repo = g.get_repo(repo_name)
 
     base_branch = base_branch or os.getenv("GITHUB_BASE_BRANCH", "main")
-    head_branch = f"drift-fix/{resource_id}-{int(datetime.utcnow().timestamp())}"
 
-    # 1. Create a fresh branch off base
+    # Prevent duplicate open PRs for the same resource across repeated runs.
+    close_superseded_prs(repo, resource_id, base_branch)
+
+    safe_id = resource_id.replace(".", "-")
+    head_branch = f"drift-fix/{safe_id}-{int(datetime.utcnow().timestamp())}"
+
     base_ref = repo.get_git_ref(f"heads/{base_branch}")
     repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_ref.object.sha)
 
-    # 2. Commit the fix onto the new branch (create or update)
     try:
         existing = repo.get_contents(file_path, ref=head_branch)
         repo.update_file(
@@ -79,7 +97,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
     try:
         pr.add_to_labels("drift-reconciler", f"risk:{risk_level.lower()}")
     except GithubException:
-        pass  # labels must pre-exist in repo; don't fail the PR over this
+        pass
 
     print(f"🎉 PR Created: {pr.html_url}")
     return pr
@@ -91,7 +109,6 @@ def create_drift_pr_for_mode(finding: dict, mode: str):
 
     if mode == "code_to_reality" and finding.get("file_path"):
         file_path = finding["file_path"]
-        original = get_resource_block_text(file_path, *resource_id.split(".", 1))
         patched_file_content = apply_changes_to_file(file_path, resource_id, finding["changes"])
         pr_title = f"Drift fix (accept live state): {resource_id} [{risk_level}]"
         content = patched_file_content
@@ -113,7 +130,9 @@ def create_drift_pr_for_mode(finding: dict, mode: str):
         risk_level=risk_level,
     )
 
+
 def get_resource_block_text(file_path, resource_type, resource_name):
+    """Read-only lookup — safe to read the real local file directly, never writes."""
     with open(file_path, encoding="utf-8") as f:
         content = f.read()
     pattern = re.compile(rf'resource\s+"{re.escape(resource_type)}"\s+"{re.escape(resource_name)}"\s*\{{')
@@ -128,39 +147,33 @@ def get_resource_block_text(file_path, resource_type, resource_name):
     return content[m.start():i]
 
 
-
 def apply_changes_to_file(file_path, resource_id, changes):
-    """Patch scalar attribute values via hcledit; skip fields it can't handle cleanly.
-    Falls back to returning the file unmodified if hcledit isn't available on this machine."""
-    if not is_hcledit_available():
-        print(f"[WARN] hcledit not found on PATH — skipping auto-patch for {resource_id}. "
-              f"Install from https://github.com/minamijoyo/hcledit/releases to enable this.")
-        with open(file_path, encoding="utf-8") as f:
+    """Patch a TEMP COPY of the file via hcledit — the real local file on disk
+    is never modified. Returns the patched content as a string for upload to GitHub."""
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tf")
+    os.close(tmp_fd)
+    shutil.copy(file_path, tmp_path)
+
+    try:
+        if not is_hcledit_available():
+            print(f"[WARN] hcledit not found on PATH — skipping auto-patch for {resource_id}. "
+                  f"Install from https://github.com/minamijoyo/hcledit/releases to enable this.")
+            with open(tmp_path, encoding="utf-8") as f:
+                return f.read()
+
+        for field, vals in changes.items():
+            if "." in field or "[" in field:
+                continue
+            try:
+                subprocess.run(
+                    ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
+                     json.dumps(vals["after"]), "-f", tmp_path, "-u"],
+                    check=False,
+                )
+            except FileNotFoundError:
+                print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
+
+        with open(tmp_path, encoding="utf-8") as f:
             return f.read()
-
-    for field, vals in changes.items():
-        if "." in field or "[" in field:
-            continue
-        try:
-            subprocess.run(
-                ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                 json.dumps(vals["after"]), "-f", file_path, "-u"],
-                check=False,
-            )
-        except FileNotFoundError:
-            print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
-
-    with open(file_path, encoding="utf-8") as f:
-        return f.read()
-
-
-#if __name__ == "__main__":
-#    create_drift_pr(
-#       resource_id="sg-0abc123",
-#      pr_title="Drift fix: sg-0abc123 [MEDIUM]",
-#        drift_summary="Ingress rule 22/tcp was manually opened to 0.0.0.0/0, not present in Terraform state.",
-#        plan_output="~ resource \"aws_security_group\" \"web\" { ... }",
-#        file_path="infra/security_groups.tf",
-#        file_content="# patched HCL content here",
-#        risk_level="MEDIUM",
-#    )
+    finally:
+        os.remove(tmp_path)   # always clean up, even if something above raised

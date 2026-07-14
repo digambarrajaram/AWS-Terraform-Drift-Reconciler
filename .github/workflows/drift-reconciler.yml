@@ -56,11 +56,11 @@ jobs:
         run: terraform init
 
       # =================================================================
-      # SCENARIO A: ACCEPTED (Merged) → Code already matches live state.
-      # The PR author updated the .tf files to reflect the drift, so we
-      # just need to align state — there should be zero changes.
+      # SCENARIO A: ACCEPTED (Merged) → The merged code changes should
+      # already match the live AWS state.  A normal plan + apply confirms
+      # alignment (or fixes any remaining gap).
       # =================================================================
-      - name: "[ACCEPT] Align State with Merged Code"
+      - name: "[ACCEPT] Confirm Merged Code Matches Live State"
         id: accept
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
@@ -68,13 +68,13 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           set -e
-          echo "✅ ACCEPTED: Aligning Terraform state with merged code..."
+          echo "✅ ACCEPTED: Merged code should match live state. Confirming..."
           terraform plan -detailed-exitcode -input=false -out=tfplan 2>&1 | tee plan-output.txt
           PLAN_EXIT="${PIPESTATUS[0]}"
           if [ "$PLAN_EXIT" -eq 0 ]; then
-            echo "No changes — state already aligned."
+            echo "No changes — merged code already matches live state. Done."
           elif [ "$PLAN_EXIT" -eq 2 ]; then
-            echo "Applying state alignment..."
+            echo "Some drift still present after merge — applying to close the gap..."
             terraform apply -auto-approve tfplan
           else
             echo "❌ terraform plan failed with exit code $PLAN_EXIT"

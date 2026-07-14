@@ -171,7 +171,25 @@ def agent_node(state: State):
             "drift_findings": [],
         }
 
-    response = llm.invoke(state["messages"])
+    # Strip externally_managed resources from the LLM prompt — the LLM
+    # should only see actionable drift it can propose fixes for.
+    actionable_resources = [
+        r for r in drift_report_json.get("resources", [])
+        if r.get("status") != "externally_managed"
+    ]
+    clean_report = dict(drift_report_json, resources=actionable_resources)
+    llm_messages = []
+    for msg in state["messages"]:
+        content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+        if "processed drift report" in content:
+            llm_messages.append({"role": msg.get("role", "user"),
+                                 "content": content.replace(
+                                     raw_report_str[json_start:json_end],
+                                     json.dumps(clean_report))})
+        else:
+            llm_messages.append(msg)
+
+    response = llm.invoke(llm_messages)
     findings = build_drift_findings(drift_report_json)
     return {
         "messages": [response],
@@ -389,17 +407,22 @@ def _print_drift_exceptions(drift_report_str: str):
             has_security = any(r.get("security_impact") == "high" for r in actionable)
             has_deleted = any(r.get("status") == "deleted_externally" for r in actionable)
             if has_security or has_deleted:
-                print(f"  🔍 {len(actionable)} drift finding(s) may need human review.  To suppress:")
-                snippet = {
-                    "resource_address": "<type.name>",
-                    "drift_type": "<field or *>",
-                    "reason": "<why this drift is accepted>",
-                    "approved_by": "<your-name>",
-                    "approved_date": datetime.now().strftime("%Y-%m-%d"),
-                    "expires": datetime.now().replace(year=datetime.now().year + 1).strftime("%Y-%m-%d"),
-                }
-                print(f"    Add to {TERRAFORM_DIR}/drift-exceptions.json:")
-                print(f"    {json.dumps(snippet, indent=2)}")
+                print(f"  🔍 {len(actionable)} drift finding(s) may need human review:")
+                for r in actionable:
+                    if r.get("security_impact") == "high" or r.get("status") == "deleted_externally":
+                        fields = list(r.get("changes", {}).keys())
+                        dtype = fields[0] if len(fields) == 1 else "*"
+                        print(f"      {r['address']}  →  {r.get('security_impact', '?')} impact")
+                        snippet = {
+                            "resource_address": r["address"],
+                            "drift_type": dtype,
+                            "reason": "<why this drift is accepted>",
+                            "approved_by": "<your-name>",
+                            "approved_date": datetime.now().strftime("%Y-%m-%d"),
+                            "expires": datetime.now().replace(year=datetime.now().year + 1).strftime("%Y-%m-%d"),
+                        }
+                        print(f"      Add to drift-exceptions.json:")
+                        print(f"      {json.dumps(snippet, indent=6)}")
                 print()
 
 

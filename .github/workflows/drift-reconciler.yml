@@ -56,41 +56,80 @@ jobs:
         run: terraform init
 
       # =================================================================
-      # SCENARIO A: ACCEPTED (Merged) → Code already matches live state
+      # SCENARIO A: ACCEPTED (Merged) → Code already matches live state.
+      # The PR author updated the .tf files to reflect the drift, so we
+      # just need to align state — there should be zero changes.
       # =================================================================
-      - name: "[ACCEPT] Apply Drift Fix"
+      - name: "[ACCEPT] Align State with Merged Code"
+        id: accept
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          echo "✅ ACCEPTED: Applying approved drift fix..."
-          terraform plan -out=tfplan -input=false
-          terraform apply -auto-approve tfplan
+          set -e
+          echo "✅ ACCEPTED: Aligning Terraform state with merged code..."
+          terraform plan -detailed-exitcode -input=false -out=tfplan 2>&1 | tee plan-output.txt
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            echo "No changes — state already aligned."
+          elif [ "$PLAN_EXIT" -eq 2 ]; then
+            echo "Applying state alignment..."
+            terraform apply -auto-approve tfplan
+          else
+            echo "❌ terraform plan failed with exit code $PLAN_EXIT"
+            cat plan-output.txt
+            exit 1
+          fi
+        continue-on-error: false
 
       # =================================================================
-      # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
+      # SCENARIO B: REJECTED (Closed without merge) → AWS drifted from
+      # what the .tf files declare.  Apply the code as-is to revert AWS
+      # back to the intended configuration.
       # =================================================================
-      - name: "[REJECT] Revert Drift to Match Code"
+      - name: "[REJECT] Revert AWS to Match Code"
+        id: reject
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          echo "❌ REJECTED: Planning revert to original code..."
-          terraform plan -out=tfplan -input=false
-          echo "Applying revert..."
-          terraform apply -auto-approve tfplan
+          set -e
+          echo "❌ REJECTED: Reverting AWS to match Terraform code..."
+          terraform plan -detailed-exitcode -input=false -out=tfplan 2>&1 | tee plan-output.txt
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            echo "No drift detected — AWS already matches code. Nothing to revert."
+          elif [ "$PLAN_EXIT" -eq 2 ]; then
+            echo "Drift detected. Applying revert to restore AWS to code-defined state..."
+            terraform apply -auto-approve tfplan
+            echo "✅ REVERTED: AWS has been restored to match the Terraform code."
+          else
+            echo "❌ terraform plan failed with exit code $PLAN_EXIT"
+            cat plan-output.txt
+            exit 1
+          fi
+        continue-on-error: false
 
       - name: Comment Result
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
             const merged = '${{ github.event.pull_request.merged }}' === 'true';
-            const outcome = merged
-              ? '✅ **ACCEPTED**: Drift fix applied.'
-              : '❌ **REJECTED**: Drift reverted. AWS restored to original code.';
+            const acceptOk = '${{ steps.accept.outcome }}' === 'success';
+            const rejectOk = '${{ steps.reject.outcome }}' === 'success';
+            let outcome;
+            if (merged && acceptOk) {
+              outcome = '✅ **ACCEPTED**: State aligned with merged code.';
+            } else if (merged && !acceptOk) {
+              outcome = '⚠️ **ACCEPTED but state alignment FAILED** — check workflow logs.';
+            } else if (!merged && rejectOk) {
+              outcome = '❌ **REJECTED**: AWS reverted to match Terraform code.';
+            } else {
+              outcome = '⚠️ **REJECTED but revert FAILED** — check workflow logs.';
+            }
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,

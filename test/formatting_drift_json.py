@@ -4,15 +4,20 @@ Parse a `terraform show -json <planfile>` output and report drift.
 Usage:
     python formatting_drift_json.py plan.json
 
-Reads the `resource_drift` array (pure drift: live infra vs. state file),
-falling back to `resource_changes` (filtered to non no-op) if resource_drift
+Reads the ``resource_drift`` array (pure drift: live infra vs. state file),
+falling back to ``resource_changes`` (filtered to non no-op) if resource_drift
 isn't present in this Terraform version's output.
+
+Supports a **drift-exceptions registry** (``drift-exceptions.json`` in the
+terraform root directory) for suppressing known/accepted drift at scale
+without touching the IaC files.  See the registry file for the schema.
 """
 
 import json
 import sys
 import glob, re
 import os
+from datetime import date
 
 
 SECURITY_RESOURCE_TYPES = (
@@ -99,6 +104,91 @@ def get_prior_state_addresses(plan):
     return addresses
 
 
+def load_drift_exceptions(tf_dir: str) -> tuple[list[dict], list[dict]]:
+    """Read the exceptions registry from *tf_dir*.
+
+    Returns (active_exceptions, expired_exceptions).  Expired entries
+    are returned separately so the caller can warn about them; they are
+    NOT applied as suppressions.
+    """
+    registry_path = os.path.join(tf_dir, "drift-exceptions.json")
+    if not os.path.isfile(registry_path):
+        return [], []
+
+    try:
+        with open(registry_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return [], []
+
+    entries = data.get("exceptions", [])
+    if not isinstance(entries, list):
+        return [], []
+
+    today = date.today()
+    active, expired = [], []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        expires_str = (entry.get("expires") or "").strip()
+        if expires_str:
+            try:
+                expires_date = date.fromisoformat(expires_str)
+                if expires_date <= today:
+                    expired.append(entry)
+                    continue
+            except (ValueError, TypeError):
+                pass  # malformed date — treat as active
+        active.append(entry)
+    return active, expired
+
+
+def _matches_exception(resource_address: str, drift_fields: set[str], status: str | None, entry: dict) -> bool:
+    """Return True if *entry* suppresses this specific drift finding."""
+    addr = entry.get("resource_address", "")
+    if not addr:
+        return False
+
+    # resource_address can be an exact match or a prefix
+    if resource_address == addr:
+        pass
+    elif addr.endswith(".") and resource_address.startswith(addr):
+        pass
+    else:
+        return False
+
+    dtype = entry.get("drift_type", "*")
+    if dtype == "*" or dtype == status:
+        return True
+    if dtype in drift_fields:
+        return True
+    return False
+
+
+def apply_drift_exceptions(
+    resources: list[dict], exceptions: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Split *resources* into (suppressed, remaining)."""
+    if not exceptions:
+        return [], resources
+
+    suppressed, remaining = [], []
+    for r in resources:
+        fields = set(r.get("changes", {}).keys())
+        status = r.get("status")
+        matched = None
+        for exc in exceptions:
+            if _matches_exception(r.get("address", ""), fields, status, exc):
+                matched = exc
+                break
+        if matched:
+            r["_suppressed_by"] = matched
+            suppressed.append(r)
+        else:
+            remaining.append(r)
+    return suppressed, remaining
+
+
 def report_drift(plan, tf_dir: str = None) -> dict:
     prior_addresses = get_prior_state_addresses(plan)
     drift_entries = plan.get("resource_drift")
@@ -155,15 +245,95 @@ def report_drift(plan, tf_dir: str = None) -> dict:
             continue
 
         changes_dict = {field: {"before": b, "after": a} for field, b, a in diffs}
+        fpath = file_index.get(address)
+
+        # If every drifted field is covered by lifecycle.ignore_changes,
+        # this resource's rules are managed outside Terraform — don't
+        # flag it as actionable drift.  Mark it externally_managed so
+        # the reconciler routes it to needs-review instead of the LLM.
+        if fpath:
+            ignored = _get_ignored_fields(fpath, address)
+            if ignored and set(changes_dict.keys()).issubset(ignored):
+                resources.append({
+                    "address": address,
+                    "status": "externally_managed",
+                    "changes": {},
+                    "sensitive": False,
+                    "security_impact": classify_security_impact(address, changes_dict),
+                    "file_path": fpath,
+                    "_ignored_fields": sorted(ignored),
+                })
+                continue
+
         resources.append({
             "address": address,
             "changes": changes_dict,
             "sensitive": False,
             "security_impact": classify_security_impact(address, changes_dict),
-            "file_path": file_index.get(address),
+            "file_path": fpath,
         })
 
-    return {"report_type": "drift" if resources else "no_drift", "resources": resources}
+    # Apply drift-exceptions registry if a terraform directory was provided.
+    suppressed, expired_exc = [], []
+    if tf_dir:
+        active_exc, expired_exc = load_drift_exceptions(tf_dir)
+        if active_exc:
+            suppressed, resources = apply_drift_exceptions(resources, active_exc)
+
+    # Only count resources with actual changes or deleted_externally as
+    # "drift".  Externally_managed resources (lifecycle.ignore_changes)
+    # are informational — they don't need LLM analysis or a PR.
+    actionable = [r for r in resources
+                  if r.get("changes") or r.get("status") == "deleted_externally"]
+    report = {"report_type": "drift" if actionable else "no_drift", "resources": resources}
+    if suppressed:
+        report["suppressed_resources"] = suppressed
+    if expired_exc:
+        report["expired_exceptions"] = expired_exc
+    return report
+
+
+_IGNORE_CHANGES_RE = re.compile(
+    r'lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[([^\]]*)\]',
+    re.DOTALL,
+)
+
+
+def _get_ignored_fields(file_path: str, resource_address: str) -> set[str]:
+    """Read the .tf file and return the set of field names covered by
+    ``lifecycle.ignore_changes`` for the named resource.  Returns an
+    empty set when the file can't be read, the resource isn't found, or
+    no lifecycle block exists."""
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        return set()
+
+    if "." not in resource_address:
+        return set()
+    want_type, want_name = resource_address.split(".", 1)
+    pattern = re.compile(r'resource\s+"([^"]+)"\s+"([^"]+)"')
+
+    # ponytail: brace-count to find the resource block, then regex for
+    # lifecycle.ignore_changes.  Fails inside heredocs / jsonencode.
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        m = pattern.search(line)
+        if not m or m.group(1) != want_type or m.group(2) != want_name:
+            continue
+        depth = 0
+        for j in range(i, len(lines)):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth == 0 and j > i:
+                block = "\n".join(lines[i : j + 1])
+                lc = _IGNORE_CHANGES_RE.search(block)
+                if lc:
+                    raw = lc.group(1)
+                    fields = {f.strip().strip('"').strip("'") for f in raw.split(",")}
+                    return {f for f in fields if f}
+                return set()
+    return set()
 
 
 def build_resource_file_index(tf_dir: str) -> dict:

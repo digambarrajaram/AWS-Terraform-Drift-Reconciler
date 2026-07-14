@@ -1,7 +1,10 @@
 from datetime import datetime
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Annotated
 from typing_extensions import TypedDict
 from langchain_aws import ChatBedrockConverse
@@ -10,6 +13,7 @@ import pagerduty_alert as pga
 import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
+from trivy_agent import graph as trivy_graph, State as TrivyState
 
 # ==========================================
 # CONFIGURATION: SET YOUR PATHS HERE
@@ -101,6 +105,7 @@ class State(TypedDict):
     messages: Annotated[list, lambda x, y: x + y]
     drift_detected: bool
     drift_findings: list[dict]   # one entry per drifted resource
+    trivy_scanned: bool
 
 
 def map_risk(security_impact) -> str:
@@ -110,6 +115,9 @@ def map_risk(security_impact) -> str:
 def build_drift_summary(resource: dict) -> str:
     if resource.get("status") == "deleted_externally":
         return "Resource was deleted outside of Terraform (found in state, missing from AWS)."
+    if resource.get("status") == "externally_managed":
+        ignored = resource.get("_ignored_fields", [])
+        return f"Drift on fields covered by lifecycle.ignore_changes ({', '.join(ignored)}) — managed outside Terraform."
     changes = resource.get("changes", {})
     lines = [f"- `{field}`: before `{v.get('before')}` → after `{v.get('after')}`" for field, v in changes.items()]
     return "\n".join(lines)
@@ -121,17 +129,19 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
         return findings
 
     for resource in drift_report_json.get("resources", []):
-        # deleted_externally resources have no "changes" but are still real findings
-        if not resource.get("changes") and resource.get("status") != "deleted_externally":
+        # deleted_externally / externally_managed resources have no
+        # "changes" but are still real findings worth reporting.
+        status = resource.get("status")
+        if not resource.get("changes") and status not in ("deleted_externally", "externally_managed"):
             continue
         findings.append({
             "resource_id": resource["address"],
             "risk_level": map_risk(resource.get("security_impact")),
             "drift_summary": build_drift_summary(resource),
-            "plan_output": json.dumps(resource.get("changes") or {"status": resource.get("status")}, indent=2),
+            "plan_output": json.dumps(resource.get("changes") or {"status": status}, indent=2),
             "file_path": resource.get("file_path"),
             "changes": resource.get("changes", {}),
-            "status": resource.get("status"),
+            "status": status,
         })
     return findings
 
@@ -170,23 +180,147 @@ def agent_node(state: State):
     }
 
 
+TF_RESOURCE_RE = re.compile(r'resource\s+"([^"]+)"\s+"([^"]+)"')
+
+
+def _apply_changes_to_file(file_path: str, resource_addr: str, changes: dict) -> bool:
+    """Apply before→after value replacements inside the named resource block.
+    Returns True if at least one change was applied."""
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+    if "." not in resource_addr:
+        return False
+    want_type, want_name = resource_addr.split(".", 1)
+
+    # ponytail: simple line-level find-and-replace inside the resource block.
+    # A proper HCL-aware attribute setter would be more robust.
+    lines = content.splitlines()
+    in_block = False
+    depth = 0
+    applied = False
+    for i, line in enumerate(lines):
+        m = TF_RESOURCE_RE.search(line)
+        if m and m.group(1) == want_type and m.group(2) == want_name:
+            in_block = True
+            depth = line.count("{") - line.count("}")
+            continue
+        if in_block:
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                break
+            for field, vals in changes.items():
+                before_val = str(vals.get("before", ""))
+                after_val = str(vals.get("after", ""))
+                if before_val and before_val in line:
+                    lines[i] = line.replace(before_val, after_val, 1)
+                    applied = True
+                    break
+
+    if applied:
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+        except OSError:
+            return False
+    return applied
+
+
+def trivy_gate(state: State):
+    """Run the Trivy security scan→fix→scan loop against the proposed
+    drift-reconciliation HCL before alerting or creating a PR."""
+    if not state.get("drift_detected") or not state.get("drift_findings"):
+        return {"trivy_scanned": False}
+
+    # Only scan findings that have a file_path and actual changes.
+    findings = state["drift_findings"]
+    actionable = [f for f in findings
+                   if f.get("file_path") and f.get("changes")
+                   and f.get("status") != "externally_managed"]
+    if not actionable:
+        return {"trivy_scanned": False}
+
+    tmpdir = tempfile.mkdtemp(prefix="trivy_gate_")
+    print(f"  [trivy-gate] Running security scan on proposed drift fixes …")
+
+    try:
+        # Copy the terraform directory into the temp workspace so Trivy
+        # scans the proposed fix, not the current (pre-drift) code.
+        src_dir = os.path.dirname(os.path.abspath(actionable[0]["file_path"]))
+        for item in os.listdir(src_dir):
+            s = os.path.join(src_dir, item)
+            d = os.path.join(tmpdir, item)
+            if os.path.isfile(s) and item.endswith(".tf"):
+                shutil.copy2(s, d)
+
+        # Apply the proposed after-values to the temp copies.
+        for f in actionable:
+            tf_file = os.path.join(tmpdir, os.path.basename(f["file_path"]))
+            if os.path.isfile(tf_file):
+                _apply_changes_to_file(tf_file, f["resource_id"], f["changes"])
+
+        # Invoke the self-contained trivy scan→fix→scan loop.
+        trivy_initial: TrivyState = {
+            "tf_dir": tmpdir,
+            "scan_results": [],
+            "issues": [],
+            "fixes_applied": [],
+            "iteration": 0,
+            "max_iterations": 3,
+            "passed": False,
+            "trivy_error": False,
+            "messages": [],
+        }
+        trivy_result = trivy_graph.invoke(trivy_initial)
+
+        # Enrich each finding with trivy scan metadata.
+        for f in findings:
+            f["trivy_passed"] = trivy_result.get("passed", False)
+            f["trivy_error"] = trivy_result.get("trivy_error", False)
+        if trivy_result.get("fixes_applied"):
+            for f in findings:
+                f["trivy_security_fixes"] = len(trivy_result["fixes_applied"])
+
+        fixes_count = len(trivy_result.get("fixes_applied", []))
+        issues_count = len(trivy_result.get("issues", []))
+        if fixes_count:
+            print(f"  [trivy-gate] Applied {fixes_count} security fix(es) to proposed drift HCL")
+        if issues_count:
+            print(f"  [trivy-gate] {issues_count} security finding(s) remain (need human review)")
+        elif trivy_result.get("passed") and not trivy_result.get("trivy_error"):
+            print(f"  [trivy-gate] ✓ Proposed drift fix passes security scan")
+        if trivy_result.get("trivy_error"):
+            print(f"  [trivy-gate] ⚠ Trivy scan encountered an error — proceeding without security validation")
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return {"trivy_scanned": True, "drift_findings": findings}
+
+
 def drift_alert(state: State):
-    if not state["drift_detected"]:
+    if not state.get("drift_detected"):
         return {"messages": []}
     for finding in state["drift_findings"]:
+        if finding.get("status") == "externally_managed":
+            continue  # expected drift — don't page
         result = pga.trigger_pagerduty_alert(
             summary=f"Drift detected: {finding['resource_id']}",
             severity="error",
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
         )
-        #print(f"[DEBUG] PagerDuty response: {result}")
     return {"messages": []}
 def drift_pr_from_finding(state: State):
-    if not state["drift_detected"]:
+    if not state.get("drift_detected"):
         return {"pr_urls": []}
     pr_urls = []
     for finding in state["drift_findings"]:
+        if finding.get("status") == "externally_managed":
+            continue  # no HCL to patch — skip PR
         pr = gi.create_drift_pr_for_mode(finding, "code_to_reality")
         if pr is not None:
             pr_urls.append(pr.html_url)
@@ -195,12 +329,14 @@ def drift_pr_from_finding(state: State):
 
 workflow = StateGraph(State)
 workflow.add_node("reconcile_agent", agent_node)
+workflow.add_node("trivy_gate", trivy_gate)
 workflow.add_node("alert_agent", drift_alert)
 workflow.add_node("drift_pr", drift_pr_from_finding)
 
 workflow.add_edge(START, "reconcile_agent")
-workflow.add_edge("reconcile_agent", "alert_agent")
-workflow.add_edge("reconcile_agent", "drift_pr")
+workflow.add_edge("reconcile_agent", "trivy_gate")
+workflow.add_edge("trivy_gate", "alert_agent")
+workflow.add_edge("trivy_gate", "drift_pr")
 workflow.add_edge("alert_agent", END)
 workflow.add_edge("drift_pr", END)
 
@@ -210,6 +346,63 @@ graph = workflow.compile()
 # ==========================================
 # 4. EXECUTION FLOW
 # ==========================================
+def _print_drift_exceptions(drift_report_str: str):
+    """Display suppressed drift, expired exceptions, and a copy-paste JSON
+    snippet for adding new entries to the drift-exceptions registry."""
+    try:
+        report = json.loads(drift_report_str)
+    except (json.JSONDecodeError, ValueError):
+        return
+
+    suppressed = report.get("suppressed_resources") or []
+    expired = report.get("expired_exceptions") or []
+
+    if expired:
+        print(f"\n  ⚠ {len(expired)} drift exception(s) have EXPIRED and are no longer suppressing drift:")
+        for exc in expired:
+            print(f"    - {exc.get('resource_address', '?')} "
+                  f"(drift_type={exc.get('drift_type', '?')}, "
+                  f"expired={exc.get('expires', '?')})")
+        print()
+
+    if suppressed:
+        print(f"  📋 {len(suppressed)} drift finding(s) suppressed by drift-exceptions.json:")
+        for r in suppressed:
+            exc = r.get("_suppressed_by", {})
+            print(f"    - {r.get('address', '?')}  →  {exc.get('reason', '?')[:100]}")
+        print()
+
+    resources = report.get("resources") or []
+    if resources:
+        external = [r for r in resources if r.get("status") == "externally_managed"]
+        actionable = [r for r in resources if r not in external]
+
+        if external:
+            print(f"  ⚠ {len(external)} resource(s) have drift covered by lifecycle.ignore_changes "
+                  f"— managed outside Terraform, will not attempt reconciliation:")
+            for r in external:
+                ignored = r.get("_ignored_fields", [])
+                print(f"      {r['address']}  (ignored: {', '.join(ignored)})")
+            print()
+
+        if actionable:
+            has_security = any(r.get("security_impact") == "high" for r in actionable)
+            has_deleted = any(r.get("status") == "deleted_externally" for r in actionable)
+            if has_security or has_deleted:
+                print(f"  🔍 {len(actionable)} drift finding(s) may need human review.  To suppress:")
+                snippet = {
+                    "resource_address": "<type.name>",
+                    "drift_type": "<field or *>",
+                    "reason": "<why this drift is accepted>",
+                    "approved_by": "<your-name>",
+                    "approved_date": datetime.now().strftime("%Y-%m-%d"),
+                    "expires": datetime.now().replace(year=datetime.now().year + 1).strftime("%Y-%m-%d"),
+                }
+                print(f"    Add to {TERRAFORM_DIR}/drift-exceptions.json:")
+                print(f"    {json.dumps(snippet, indent=2)}")
+                print()
+
+
 if __name__ == "__main__":
     # Gather the data using our folder-aware pipeline
     drift_report = get_terraform_drift_data()
@@ -218,6 +411,8 @@ if __name__ == "__main__":
         print("\nPipeline stopped due to errors:")
         print(drift_report)
         sys.exit(1)
+
+    _print_drift_exceptions(drift_report)
 
     print("\nData fetched successfully. Sending to Amazon Nova...")
     system_prompt = (
@@ -269,6 +464,7 @@ if __name__ == "__main__":
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_query}
         ],
+        "trivy_scanned": False,
     }
 
     agent_output = ""

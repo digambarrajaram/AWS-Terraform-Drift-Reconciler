@@ -57,8 +57,7 @@ jobs:
 
       # =================================================================
       # SCENARIO A: ACCEPTED (Merged) → The merged code changes should
-      # already match the live AWS state.  A normal plan + apply confirms
-      # alignment (or fixes any remaining gap).
+      # already match the live AWS state.
       # =================================================================
       - name: "[ACCEPT] Confirm Merged Code Matches Live State"
         id: accept
@@ -67,17 +66,18 @@ jobs:
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          set -e
+          set -eo pipefail
           echo "✅ ACCEPTED: Merged code should match live state. Confirming..."
-          terraform plan -detailed-exitcode -input=false -out=tfplan 2>&1 | tee plan-output.txt
-          PLAN_EXIT="${PIPESTATUS[0]}"
+          terraform plan -detailed-exitcode -input=false -out=tfplan > plan-output.txt 2>&1
+          PLAN_EXIT=$?
           if [ "$PLAN_EXIT" -eq 0 ]; then
-            echo "No changes — merged code already matches live state. Done."
+            echo "✓ No changes — merged code already matches live state."
           elif [ "$PLAN_EXIT" -eq 2 ]; then
-            echo "Some drift still present after merge — applying to close the gap..."
+            echo "⚠ Some drift still present after merge — closing the gap..."
             terraform apply -auto-approve tfplan
+            echo "✓ Drift resolved."
           else
-            echo "❌ terraform plan failed with exit code $PLAN_EXIT"
+            echo "❌ terraform plan failed (exit $PLAN_EXIT)"
             cat plan-output.txt
             exit 1
           fi
@@ -85,8 +85,7 @@ jobs:
 
       # =================================================================
       # SCENARIO B: REJECTED (Closed without merge) → AWS drifted from
-      # what the .tf files declare.  Apply the code as-is to revert AWS
-      # back to the intended configuration.
+      # what the .tf files declare.  Revert AWS to match code.
       # =================================================================
       - name: "[REJECT] Revert AWS to Match Code"
         id: reject
@@ -95,18 +94,18 @@ jobs:
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          set -e
+          set -eo pipefail
           echo "❌ REJECTED: Reverting AWS to match Terraform code..."
-          terraform plan -detailed-exitcode -input=false -out=tfplan 2>&1 | tee plan-output.txt
-          PLAN_EXIT="${PIPESTATUS[0]}"
+          terraform plan -detailed-exitcode -input=false -out=tfplan > plan-output.txt 2>&1
+          PLAN_EXIT=$?
           if [ "$PLAN_EXIT" -eq 0 ]; then
-            echo "No drift detected — AWS already matches code. Nothing to revert."
+            echo "✓ No drift detected — AWS already matches code."
           elif [ "$PLAN_EXIT" -eq 2 ]; then
-            echo "Drift detected. Applying revert to restore AWS to code-defined state..."
+            echo "⚠ Drift detected — reverting AWS to match code..."
             terraform apply -auto-approve tfplan
-            echo "✅ REVERTED: AWS has been restored to match the Terraform code."
+            echo "✅ REVERTED: AWS restored to match Terraform code."
           else
-            echo "❌ terraform plan failed with exit code $PLAN_EXIT"
+            echo "❌ terraform plan failed (exit $PLAN_EXIT)"
             cat plan-output.txt
             exit 1
           fi

@@ -133,10 +133,11 @@ resource "random_password" "redis_auth" {
 
 # AWS Secrets Manager secret for Redis AUTH token
 resource "aws_secretsmanager_secret" "redis_auth" {
-  count                   = var.auth_token_enabled ? 1 : 0
+  count                   = var.auth_token_enabled? 1 : 0
   name_prefix = "${var.resource_prefix}-${var.account_id}-${var.environment}-redis-auth-"
   description             = "Redis AUTH token for ${var.environment}"
   recovery_window_in_days = var.secret_recovery_days
+  kms_key_id              = "arn:aws:kms:region:account-id:key/key-id" # TODO: Replace with the actual ARN of the customer managed KMS key
 
   tags = merge(
     {

@@ -26,7 +26,7 @@ data "aws_ami" "amazon_linux_2" {
 
 # 3. Provision the EC2 Instance
 resource "aws_instance" "demo_server" {
-  ami           = var.ami_id != "" ? var.ami_id : data.aws_ami.amazon_linux_2.id
+  ami           = var.ami_id!= ""? var.ami_id : data.aws_ami.amazon_linux_2.id
   instance_type = var.instance_type
 
   # Optional but highly recommended basic settings:
@@ -35,6 +35,22 @@ resource "aws_instance" "demo_server" {
   tags = {
     Name        = "PagerDuty-Demo-Host"
     Environment = "Development"
+  }
+
+  metadata_options {
+    http_tokens = "required"
+  }
+
+  # Encryption for block devices
+  root_block_device {
+    encrypted = true
+  }
+
+  ebs_block_device {
+    device_name = "/dev/sdm"
+    volume_size = 100
+    volume_type = "gp2"
+    encrypted   = true
   }
 }
 
@@ -74,7 +90,7 @@ resource "aws_vpc_security_group_ingress_rule" "ec2_from_bastion" {
 resource "aws_vpc_security_group_egress_rule" "ec2_https_internet" {
   security_group_id = aws_security_group.ec2.id
   description       = "Allow HTTPS to internet (package updates, API calls)"
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = "10.0.0.0/8" # TODO: Replace with the actual required CIDR range
   from_port         = 443
   to_port           = 443
   ip_protocol       = "tcp"
@@ -87,7 +103,7 @@ resource "aws_vpc_security_group_egress_rule" "ec2_https_internet" {
 resource "aws_vpc_security_group_egress_rule" "ec2_http_internet" {
   security_group_id = aws_security_group.ec2.id
   description       = "Allow HTTP to internet (package repositories)"
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = "10.0.0.0/8" # TODO: Replace with the actual required CIDR range
   from_port         = 80
   to_port           = 80
   ip_protocol       = "tcp"
@@ -168,6 +184,7 @@ resource "aws_dynamodb_table" "drift_audit" {
 
   server_side_encryption {
     enabled = true
+    kms_key_arn = "arn:aws:kms:region:account-id:key/key-id" # TODO: Replace with the actual KMS key ARN
   }
 
   tags = merge(

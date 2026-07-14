@@ -137,6 +137,12 @@ variable "enable_performance_insights" {
   default     = true
 }
 
+variable "performance_insights_kms_key_id" {
+  description = "KMS key ARN for Performance Insights encryption"
+  type        = string
+  default     = null
+}
+
 variable "enable_cloudwatch_alarms" {
   description = "Enable CloudWatch alarms for RDS monitoring"
   type        = bool

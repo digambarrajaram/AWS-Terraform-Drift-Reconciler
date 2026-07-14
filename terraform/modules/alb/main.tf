@@ -7,10 +7,10 @@ terraform {
 # Application Load Balancer
 resource "aws_lb" "main" {
   name               = "${var.resource_prefix}-${var.environment}-app-alb"
-  internal           = false
+  internal           = true # TODO: Confirm if this should be an internal load balancer
   load_balancer_type = "application"
   security_groups    = [var.security_group_id]
-  subnets            = var.public_subnet_ids
+  subnets            = var.public_subnet_ids # TODO: Change to private subnet IDs if making internal
 
   enable_deletion_protection = var.enable_deletion_protection
   enable_http2               = true
@@ -19,7 +19,7 @@ resource "aws_lb" "main" {
   access_logs {
     bucket  = var.access_logs_bucket
     prefix  = var.access_logs_prefix
-    enabled = var.access_logs_bucket != ""
+    enabled = var.access_logs_bucket!= ""
   }
 
   tags = merge(
@@ -30,6 +30,8 @@ resource "aws_lb" "main" {
     },
     var.tags
   )
+
+  drop_invalid_header_fields = true
 }
 
 # Target Group for EC2 Instances
@@ -94,20 +96,13 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
-    type = var.certificate_arn != "" ? "redirect" : "forward"
+    type = "redirect"
 
-    # Redirect to HTTPS if certificate available
-    dynamic "redirect" {
-      for_each = var.certificate_arn != "" ? [1] : []
-      content {
-        port        = "443"
-        protocol    = "HTTPS"
-        status_code = "HTTP_301"
-      }
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
     }
-
-    # Forward to target group if no certificate
-    target_group_arn = var.certificate_arn != "" ? null : aws_lb_target_group.app.arn
   }
 
   tags = {
@@ -162,7 +157,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_target_response_time" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "alb_unhealthy_hosts" {
-  count               = var.enable_cloudwatch_alarms ? 1 : 0
+  count               = var.enable_cloudwatch_alarms? 1 : 0
   alarm_name          = "${var.resource_prefix}-${var.account_id}-${var.environment}-alb-unhealthy-hosts"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
@@ -183,4 +178,16 @@ resource "aws_cloudwatch_metric_alarm" "alb_unhealthy_hosts" {
     Name        = "${var.resource_prefix}-${var.account_id}-${var.environment}-alb-unhealthy-hosts-alarm"
     Environment = var.environment
   }
+
+  # TODO: Confirm if the load balancer should be exposed publicly or switch to an internal load balancer
 }
+
+# TODO: Confirm if the load balancer should be exposed publicly or switch to an internal load balancer.
+
+# TODO: Confirm if the load balancer should be internal or external and update the aws_lb resource accordingly.
+
+# TODO: Confirm if the load balancer should be exposed publicly or switch to an internal load balancer.
+
+# TODO: Confirm if the load balancer should be exposed publicly or switch to an internal load balancer.
+
+# TODO: Confirm if the load balancer should be internal or external and update the aws_lb resource accordingly.

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install *)",
+      "Bash(python3 -c ' *)",
+      "Bash(trivy --version)",
+      "Bash(dpkg -l)",
+      "Bash(pip3 list *)",
+      "Bash(apt list *)",
+      "Bash(curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh)",
+      "Bash(sh -s -- -b /usr/local/bin v0.56.2)",
+      "Read(//usr/local/bin/**)",
+      "Bash(find / -name \"trivy\" -type f)",
+      "Bash(python3 *)",
+      "Bash(terraform init *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(terraform validate *)",
+      "Bash(timeout 120 terraform providers schema -json)",
+      "Bash(terraform version *)",
+      "Bash(terraform providers *)"
+    ]
+  }
+}

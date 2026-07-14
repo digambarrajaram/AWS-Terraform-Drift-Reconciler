@@ -78,7 +78,7 @@ def create_drift_pr(
 
     try:
         existing = repo.get_contents(file_path, ref=head_branch)
-        print(f"[DEBUG] existing file found, sha={existing.sha}")
+        #print(f"[DEBUG] existing file found, sha={existing.sha}")
         repo.update_file(
             path=file_path,
             message=pr_title,
@@ -86,9 +86,9 @@ def create_drift_pr(
             sha=existing.sha,
             branch=head_branch,
         )
-        print(f"[DEBUG] update_file succeeded for {file_path}")
+        #print(f"[DEBUG] update_file succeeded for {file_path}")
     except UnknownObjectException:
-        print(f"[DEBUG] get_contents 404'd, creating new file at {file_path}")
+        #print(f"[DEBUG] get_contents 404'd, creating new file at {file_path}")
         repo.create_file(
             path=file_path,
             message=pr_title,
@@ -96,7 +96,7 @@ def create_drift_pr(
             branch=head_branch,
         )
     except GithubException as e:
-        print(f"[ERROR] Unexpected GitHub API failure: status={e.status} data={e.data}")
+        #print(f"[ERROR] Unexpected GitHub API failure: status={e.status} data={e.data}")
         raise
 
     pr_body = f"""## Drift detected: `{resource_id}`

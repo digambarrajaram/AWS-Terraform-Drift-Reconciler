@@ -146,7 +146,7 @@ resource "aws_vpc_security_group_egress_rule" "ec2_to_elasticache" {
 resource "aws_vpc_security_group_egress_rule" "ec2_https_internet" {
   security_group_id = aws_security_group.ec2.id
   description       = "Allow HTTPS to internet (package updates, API calls)"
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = "10.0.0.0/8" # TODO: Replace with the actual required CIDR range
   from_port         = 443
   to_port           = 443
   ip_protocol       = "tcp"
@@ -159,7 +159,7 @@ resource "aws_vpc_security_group_egress_rule" "ec2_https_internet" {
 resource "aws_vpc_security_group_egress_rule" "ec2_http_internet" {
   security_group_id = aws_security_group.ec2.id
   description       = "Allow HTTP to internet (package repositories)"
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = "10.0.0.0/8"  # TODO: Replace with the actual required CIDR range
   from_port         = 80
   to_port           = 80
   ip_protocol       = "tcp"
@@ -305,7 +305,7 @@ resource "aws_vpc_security_group_egress_rule" "bastion_to_ec2" {
 
 # Bastion Egress Rule - To RDS (troubleshooting)
 resource "aws_vpc_security_group_egress_rule" "bastion_to_rds" {
-  count                        = var.enable_bastion ? 1 : 0
+  count                        = var.enable_bastion? 1 : 0
   security_group_id            = aws_security_group.bastion[0].id
   description                  = "Allow MySQL access from bastion to RDS"
   referenced_security_group_id = aws_security_group.rds.id

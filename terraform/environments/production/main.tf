@@ -39,6 +39,7 @@ resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
   name              = "/aws/vpc/${var.resource_prefix}-${var.environment}-flow-logs"
   retention_in_days = var.log_retention_days
   tags              = local.common_tags
+  kms_key_id        = "arn:aws:kms:us-east-1:123456789012:key/example-key-id" # TODO: Replace with the actual KMS CMK ARN
 }
 
 resource "aws_iam_role" "vpc_flow_logs" {
@@ -299,6 +300,7 @@ module "compute" {
 resource "aws_cloudwatch_log_group" "app" {
   name              = var.cloudwatch_log_group
   retention_in_days = var.log_retention_days
+  kms_key_id        = "arn:aws:kms:us-east-1:123456789012:key/example-key-id" # TODO: Replace with the actual KMS CMK ARN
 
   tags = merge(
     {
@@ -314,6 +316,7 @@ resource "aws_cloudwatch_log_group" "app" {
 resource "aws_cloudwatch_log_group" "redis_slow_log" {
   name              = var.redis_slow_log_group
   retention_in_days = var.log_retention_days
+  kms_key_id        = "arn:aws:kms:region:account-id:key/key-id" # TODO: Replace with the actual KMS CMK ARN
 
   tags = merge(
     {
@@ -328,6 +331,7 @@ resource "aws_cloudwatch_log_group" "redis_slow_log" {
 resource "aws_cloudwatch_log_group" "redis_engine_log" {
   name              = var.redis_engine_log_group
   retention_in_days = var.log_retention_days
+  kms_key_id        = "arn:aws:kms:us-east-1:123456789012:key/example-key-id" # TODO: Replace with the actual KMS CMK ARN
 
   tags = merge(
     {

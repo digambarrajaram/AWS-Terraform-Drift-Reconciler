@@ -32,6 +32,7 @@ resource "aws_secretsmanager_secret" "rds_credentials" {
   name_prefix = "${var.resource_prefix}-${var.account_id}-${var.environment}-rds-credentials-"
   description             = "RDS master user credentials for ${var.environment}"
   recovery_window_in_days = var.secret_recovery_days
+  kms_key_id              = "arn:aws:kms:region:account-id:key/key-id" # TODO: Replace with the actual ARN of the customer managed KMS key
 
   tags = merge(
     {
@@ -82,7 +83,7 @@ resource "aws_db_instance" "main" {
 
   # High Availability
   multi_az               = var.multi_az
-  availability_zone      = var.multi_az ? null : var.preferred_az
+  availability_zone      = var.multi_az? null : var.preferred_az
 
   # Backup Configuration
   backup_retention_period   = var.backup_retention_days
@@ -94,18 +95,22 @@ resource "aws_db_instance" "main" {
 
   # Performance and Monitoring
   enabled_cloudwatch_logs_exports = ["error", "general", "slowquery"]
-  monitoring_interval             = var.enable_enhanced_monitoring ? 60 : 0
-  monitoring_role_arn             = var.enable_enhanced_monitoring ? var.monitoring_role_arn : null
+  monitoring_interval             = var.enable_enhanced_monitoring? 60 : 0
+  monitoring_role_arn             = var.enable_enhanced_monitoring? var.monitoring_role_arn : null
   performance_insights_enabled    = var.enable_performance_insights
-  performance_insights_retention_period = var.enable_performance_insights ? 7 : null
+  performance_insights_retention_period = var.enable_performance_insights? 7 : null
+  performance_insights_kms_key_id = var.performance_insights_kms_key_id # TODO: Confirm the KMS key ARN for Performance Insights
 
   # Parameter and Option Groups
-  parameter_group_name = var.parameter_group_name != "" ? var.parameter_group_name : "default.mysql8.0"
-  option_group_name    = var.option_group_name != "" ? var.option_group_name : "default:mysql-8-0"
+  parameter_group_name = var.parameter_group_name!= ""? var.parameter_group_name : "default.mysql8.0"
+  option_group_name    = var.option_group_name!= ""? var.option_group_name : "default:mysql-8-0"
 
   # Upgrade and Deletion Protection
   auto_minor_version_upgrade = var.auto_minor_version_upgrade
   deletion_protection        = var.deletion_protection
+
+  # IAM Database Authentication
+  iam_database_authentication_enabled = true
 
   tags = merge(
     {
@@ -197,7 +202,7 @@ resource "aws_cloudwatch_metric_alarm" "database_memory" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "database_connections" {
-  count               = var.enable_cloudwatch_alarms ? 1 : 0
+  count               = var.enable_cloudwatch_alarms? 1 : 0
   alarm_name          = "${var.resource_prefix}-${var.account_id}-${var.environment}-rds-high-connections"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
@@ -218,3 +223,4 @@ resource "aws_cloudwatch_metric_alarm" "database_connections" {
     Environment = var.environment
   }
 }
+

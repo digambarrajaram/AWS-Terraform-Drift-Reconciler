@@ -46,7 +46,7 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
   availability_zone       = var.availability_zones[count.index]
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = false # TODO: Confirm if instances in this subnet should have public IPs
 
   tags = merge(
     var.tags,
@@ -179,4 +179,21 @@ resource "aws_default_security_group" "default" {
       Purpose     = "Default security group locked down for security"
     }
   )
+
+  # Note: The provided resource block is for a security group, not an instance.
+  # To resolve the finding, ensure that instances associated with this security group
+  # are not assigned public IP addresses by default. This is typically controlled
+  # at the instance level using the `associate_public_ip_address` attribute.
+  # Since we cannot modify instance-level attributes here, ensure that any instance
+  # resource associated with this security group has `associate_public_ip_address`
+  # set to `false`.
+
+  # Example instance resource modification:
+  # resource "aws_instance" "example" {
+  #   ami           = "ami-0c55b159cbfafe1f0"
+  #   instance_type = "t2.micro"
+  #   subnet_id     = aws_subnet.example.id
+  #   vpc_security_group_ids = [aws_default_security_group.default.id]
+  #   associate_public_ip_address = false # Ensure this is set to false
+  # }
 }

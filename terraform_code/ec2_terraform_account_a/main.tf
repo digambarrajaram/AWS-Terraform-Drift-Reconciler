@@ -51,7 +51,7 @@ data "aws_ami" "ubuntu" {
 variable "allowed_ssh_cidr" {
   description = "Your IP for SSH. Get it: curl https://checkip.amazonaws.com"
   type        = string
-  default     = "203.0.113.10/32" 
+  default     = "203.0.113.10/32"
 }
 
 variable "key_name" {
@@ -87,22 +87,13 @@ resource "aws_vpc_security_group_ingress_rule" "https_ingress" {
   description       = "HTTPS from internet"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "ssh_ingress" {
-  security_group_id = aws_security_group.drift_web_ssh_sg.id
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
-  cidr_ipv4         = "192.0.2.0/24"
-  description       = "SSH access from trusted corporate network"
-}
-
 # trivy:ignore:AWS-0104 -- Set a more restrictive cidr range
 resource "aws_vpc_security_group_egress_rule" "all_egress" {
   security_group_id = aws_security_group.drift_web_ssh_sg.id
-  ip_protocol       = "tcp"                  # Changed from "-1" to restrict by protocol
-  from_port         = 443                    # Restricting egress to secure web traffic
+  ip_protocol       = "tcp" # Changed from "-1" to restrict by protocol
+  from_port         = 443   # Restricting egress to secure web traffic
   to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"            # Open for updates, but restricted by port now
+  cidr_ipv4         = "0.0.0.0/0" # Open for updates, but restricted by port now
   description       = "Allow outbound HTTPS for system updates and APIs"
 }
 # ─────────────────────────────────────────────

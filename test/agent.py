@@ -1,3 +1,4 @@
+import argparse
 from datetime import datetime
 import os
 import re
@@ -15,91 +16,93 @@ import json
 from langchain_core.messages import AIMessage
 from trivy_agent import graph as trivy_graph, State as TrivyState
 
-# ==========================================
-# CONFIGURATION: SET YOUR PATHS HERE
-# ==========================================
-# Path to the folder containing your .tf files (e.g., main.tf)
-TERRAFORM_DIR = r"D:\aws-terraform-drift-reconciler\test\ec2_terraform" 
+# Resolved at startup from CLI args (or env fallback).
+_account_label = "default"
+_region = os.environ.get("AWS_REGION", "us-east-1")
 
-# Absolute path to your formatting script
-DRIFT_SCRIPT_PATH = r"D:\aws-terraform-drift-reconciler\test\formatting_drift_json.py"
+# Derived from this script's location — the drift-formatting script lives
+# alongside it in the same directory.
+_drift_script_path = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "formatting_drift_json.py"
+)
+
+_llm = None
+
+
+def _get_llm():
+    """Lazily construct the Bedrock LLM client so --region from CLI takes
+    effect before the first call."""
+    global _llm
+    if _llm is None:
+        _llm = ChatBedrockConverse(
+            model="amazon.nova-pro-v1:0",
+            temperature=0.1,
+            region_name=_region,
+        )
+    return _llm
 
 # ==========================================
 # 1. RUN TERRAFORM & DRIFT SCRIPTS
 # ==========================================
-def get_terraform_drift_data() -> str:
-    """Executes CLI commands using explicit folder paths."""
-    
-    if not os.path.exists(TERRAFORM_DIR):
-        return f"Error: The Terraform directory '{TERRAFORM_DIR}' does not exist."
+def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
+    """Executes CLI commands using the supplied terraform directory and
+    drift-formatting script path."""
 
-    print(f"Step 1: Running 'terraform plan' inside: {TERRAFORM_DIR}...")
+    if not os.path.exists(tf_dir):
+        return f"Error: The Terraform directory '{tf_dir}' does not exist."
+
+    print(f"Step 1: Running 'terraform plan' inside: {tf_dir}...")
     try:
         subprocess.run(
-            ["terraform", "plan", "-out=tfplan"], 
-            cwd=TERRAFORM_DIR, 
-            check=True, 
-            capture_output=True, 
+            ["terraform", "plan", "-out=tfplan"],
+            cwd=tf_dir,
+            check=True,
+            capture_output=True,
             text=True,
-            #shell=True  # Added shell=True to safely locate the terraform binary
         )
     except subprocess.CalledProcessError as e:
         return f"Terraform Plan Failed:\n{e.stderr}"
 
     print("Step 2: Exporting plan to JSON using Native Python...")
     try:
-        # Run the show command and grab the output string directly
         show_result = subprocess.run(
-            ["terraform", "show", "-json", "tfplan"], 
-            cwd=TERRAFORM_DIR, 
-            check=True, 
-            capture_output=True, 
+            ["terraform", "show", "-json", "tfplan"],
+            cwd=tf_dir,
+            check=True,
+            capture_output=True,
             text=True,
-            #shell=True
         )
-        
-        # Write the JSON data exactly as requested (-NoNewline, UTF-8) using Python
-        plan_json_path = os.path.join(TERRAFORM_DIR, "plan.json")
+
+        plan_json_path = os.path.join(tf_dir, "plan.json")
         with open(plan_json_path, "w", encoding="utf-8", newline="") as f:
             f.write(show_result.stdout)
-            
+
     except subprocess.CalledProcessError as e:
         return f"Exporting plan.json Failed:\n{e.stderr}"
     except Exception as e:
         return f"Writing plan.json file failed:\n{str(e)}"
 
     print("Step 3: Processing drift format script...")
-    target_plan_json = os.path.join(TERRAFORM_DIR, "plan.json")
-    
+    target_plan_json = os.path.join(tf_dir, "plan.json")
+
     format_script_cmd = [
         "python",
-        DRIFT_SCRIPT_PATH,
-        target_plan_json
+        drift_script_path,
+        target_plan_json,
     ]
     try:
         result = subprocess.run(
-            format_script_cmd, 
-            check=True, 
-            capture_output=True, 
+            format_script_cmd,
+            check=True,
+            capture_output=True,
             text=True,
-            #shell=True
         )
         return result.stdout
     except subprocess.CalledProcessError as e:
         return f"Formatting Drift JSON Script Failed:\n{e.stderr}"
 
 # ==========================================
-# 2. INITIALIZE AMAZON NOVA MODEL
-# ==========================================
-llm = ChatBedrockConverse(
-    model="amazon.nova-pro-v1:0", 
-    temperature=0.1,
-    region_name=os.environ.get("AWS_REGION", "us-east-1")
-)
-
-
-# ==========================================
-# 3. DEFINE LANGGRAPH STRUCTURE
+# 2. LANGGRAPH STRUCTURE
 # ==========================================
 class State(TypedDict):
     messages: Annotated[list, lambda x, y: x + y]
@@ -189,7 +192,7 @@ def agent_node(state: State):
         else:
             llm_messages.append(msg)
 
-    response = llm.invoke(llm_messages)
+    response = _get_llm().invoke(llm_messages)
     findings = build_drift_findings(drift_report_json)
     return {
         "messages": [response],
@@ -330,6 +333,7 @@ def drift_alert(state: State):
             severity="error",
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
+            account_label=_account_label,
         )
     return {"messages": []}
 def drift_pr_from_finding(state: State):
@@ -339,7 +343,7 @@ def drift_pr_from_finding(state: State):
     for finding in state["drift_findings"]:
         if finding.get("status") == "externally_managed":
             continue  # no HCL to patch — skip PR
-        pr = gi.create_drift_pr_for_mode(finding, "code_to_reality")
+        pr = gi.create_drift_pr_for_mode(finding, "code_to_reality", account_label=_account_label)
         if pr is not None:
             pr_urls.append(pr.html_url)
     return {"pr_urls": pr_urls}
@@ -427,9 +431,40 @@ def _print_drift_exceptions(drift_report_str: str):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Terraform drift detection and reconciliation agent."
+    )
+    parser.add_argument(
+        "--tf-dir",
+        required=True,
+        help="Path to the terraform directory to scan for drift",
+    )
+    parser.add_argument(
+        "--region",
+        default=os.environ.get("AWS_REGION", "us-east-1"),
+        help="AWS region for Bedrock LLM calls (default: us-east-1)",
+    )
+    parser.add_argument(
+        "--account-label",
+        default=os.environ.get("ACCOUNT_LABEL", "default"),
+        help="Human-readable label for the AWS account being scanned",
+    )
+    args = parser.parse_args()
+
+    tf_dir = os.path.abspath(args.tf_dir)
+
+    if not os.path.isdir(tf_dir):
+        print(f"Error: directory not found — {tf_dir}")
+        sys.exit(1)
+
+    # Set module-level globals before the pipeline runs so graph nodes
+    # (alerts, LLM calls) pick up the right account and region.
+    _region = args.region
+    _account_label = args.account_label
+
     # Gather the data using our folder-aware pipeline
-    drift_report = get_terraform_drift_data()
-    
+    drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
+
     if "Failed" in drift_report or "Error" in drift_report:
         print("\nPipeline stopped due to errors:")
         print(drift_report)
@@ -439,6 +474,8 @@ if __name__ == "__main__":
 
     print("\nData fetched successfully. Sending to Amazon Nova...")
     system_prompt = (
+        f"## Context\n"
+        f"Account: {_account_label}  |  Region: {_region}\n\n"
         "## Input Format\n"
         "The input follows this exact JSON structure (provided as raw string):\n"
         "{\n"
@@ -450,7 +487,7 @@ if __name__ == "__main__":
         "        \"field_name\": {\"before\": \"value\", \"after\": \"value\"},\n"
         "        ...\n"
         "      },\n"
-        "      \"status\": null|\"deleted_externally\",\n"          # <-- new
+        "      \"status\": null|\"deleted_externally\",\n"
         "      \"sensitive\": true|false,\n"
         "      \"security_impact\": null|\"low\"|\"medium\"|\"high\"\n"
         "    },\n"
@@ -479,7 +516,6 @@ if __name__ == "__main__":
         "   and never suggest re-adding, restoring, or recreating a deleted_externally resource.\n\n"
     )
 
-    
     user_query = f"Here is the processed drift report data:\n\n{drift_report}\n\nProvide a plan to resolve this drift."
 
     initial_state = {
@@ -502,14 +538,17 @@ if __name__ == "__main__":
     # Print out to the terminal as usual
     print(f"\n[Agent Response]:\n{agent_output}")
 
-    # NEW: Automatically export the solution to a Markdown file
+    # Automatically export the solution to a Markdown file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_filename = f"drift_reconciliation_report_{timestamp}.md"
-    report_path = os.path.join(TERRAFORM_DIR, report_filename)
+    safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
+    report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
+    report_path = os.path.join(tf_dir, report_filename)
 
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(f"# Terraform Drift Reconciliation Report\n")
+            f.write(f"**Account:** {_account_label}  \n")
+            f.write(f"**Region:** {_region}  \n")
             f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
             f.write(agent_output)

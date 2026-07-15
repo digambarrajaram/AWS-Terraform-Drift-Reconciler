@@ -16,6 +16,13 @@ on:
         options:
           - 'Accept (Align State)'
           - 'Reject (Revert Code)'
+      scope:
+        description: 'Target scope (account + region)'
+        required: true
+        type: choice
+        options:
+          - 'scope-a'
+          - 'scope-b'
 
 permissions:
   id-token: write
@@ -23,27 +30,109 @@ permissions:
   pull-requests: write
 
 env:
-  AWS_REGION: "us-east-1"
   TF_VERSION: "1.9.8"
-  TF_WORKING_DIR: "test/ec2_terraform"
 
 jobs:
-  reconcile-infra:
+  # ------------------------------------------------------------------
+  # Resolve which scope (account + region) this PR or manual run targets
+  # by inspecting the PR branch name / title or the workflow_dispatch
+  # input.  Outputs the matching GitHub Environment, secret/variable
+  # names, and terraform working directory for downstream steps.
+  # ------------------------------------------------------------------
+  resolve-scope:
     if: |
       (github.event_name == 'pull_request' && contains(github.event.pull_request.title, 'Drift fix')) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: production
+    outputs:
+      scope:           ${{ steps.scope.outputs.scope }}
+      gh_environment:  ${{ steps.scope.outputs.gh_environment }}
+      aws_region_var:  ${{ steps.scope.outputs.aws_region_var }}
+      role_arn_var:    ${{ steps.scope.outputs.role_arn_var }}
+      tf_working_dir:  ${{ steps.scope.outputs.tf_working_dir }}
+    steps:
+      - name: Resolve scope from PR metadata or manual input
+        id: scope
+        run: |
+          SCOPE="${{ github.event.inputs.scope }}"
+
+          if [ -z "$SCOPE" ]; then
+            BRANCH="${{ github.event.pull_request.head.ref }}"
+            TITLE="${{ github.event.pull_request.title }}"
+
+            case "$BRANCH" in
+              *drift-fix/scope-a/*) SCOPE="scope-a" ;;
+              *drift-fix/scope-b/*) SCOPE="scope-b" ;;
+            esac
+
+            if [ -z "$SCOPE" ]; then
+              case "$TITLE" in
+                *"[scope-a]"*) SCOPE="scope-a" ;;
+                *"[scope-b]"*) SCOPE="scope-b" ;;
+              esac
+            fi
+          fi
+
+          if [ -z "$SCOPE" ]; then
+            echo "::error::Could not resolve scope from branch, title, or input"
+            exit 1
+          fi
+
+          case "$SCOPE" in
+            scope-a)
+              ENV="scope-a-apply"
+              REGION_VAR="PROD_A_REGION"
+              ROLE_VAR="SCOPE_A_APPLY_ROLE_ARN"
+              TF_DIR="terraform_code/ec2_terraform_account_a"
+              ;;
+            scope-b)
+              ENV="scope-b-apply"
+              REGION_VAR="PROD_B_REGION"
+              ROLE_VAR="SCOPE_B_APPLY_ROLE_ARN"
+              TF_DIR="terraform_code/ec2_terraform_account_b"
+              ;;
+            *)
+              echo "::error::Unknown scope: $SCOPE"
+              exit 1
+              ;;
+          esac
+
+          echo "scope=$SCOPE"                 >> "$GITHUB_OUTPUT"
+          echo "gh_environment=$ENV"           >> "$GITHUB_OUTPUT"
+          echo "aws_region_var=$REGION_VAR"   >> "$GITHUB_OUTPUT"
+          echo "role_arn_var=$ROLE_VAR"       >> "$GITHUB_OUTPUT"
+          echo "tf_working_dir=$TF_DIR"       >> "$GITHUB_OUTPUT"
+
+          echo "🔍 Resolved scope=$SCOPE  env=$ENV  dir=$TF_DIR"
+
+  # ------------------------------------------------------------------
+  # Apply or revert the drift fix in the resolved scope.
+  # ------------------------------------------------------------------
+  reconcile-infra:
+    needs: [resolve-scope]
+    if: |
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.title, 'Drift fix')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.resolve-scope.outputs.gh_environment }}
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          # Always check out the base branch (main), never the merge ref.
+          # On ACCEPT the drift-fix is already merged into main, so this
+          # gives the accepted state.  On REJECT main was never touched,
+          # so this gives the pre-drift state to revert to.  Same ref,
+          # correct result either way — no dependency on the ephemeral
+          # refs/pull/<PR>/merge that can be stale or gone post-close.
+          ref: ${{ github.event.pull_request.base.ref }}
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars[needs.resolve-scope.outputs.role_arn_var] }}
+          aws-region: ${{ vars[needs.resolve-scope.outputs.aws_region_var] }}
           audience: sts.amazonaws.com
 
       - name: Setup Terraform
@@ -52,7 +141,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: terraform init
 
       # =================================================================
@@ -62,9 +151,9 @@ jobs:
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: |
-          echo "✅ ACCEPTED: Applying approved drift fix..."
+          echo "✅ ACCEPTED: Applying approved drift fix to ${{ needs.resolve-scope.outputs.scope }}..."
           terraform plan -out=tfplan -input=false
           terraform apply -auto-approve tfplan
 
@@ -75,9 +164,9 @@ jobs:
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: |
-          echo "❌ REJECTED: Planning revert to original code..."
+          echo "❌ REJECTED: Planning revert to original code for ${{ needs.resolve-scope.outputs.scope }}..."
           terraform plan -out=tfplan -input=false
           echo "Applying revert..."
           terraform apply -auto-approve tfplan
@@ -88,9 +177,10 @@ jobs:
         with:
           script: |
             const merged = '${{ github.event.pull_request.merged }}' === 'true';
+            const scope  = '${{ needs.resolve-scope.outputs.scope }}';
             const outcome = merged
-              ? '✅ **ACCEPTED**: Drift fix applied.'
-              : '❌ **REJECTED**: Drift reverted. AWS restored to original code.';
+              ? `✅ **ACCEPTED** (${scope}): Drift fix applied.`
+              : `❌ **REJECTED** (${scope}): Drift reverted. AWS restored to original code.`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,

@@ -988,7 +988,7 @@ def main():
     )
     parser.add_argument(
         "--tf-dir",
-        default=r"D:\aws-terraform-drift-reconciler\test\ec2_terraform",
+        required=True,
         help="Path to the terraform directory to scan",
     )
     parser.add_argument(

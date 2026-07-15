@@ -17,7 +17,9 @@
       "Bash(terraform validate *)",
       "Bash(timeout 120 terraform providers schema -json)",
       "Bash(terraform version *)",
-      "Bash(terraform providers *)"
+      "Bash(terraform providers *)",
+      "Bash(python *)",
+      "Bash(git -C /mnt/d/aws-terraform-drift-reconciler ls-files)"
     ]
   }
 }

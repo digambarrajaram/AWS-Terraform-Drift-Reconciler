@@ -33,19 +33,27 @@ def to_repo_relative_path(local_path: str) -> str:
     return rel.replace("\\", "/")
 
 
+def _safe_label(account_label: str) -> str:
+    """Sanitise *account_label* for use in git branch names and PR titles."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", account_label)
+
+
 def is_hcledit_available() -> bool:
     return shutil.which("hcledit") is not None
 
 
-def close_superseded_prs(repo, resource_id: str, base_branch: str):
-    """Close older OPEN drift PRs for the same resource before opening a new one.
-    Only touches currently-open PRs — a resource that drifted, was fixed (PR merged
-    or closed), and later drifts again independently will NOT be suppressed, since
-    get_pulls(state='open') no longer sees the earlier resolved PR at all."""
+def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch: str):
+    """Close older OPEN drift PRs for the same resource+account before opening
+    a new one.  Only touches currently-open PRs — a resource that drifted, was
+    fixed (PR merged or closed), and later drifts again independently will NOT
+    be suppressed, since get_pulls(state='open') no longer sees the earlier
+    resolved PR at all."""
     safe_id = resource_id.replace(".", "-")
+    safe_account = _safe_label(account_label)
+    prefix = f"drift-fix/{safe_account}/{safe_id}-"
     open_prs = repo.get_pulls(state="open", base=base_branch)
     for pr in open_prs:
-        if pr.head.ref.startswith(f"drift-fix/{safe_id}-"):
+        if pr.head.ref.startswith(prefix):
             pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
             pr.edit(state="closed")
 
@@ -58,7 +66,8 @@ def create_drift_pr(
         file_path: str,
         file_content: str,
         risk_level: str = "LOW",
-        base_branch: str = None):
+        base_branch: str = None,
+        account_label: str = "default"):
     token = os.getenv("GITHUB_TOKEN")
     repo_name = os.getenv("GITHUB_REPO")
     auth = Auth.Token(token)
@@ -67,11 +76,16 @@ def create_drift_pr(
 
     base_branch = base_branch or os.getenv("GITHUB_BASE_BRANCH", "main")
 
-    # Prevent duplicate open PRs for the same resource across repeated runs.
-    close_superseded_prs(repo, resource_id, base_branch)
+    safe_account = _safe_label(account_label)
+
+    # Prevent duplicate open PRs for the same resource+account across
+    # repeated runs.
+    close_superseded_prs(repo, resource_id, account_label, base_branch)
 
     safe_id = resource_id.replace(".", "-")
-    head_branch = f"drift-fix/{safe_id}-{int(datetime.utcnow().timestamp())}"
+    head_branch = f"drift-fix/{safe_account}/{safe_id}-{int(datetime.utcnow().timestamp())}"
+
+    pr_title = f"[{account_label}] {pr_title}"
 
     base_ref = repo.get_git_ref(f"heads/{base_branch}")
     repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_ref.object.sha)
@@ -131,7 +145,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
     return pr
 
 
-def create_drift_pr_for_mode(finding: dict, mode: str):
+def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "default"):
     resource_id = finding["resource_id"]
     risk_level = finding["risk_level"]
     is_deleted = finding.get("status") == "deleted_externally"
@@ -165,6 +179,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str):
         file_path=target_path,
         file_content=content,
         risk_level=risk_level,
+        account_label=account_label,
     )
 
 def get_resource_block_text(file_path, resource_type, resource_name):

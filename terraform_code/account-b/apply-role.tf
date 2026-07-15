@@ -90,6 +90,7 @@ data "aws_iam_policy_document" "apply_ec2_vpc" {
       "ec2:RevokeSecurityGroupEgress",
       "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
       "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
+      "ec2:ModifySecurityGroupRules",
     ]
     resources = ["*"]
   }

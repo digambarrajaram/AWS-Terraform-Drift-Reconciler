@@ -54,11 +54,11 @@ variable "allowed_ssh_cidr_b" {
   default     = "203.0.113.10/32" 
 }
 
-variable "key_name" {
-  description = "AWS EC2 Key Pair name"
-  type        = string
-  default     = "drrift-key"
-}
+#variable "key_name" {
+#description = "AWS EC2 Key Pair name"
+#type        = string
+  #default     = "drrift-key"
+#}
 
 # ─────────────────────────────────────────────
 # SECURITY GROUP
@@ -79,7 +79,7 @@ resource "aws_security_group" "drift_web_ssh_sg_b" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "https_ingress_b" {
-  security_group_id = aws_security_group.drift_web_ssh_sg.id
+  security_group_id = aws_security_group.drift_web_ssh_sg_b.id
   from_port         = 443
   to_port           = 443
   ip_protocol       = "tcp"
@@ -88,7 +88,7 @@ resource "aws_vpc_security_group_ingress_rule" "https_ingress_b" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ssh_ingress_b" {
-  security_group_id = aws_security_group.drift_web_ssh_sg.id
+  security_group_id = aws_security_group.drift_web_ssh_sg_b.id
   from_port         = 22
   to_port           = 22
   ip_protocol       = "tcp"
@@ -98,7 +98,7 @@ resource "aws_vpc_security_group_ingress_rule" "ssh_ingress_b" {
 
 # trivy:ignore:AWS-0104 -- Set a more restrictive cidr range
 resource "aws_vpc_security_group_egress_rule" "all_egress_b" {
-  security_group_id = aws_security_group.drift_web_ssh_sg.id
+  security_group_id = aws_security_group.drift_web_ssh_sg_b.id
   ip_protocol       = "tcp"                  # Changed from "-1" to restrict by protocol
   from_port         = 443                    # Restricting egress to secure web traffic
   to_port           = 443
@@ -112,8 +112,8 @@ resource "aws_vpc_security_group_egress_rule" "all_egress_b" {
 resource "aws_instance" "drift_web_server_b" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = "t2.nano" # FREE TIER ELIGIBLE (750 hrs/month)
-  key_name               = var.key_name
-  vpc_security_group_ids = [aws_security_group.drift_web_ssh_sg.id]
+  #key_name               = var.key_name
+  vpc_security_group_ids = [aws_security_group.drift_web_ssh_sg_b.id]
 
   # Ubuntu 24.04 uses 8GB by default - no override needed
   # But explicitly set to match and avoid surprises
@@ -136,9 +136,9 @@ resource "aws_instance" "drift_web_server_b" {
 # ─────────────────────────────────────────────
 
 output "instance_public_ip" {
-  value = aws_instance.drift_web_server.public_ip
+  value = aws_instance.drift_web_server_b.public_ip
 }
 
-output "ssh_command" {
-  value = "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${aws_instance.drift_web_server.public_ip}"
-}
+#output "ssh_command" {
+  #value = "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${aws_instance.drift_web_server_b.public_ip}"
+#}

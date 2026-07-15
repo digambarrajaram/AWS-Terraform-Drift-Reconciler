@@ -198,6 +198,61 @@ def get_resource_block_text(file_path, resource_type, resource_name):
     return content[m.start():i]
 
 
+def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, deleted: bool) -> str | None:
+    """Regex-based fallback when hcledit is not available.
+
+    For *deleted* resources the entire resource block is removed.  For
+    drifted attributes each before → after value is replaced inside the
+    block.  Returns the patched content on success, or None when the
+    resource block cannot be located."""
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    if "." not in resource_id:
+        return None
+    want_type, want_name = resource_id.split(".", 1)
+
+    lines = content.splitlines()
+    in_block = False
+    depth = 0
+    block_start = 0
+    block_end = len(lines) - 1
+
+    for i, line in enumerate(lines):
+        m = re.search(r'resource\s+"([^"]+)"\s+"([^"]+)"', line)
+        if m and m.group(1) == want_type and m.group(2) == want_name:
+            in_block = True
+            block_start = i
+            depth = line.count("{") - line.count("}")
+            continue
+        if in_block:
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                block_end = i
+                break
+
+    if not in_block:
+        return None
+
+    if deleted:
+        return "\n".join(lines[:block_start] + lines[block_end + 1:])
+
+    applied = False
+    for i in range(block_start, block_end + 1):
+        for field, vals in changes.items():
+            before_val = str(vals.get("before", ""))
+            after_val = str(vals.get("after", ""))
+            if before_val and before_val in lines[i]:
+                lines[i] = lines[i].replace(before_val, after_val, 1)
+                applied = True
+                break
+
+    return "\n".join(lines) if applied else None
+
+
 def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
     """Patch a TEMP COPY of the file via hcledit — the real local file on disk
     is never modified. Returns the patched content as a string for upload to GitHub."""
@@ -207,8 +262,12 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
 
     try:
         if not is_hcledit_available():
-            print(f"[WARN] hcledit not found on PATH — skipping auto-patch for {resource_id}. "
-                  f"Install from https://github.com/minamijoyo/hcledit/releases to enable this.")
+            print(f"[WARN] hcledit not found on PATH — applying regex fallback for {resource_id}. "
+                  f"Install from https://github.com/minamijoyo/hcledit/releases for more reliable patching.")
+            patched = _regex_patch_tf_file(tmp_path, resource_id, changes, deleted)
+            if patched is not None:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(patched)
             with open(tmp_path, encoding="utf-8") as f:
                 return f.read()
 

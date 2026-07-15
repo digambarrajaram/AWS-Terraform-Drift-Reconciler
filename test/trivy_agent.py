@@ -8,7 +8,10 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
+
+logging.getLogger("botocore").setLevel(logging.ERROR)
 import re
 import shutil
 import subprocess

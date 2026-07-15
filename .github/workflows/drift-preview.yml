@@ -12,27 +12,91 @@ permissions:
   pull-requests: write
 
 env:
-  AWS_REGION: "us-east-1"
   TF_VERSION: "1.9.8"
 
 jobs:
-  preview:
+  # ------------------------------------------------------------------
+  # Same scope resolution as drift-reconciler.yml, but this job only
+  # needs the SCAN role — `terraform plan` is read-only, so it runs
+  # unattended (no gh_environment / approval gate needed here).
+  # ------------------------------------------------------------------
+  resolve-scope:
     if: contains(github.event.pull_request.title, 'Drift fix')
     runs-on: ubuntu-latest
+    outputs:
+      scope:           ${{ steps.scope.outputs.scope }}
+      aws_region_var:  ${{ steps.scope.outputs.aws_region_var }}
+      role_arn_var:    ${{ steps.scope.outputs.role_arn_var }}
+      tf_working_dir:  ${{ steps.scope.outputs.tf_working_dir }}
+    steps:
+      - name: Resolve scope from PR branch/title
+        id: scope
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          TITLE="${{ github.event.pull_request.title }}"
 
-    defaults:
-      run:
-        working-directory: ./test/ec2_terraform/
+          case "$BRANCH" in
+            *drift-fix/scope-a/*) SCOPE="scope-a" ;;
+            *drift-fix/scope-b/*) SCOPE="scope-b" ;;
+          esac
+
+          if [ -z "$SCOPE" ]; then
+            case "$TITLE" in
+              *"[scope-a]"*) SCOPE="scope-a" ;;
+              *"[scope-b]"*) SCOPE="scope-b" ;;
+            esac
+          fi
+
+          if [ -z "$SCOPE" ]; then
+            echo "::error::Could not resolve scope from branch or title"
+            exit 1
+          fi
+
+          case "$SCOPE" in
+            scope-a)
+              REGION_VAR="PROD_A_REGION"
+              ROLE_VAR="SCOPE_A_SCAN_ROLE_ARN"
+              TF_DIR="terraform_code/ec2_terraform_account_a"
+              ;;
+            scope-b)
+              REGION_VAR="PROD_B_REGION"
+              ROLE_VAR="SCOPE_B_SCAN_ROLE_ARN"
+              TF_DIR="terraform_code/ec2_terraform_account_b"
+              ;;
+            *)
+              echo "::error::Unknown scope: $SCOPE"
+              exit 1
+              ;;
+          esac
+
+          echo "scope=$SCOPE"                 >> "$GITHUB_OUTPUT"
+          echo "aws_region_var=$REGION_VAR"   >> "$GITHUB_OUTPUT"
+          echo "role_arn_var=$ROLE_VAR"       >> "$GITHUB_OUTPUT"
+          echo "tf_working_dir=$TF_DIR"       >> "$GITHUB_OUTPUT"
+
+          echo "🔍 Resolved scope=$SCOPE  role_var=$ROLE_VAR  dir=$TF_DIR"
+
+  preview:
+    needs: [resolve-scope]
+    if: contains(github.event.pull_request.title, 'Drift fix')
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          # Preview always evaluates the PR's proposed change against the
+          # merge-preview ref — unlike the apply workflow, this one only
+          # ever runs while the PR is open, so the default merge ref is
+          # fine here (no stale-ref risk like the post-close apply job had).
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars[needs.resolve-scope.outputs.role_arn_var] }}
+          aws-region: ${{ vars[needs.resolve-scope.outputs.aws_region_var] }}
+          audience: sts.amazonaws.com
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -40,10 +104,12 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: terraform init
 
       - name: Terraform Plan
         id: plan
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: terraform plan -no-color -input=false
         continue-on-error: true
 
@@ -51,26 +117,27 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const scope = '${{ needs.resolve-scope.outputs.scope }}';
             const planOutput = `${{ steps.plan.outputs.stdout }}${{ steps.plan.outputs.stderr }}`;
             const truncated = planOutput.length > 6000 ? planOutput.substring(0, 6000) + '\n\n... (truncated)' : planOutput;
-            
-            const body = `## 📋 Drift Plan Preview
-            
+
+            const body = `## 📋 Drift Plan Preview (${scope})
+
             **PR:** #${{ github.event.pull_request.number }}
-            
+
             <details><summary>📝 Click to expand Terraform Plan</summary>
-            
+
             \`\`\`\n${truncated}\n\`\`\`
-            
+
             </details>
-            
+
             ---
-            
+
             **Next Steps:**
             - ✅ **Merge this PR** → Accept the drift. Apply code to match live AWS state.
             - ❌ **Close this PR** → Reject the drift. Revert AWS to match original code.
             `;
-            
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,

@@ -1,6 +1,13 @@
 import argparse
 from datetime import datetime
+import logging
 import os
+
+# Suppress botocore credential-discovery noise ("Both api_key and AWS
+# credentials were provided …") that fires every time a Bedrock client
+# is instantiated — twice per run (main agent + Trivy gate).  This is
+# purely SDK chatter; actual auth errors still surface as exceptions.
+logging.getLogger("botocore").setLevel(logging.ERROR)
 import re
 import shutil
 import subprocess

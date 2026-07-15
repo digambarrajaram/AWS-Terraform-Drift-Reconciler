@@ -346,13 +346,34 @@ def drift_alert(state: State):
 def drift_pr_from_finding(state: State):
     if not state.get("drift_detected"):
         return {"pr_urls": []}
-    pr_urls = []
+
+    # Group findings by file_path so changes to the same .tf file
+    # ship in one PR instead of N independent PRs.
+    by_file: dict[str, list[dict]] = {}
+    report_only: list[dict] = []
     for finding in state["drift_findings"]:
         if finding.get("status") == "externally_managed":
-            continue  # no HCL to patch — skip PR
+            continue
+        fp = finding.get("file_path")
+        if fp:
+            by_file.setdefault(fp, []).append(finding)
+        else:
+            report_only.append(finding)
+
+    pr_urls = []
+    for file_path, group in by_file.items():
+        if len(group) == 1:
+            pr = gi.create_drift_pr_for_mode(group[0], "code_to_reality", account_label=_account_label)
+        else:
+            pr = gi.create_drift_pr_for_file(group, "code_to_reality", account_label=_account_label)
+        if pr is not None:
+            pr_urls.append(pr.html_url)
+
+    for finding in report_only:
         pr = gi.create_drift_pr_for_mode(finding, "code_to_reality", account_label=_account_label)
         if pr is not None:
             pr_urls.append(pr.html_url)
+
     return {"pr_urls": pr_urls}
 
 

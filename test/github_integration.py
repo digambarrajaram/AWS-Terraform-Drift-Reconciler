@@ -182,6 +182,99 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         account_label=account_label,
     )
 
+
+def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
+    """Apply changes from multiple findings to one temp copy of the file.
+
+    Each finding's before→after replacements (or block removal for
+    deleted_externally) are applied sequentially so every drift fix
+    lands in a single commit."""
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tf")
+    os.close(tmp_fd)
+    shutil.copy(file_path, tmp_path)
+
+    try:
+        for f in findings:
+            resource_id = f["resource_id"]
+            changes = f.get("changes", {})
+            deleted = f.get("status") == "deleted_externally"
+
+            if not is_hcledit_available():
+                patched = _regex_patch_tf_file(tmp_path, resource_id, changes, deleted)
+                if patched is not None:
+                    with open(tmp_path, "w", encoding="utf-8") as fh:
+                        fh.write(patched)
+            else:
+                if deleted:
+                    subprocess.run(
+                        ["hcledit", "block", "rm", f"resource.{resource_id}", "-f", tmp_path, "-u"],
+                        check=False, capture_output=True, text=True,
+                    )
+                else:
+                    for field, vals in changes.items():
+                        if "." in field or "[" in field:
+                            continue
+                        subprocess.run(
+                            ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
+                             json.dumps(vals["after"]), "-f", tmp_path, "-u"],
+                            check=False,
+                        )
+
+        with open(tmp_path, encoding="utf-8") as fh:
+            return fh.read()
+    finally:
+        os.remove(tmp_path)
+
+
+def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str = "default"):
+    """Create a single PR that reconciles every drift finding for one file.
+
+    All before→after value replacements and deleted-resource block removals
+    are applied to the same temp copy so related changes ship together."""
+    if not findings:
+        return None
+
+    file_path = findings[0].get("file_path")
+    if not file_path:
+        return None
+
+    # Skip findings that are unpatchable (computed block fields only).
+    actionable = [f for f in findings
+                  if not is_unpatchable_finding(f["resource_id"], f.get("changes", {}))]
+    if not actionable:
+        return None
+
+    patched_content = _apply_changes_batch(file_path, actionable)
+
+    resource_ids = [f["resource_id"] for f in actionable]
+    highest_risk = "LOW"
+    for level in ("HIGH", "MEDIUM", "LOW"):
+        if any(f.get("risk_level") == level for f in actionable):
+            highest_risk = level
+            break
+
+    count = len(actionable)
+    pr_title = f"Drift fix: {count} resource(s) [{highest_risk}]"
+
+    drift_summary = "\n".join(
+        f"- **`{f['resource_id']}`**: {f['drift_summary']}" for f in actionable
+    )
+    plan_output = "\n\n".join(
+        f"### `{f['resource_id']}`\n```text\n{f['plan_output']}\n```" for f in actionable
+    )
+
+    return create_drift_pr(
+        resource_id=", ".join(resource_ids),
+        pr_title=pr_title,
+        drift_summary=drift_summary,
+        plan_output=plan_output,
+        file_path=to_repo_relative_path(file_path),
+        file_content=patched_content,
+        risk_level=highest_risk,
+        account_label=account_label,
+    )
+
+
 def get_resource_block_text(file_path, resource_type, resource_name):
     """Read-only lookup — safe to read the real local file directly, never writes."""
     with open(file_path, encoding="utf-8") as f:

@@ -134,18 +134,31 @@ jobs:
           SCOPE="${{ needs.resolve-scope.outputs.scope }}"
           case "$SCOPE" in
             scope-a)
-              echo "role_arn=${{ vars.SCOPE_A_APPLY_ROLE_ARN }}" >> "$GITHUB_OUTPUT"
-              echo "aws_region=${{ vars.PROD_A_REGION }}" >> "$GITHUB_OUTPUT"
+              ROLE="${{ secrets.SCOPE_A_APPLY_ROLE_ARN }}"
+              REGION="${{ vars.PROD_A_REGION }}"
               ;;
             scope-b)
-              echo "role_arn=${{ vars.SCOPE_B_APPLY_ROLE_ARN }}" >> "$GITHUB_OUTPUT"
-              echo "aws_region=${{ vars.PROD_B_REGION }}" >> "$GITHUB_OUTPUT"
+              ROLE="${{ secrets.SCOPE_B_APPLY_ROLE_ARN }}"
+              REGION="${{ vars.PROD_B_REGION }}"
               ;;
             *)
               echo "::error::Unknown scope: $SCOPE"
               exit 1
               ;;
           esac
+
+          if [ -z "$ROLE" ]; then
+            echo "::error::Secret SCOPE_*_APPLY_ROLE_ARN is empty — check GitHub Secrets for scope=$SCOPE"
+            exit 1
+          fi
+          if [ -z "$REGION" ]; then
+            echo "::error::Variable PROD_*_REGION is empty — check GitHub Variables for scope=$SCOPE"
+            exit 1
+          fi
+
+          echo "role_arn=$ROLE"       >> "$GITHUB_OUTPUT"
+          echo "aws_region=$REGION"   >> "$GITHUB_OUTPUT"
+          echo "🔐 Resolved role_arn=${ROLE:0:20}... region=$REGION"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4

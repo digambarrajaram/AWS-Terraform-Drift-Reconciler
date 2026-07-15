@@ -128,11 +128,30 @@ jobs:
           # refs/pull/<PR>/merge that can be stale or gone post-close.
           ref: ${{ github.event.pull_request.base.ref }}
 
+      - name: Resolve scope credentials
+        id: creds
+        run: |
+          SCOPE="${{ needs.resolve-scope.outputs.scope }}"
+          case "$SCOPE" in
+            scope-a)
+              echo "role_arn=${{ vars.SCOPE_A_APPLY_ROLE_ARN }}" >> "$GITHUB_OUTPUT"
+              echo "aws_region=${{ vars.PROD_A_REGION }}" >> "$GITHUB_OUTPUT"
+              ;;
+            scope-b)
+              echo "role_arn=${{ vars.SCOPE_B_APPLY_ROLE_ARN }}" >> "$GITHUB_OUTPUT"
+              echo "aws_region=${{ vars.PROD_B_REGION }}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown scope: $SCOPE"
+              exit 1
+              ;;
+          esac
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars[needs.resolve-scope.outputs.role_arn_var] }}
-          aws-region: ${{ vars[needs.resolve-scope.outputs.aws_region_var] }}
+          role-to-assume: ${{ steps.creds.outputs.role_arn }}
+          aws-region: ${{ steps.creds.outputs.aws_region }}
           audience: sts.amazonaws.com
 
       - name: Setup Terraform

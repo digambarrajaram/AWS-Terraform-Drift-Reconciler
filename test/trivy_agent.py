@@ -163,7 +163,7 @@ def _get_llm():
     global _llm
     if _llm is None:
         _llm = ChatBedrockConverse(
-            model="amazon.nova-pro-v1:0",
+            model="us.amazon.nova-pro-v1:0",
             temperature=0.1,
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
         )

@@ -21,7 +21,7 @@ variable "state_bucket_name" {
 
 variable "lock_table_name" {
   type    = string
-  default = "terraform-locks"
+  default = "terraform-locks-b"
 }
 
 variable "github_org" {

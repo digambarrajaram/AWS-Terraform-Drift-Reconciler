@@ -263,8 +263,14 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
         f"### `{f['resource_id']}`\n```text\n{f['plan_output']}\n```" for f in actionable
     )
 
+    # Use the first resource id as the git-ref anchor with a batch-size
+    # suffix so the branch name stays valid (no commas / spaces / special
+    # chars beyond what git allows).  The full resource list is in the
+    # PR title and body.
+    branch_id = resource_ids[0] if count == 1 else f"{resource_ids[0]}-batch-{count}"
+
     return create_drift_pr(
-        resource_id=", ".join(resource_ids),
+        resource_id=branch_id,
         pr_title=pr_title,
         drift_summary=drift_summary,
         plan_output=plan_output,

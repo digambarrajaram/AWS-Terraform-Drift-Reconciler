@@ -51,13 +51,13 @@ data "aws_ami" "ubuntu" {
 variable "allowed_ssh_cidr_b" {
   description = "Your IP for SSH. Get it: curl https://checkip.amazonaws.com"
   type        = string
-  default     = "203.0.113.10/32" 
+  default     = "203.0.113.10/32"
 }
 
 #variable "key_name" {
 #description = "AWS EC2 Key Pair name"
 #type        = string
-  #default     = "drrift-key"
+#default     = "drrift-key"
 #}
 
 # ─────────────────────────────────────────────
@@ -89,9 +89,9 @@ resource "aws_vpc_security_group_ingress_rule" "https_ingress_b" {
 
 resource "aws_vpc_security_group_ingress_rule" "ssh_ingress_b" {
   security_group_id = aws_security_group.drift_web_ssh_sg_b.id
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
+  from_port         = 0
+  to_port           = 65535
+  ip_protocol       = "udp"
   cidr_ipv4         = "192.0.2.0/24"
   description       = "SSH access from trusted corporate network"
 }
@@ -99,10 +99,10 @@ resource "aws_vpc_security_group_ingress_rule" "ssh_ingress_b" {
 # trivy:ignore:AWS-0104 -- Set a more restrictive cidr range
 resource "aws_vpc_security_group_egress_rule" "all_egress_b" {
   security_group_id = aws_security_group.drift_web_ssh_sg_b.id
-  ip_protocol       = "tcp"                  # Changed from "-1" to restrict by protocol
-  from_port         = 443                    # Restricting egress to secure web traffic
+  ip_protocol       = "tcp" # Changed from "-1" to restrict by protocol
+  from_port         = 443   # Restricting egress to secure web traffic
   to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"            # Open for updates, but restricted by port now
+  cidr_ipv4         = "0.0.0.0/0" # Open for updates, but restricted by port now
   description       = "Allow outbound HTTPS for system updates and APIs"
 }
 # ─────────────────────────────────────────────
@@ -110,8 +110,8 @@ resource "aws_vpc_security_group_egress_rule" "all_egress_b" {
 # ─────────────────────────────────────────────
 
 resource "aws_instance" "drift_web_server_b" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t2.nano" # FREE TIER ELIGIBLE (750 hrs/month)
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t2.nano" # FREE TIER ELIGIBLE (750 hrs/month)
   #key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.drift_web_ssh_sg_b.id]
 
@@ -140,5 +140,5 @@ output "instance_public_ip" {
 }
 
 #output "ssh_command" {
-  #value = "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${aws_instance.drift_web_server_b.public_ip}"
+#value = "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${aws_instance.drift_web_server_b.public_ip}"
 #}

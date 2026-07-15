@@ -31,7 +31,7 @@ variable "github_org" {
 
 variable "github_repo" {
   type = string
-  default = "github_repo=AWS-Terraform-Drift-Reconciler"
+  default = "AWS-Terraform-Drift-Reconciler"
 }
 
 variable "scan_allowed_branch" {

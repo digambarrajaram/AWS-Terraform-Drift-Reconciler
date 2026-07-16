@@ -1,0 +1,23 @@
+{
+  "resource_id": "aws_instance.drift_web_server",
+  "file_path": "terraform_code/ec2_terraform_account_a/main.tf",
+  "changes": {
+    "tags": {
+      "before": {
+        "Name": "WebServer12"
+      },
+      "after": {
+        "Name": "WebServer"
+      }
+    },
+    "tags_all": {
+      "before": {
+        "Name": "WebServer12"
+      },
+      "after": {
+        "Name": "WebServer"
+      }
+    }
+  },
+  "captured_at": "2026-07-16T13:25:05.676199Z"
+}

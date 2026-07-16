@@ -294,6 +294,10 @@ def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
                     for field, vals in changes.items():
                         if "." in field or "[" in field:
                             continue
+                        if _is_complex_value(vals.get("after")):
+                            print(f"  ⚠ {resource_id}.{field}: complex value (map/list) — "
+                                  f"skipping auto-patch, requires manual HCL edit")
+                            continue
                         subprocess.run(
                             ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
                              json.dumps(str(vals["after"])), "-f", tmp_path, "-u"],
@@ -484,6 +488,25 @@ def _extract_field_values(
     return ("not_found", {})
 
 
+def _is_complex_value(val) -> bool:
+    """Return True when *val* looks like a JSON-serialised map or list.
+
+    The drift report serialises HCL maps / lists as JSON strings (e.g.
+    ``{"Name":"WebServer"}``).  Neither the hcledit nor the regex fallback
+    patcher can convert these back to valid HCL reliably, so they must be
+    skipped with a warning rather than blindly inserted as string literals
+    (which produces ``tags = "{'Name': 'WebServer'}"`` — invalid HCL)."""
+    if isinstance(val, dict):
+        return True
+    if isinstance(val, list):
+        return True
+    if isinstance(val, str):
+        stripped = val.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return True
+    return False
+
+
 def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, deleted: bool) -> str | None:
     """Regex-based fallback when hcledit is not available.
 
@@ -529,6 +552,8 @@ def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, delete
     applied = False
     for i in range(block_start, block_end + 1):
         for field, vals in changes.items():
+            if _is_complex_value(vals.get("before")) or _is_complex_value(vals.get("after")):
+                continue  # map/list — can't safely regex-replace, skip
             before_val = str(vals.get("before", ""))
             after_val = str(vals.get("after", ""))
             if before_val and before_val in lines[i]:
@@ -567,6 +592,10 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
         else:
             for field, vals in changes.items():
                 if "." in field or "[" in field:
+                    continue
+                if _is_complex_value(vals.get("after")):
+                    print(f"  ⚠ {resource_id}.{field}: complex value (map/list) — "
+                          f"skipping auto-patch, requires manual HCL edit")
                     continue
                 try:
                     subprocess.run(

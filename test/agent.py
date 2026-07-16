@@ -718,7 +718,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tf-dir",
-        required=True,
+        default=os.getcwd(),
         help="Path to the terraform directory to scan for drift",
     )
     parser.add_argument(
@@ -749,18 +749,46 @@ if __name__ == "__main__":
         default=None,
         help="PR number whose drift fix to roll back (required with --rollback)",
     )
+    parser.add_argument(
+        "--trends",
+        action="store_true",
+        default=False,
+        help="Generate a drift-trends report instead of running the pipeline",
+    )
+    parser.add_argument(
+        "--trends-account",
+        default=None,
+        help="Account to report on with --trends (default: same as --account-label)",
+    )
+    parser.add_argument(
+        "--trends-days",
+        type=int,
+        default=90,
+        help="Lookback window in days for --trends (0 = all-time)",
+    )
     args = parser.parse_args()
-
-    tf_dir = os.path.abspath(args.tf_dir)
-
-    if not os.path.isdir(tf_dir):
-        print(f"Error: directory not found — {tf_dir}")
-        sys.exit(1)
 
     # Set module-level globals before the pipeline runs so graph nodes
     # (alerts, LLM calls, unmanaged scanner) pick up the right values.
     _region = args.region
     _account_label = args.account_label
+
+    # --trends mode: report only, no terraform directory needed.
+    if args.trends:
+        import drift_trends
+        account = args.trends_account or args.account_label
+        report = drift_trends.generate_report(account, days=args.trends_days)
+        output_path = os.path.join(os.getcwd(), f"drift-trends-report-{account}.md")
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(report)
+        print(f"\n[Success] Trends report written to: {output_path}")
+        sys.exit(0)
+
+    tf_dir = os.path.abspath(args.tf_dir)
+    if not os.path.isdir(tf_dir):
+        print(f"Error: directory not found — {tf_dir}")
+        sys.exit(1)
     _tf_dir = tf_dir
 
     if args.rollback:

@@ -223,6 +223,16 @@ jobs:
         working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: terraform apply -auto-approve tfplan
 
+      - name: "[ACCEPT] Mark drift history resolved"
+        if: |
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
+        run: |
+          python ${{ github.workspace }}/test/drift_history.py resolve \
+            ${{ github.event.pull_request.number }} \
+            ${{ needs.resolve-scope.outputs.scope }} \
+            "PR merged — code updated to match live AWS state"
+
       # =================================================================
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
       # =================================================================
@@ -236,6 +246,16 @@ jobs:
           terraform plan -out=tfplan -input=false
           echo "Applying revert..."
           terraform apply -auto-approve tfplan
+
+      - name: "[REJECT] Mark drift history resolved"
+        if: |
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
+        run: |
+          python ${{ github.workspace }}/test/drift_history.py resolve \
+            ${{ github.event.pull_request.number }} \
+            ${{ needs.resolve-scope.outputs.scope }} \
+            "PR closed — AWS reverted to match original code"
 
       - name: Comment Result
         if: github.event_name == 'pull_request'

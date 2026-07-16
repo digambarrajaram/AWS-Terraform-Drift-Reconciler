@@ -8,6 +8,8 @@ import re
 import shutil
 import tempfile
 
+import drift_history
+
 load_dotenv()
 
 
@@ -176,6 +178,21 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
         except GithubException as e:
             print(f"  ⚠ Failed to store drift baseline for {resource_id}: {e}")
 
+    # Append to the per-account drift history for trend reporting.
+    try:
+        drift_history.append_entry(
+            resource_id=resource_id,
+            account_label=account_label,
+            region=os.environ.get("AWS_REGION", "unknown"),
+            pr_number=pr.number,
+            pr_type="rollback" if is_rollback else "fix",
+            severity=risk_level,
+            fields_changed=list(changes.keys()) if changes else [],
+            drift_summary=drift_summary,
+        )
+    except Exception as exc:
+        print(f"  ⚠ Failed to append drift history: {exc}")
+
     print(f"🎉 PR Created: {pr.html_url}")
     return pr
 
@@ -279,7 +296,7 @@ def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
                             continue
                         subprocess.run(
                             ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                             json.dumps(vals["after"]), "-f", tmp_path, "-u"],
+                             json.dumps(str(vals["after"])), "-f", tmp_path, "-u"],
                             check=False,
                         )
 
@@ -377,6 +394,22 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
             )
         except GithubException as e:
             print(f"  ⚠ Failed to store drift baseline for {rid}: {e}")
+
+    # One history entry per resource in the batch.
+    for f in actionable:
+        try:
+            drift_history.append_entry(
+                resource_id=f["resource_id"],
+                account_label=account_label,
+                region=os.environ.get("AWS_REGION", "unknown"),
+                pr_number=pr.number,
+                pr_type="batch",
+                severity=f.get("risk_level", "LOW"),
+                fields_changed=list(f.get("changes", {}).keys()),
+                drift_summary=f.get("drift_summary", ""),
+            )
+        except Exception as exc:
+            print(f"  ⚠ Failed to append drift history for {f['resource_id']}: {exc}")
 
     return pr
 
@@ -538,7 +571,7 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
                 try:
                     subprocess.run(
                         ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                         json.dumps(vals["after"]), "-f", tmp_path, "-u"],
+                         json.dumps(str(vals["after"])), "-f", tmp_path, "-u"],
                         check=False,
                     )
                 except FileNotFoundError:

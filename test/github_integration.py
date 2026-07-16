@@ -42,20 +42,28 @@ def is_hcledit_available() -> bool:
     return shutil.which("hcledit") is not None
 
 
-def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch: str):
+def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch: str, is_rollback: bool = False):
     """Close older OPEN drift PRs for the same resource+account before opening
     a new one.  Only touches currently-open PRs — a resource that drifted, was
     fixed (PR merged or closed), and later drifts again independently will NOT
     be suppressed, since get_pulls(state='open') no longer sees the earlier
-    resolved PR at all."""
+    resolved PR at all.
+
+    When *is_rollback* is True, only closes other rollback PRs.  When False,
+    only closes regular drift-fix PRs.  The two types never supersede each
+    other — a human may want both a fix and a rollback open simultaneously."""
     safe_id = resource_id.replace(".", "-")
     safe_account = _safe_label(account_label)
     prefix = f"drift-fix/{safe_account}/{safe_id}-"
     open_prs = repo.get_pulls(state="open", base=base_branch)
     for pr in open_prs:
-        if pr.head.ref.startswith(prefix):
-            pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
-            pr.edit(state="closed")
+        if not pr.head.ref.startswith(prefix):
+            continue
+        branch_is_rollback = "-rollback-" in pr.head.ref
+        if branch_is_rollback != is_rollback:
+            continue  # never cross-type supersede
+        pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
+        pr.edit(state="closed")
 
 
 def create_drift_pr(
@@ -67,7 +75,9 @@ def create_drift_pr(
         file_content: str,
         risk_level: str = "LOW",
         base_branch: str = None,
-        account_label: str = "default"):
+        account_label: str = "default",
+        changes: dict | None = None,
+        is_rollback: bool = False):
     token = os.getenv("GITHUB_TOKEN")
     repo_name = os.getenv("GITHUB_REPO")
     auth = Auth.Token(token)
@@ -80,7 +90,7 @@ def create_drift_pr(
 
     # Prevent duplicate open PRs for the same resource+account across
     # repeated runs.
-    close_superseded_prs(repo, resource_id, account_label, base_branch)
+    close_superseded_prs(repo, resource_id, account_label, base_branch, is_rollback=is_rollback)
 
     safe_id = resource_id.replace(".", "-")
     head_branch = f"drift-fix/{safe_account}/{safe_id}-{int(datetime.utcnow().timestamp())}"
@@ -140,6 +150,31 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
         pr.add_to_labels("drift-reconciler", f"risk:{risk_level.lower()}")
     except GithubException:
         pass
+
+    # Store a drift baseline so future rollbacks can reverse this exact
+    # fix by swapping before/after and re-patching.  One baseline per
+    # resource per PR — never overwritten.
+    if changes:
+        safe_rid = resource_id.replace(".", "-")
+        baseline_path = f".drift-baselines/pr-{pr.number}/{safe_rid}.json"
+        baseline_content = json.dumps(
+            {
+                "resource_id": resource_id,
+                "file_path": file_path,
+                "changes": changes,
+                "captured_at": datetime.utcnow().isoformat() + "Z",
+            },
+            indent=2,
+        )
+        try:
+            repo.create_file(
+                path=baseline_path,
+                message=f"[baseline] Store drift baseline for {resource_id}",
+                content=baseline_content,
+                branch=head_branch,
+            )
+        except GithubException as e:
+            print(f"  ⚠ Failed to store drift baseline for {resource_id}: {e}")
 
     print(f"🎉 PR Created: {pr.html_url}")
     return pr
@@ -207,6 +242,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         file_content=content,
         risk_level=risk_level,
         account_label=account_label,
+        changes=finding.get("changes") if finding.get("file_path") else None,
     )
 
 
@@ -296,7 +332,7 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
     # PR title and body.
     branch_id = resource_ids[0] if count == 1 else f"{resource_ids[0]}-batch-{count}"
 
-    return create_drift_pr(
+    pr = create_drift_pr(
         resource_id=branch_id,
         pr_title=pr_title,
         drift_summary=drift_summary,
@@ -306,6 +342,43 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
         risk_level=highest_risk,
         account_label=account_label,
     )
+    if pr is None:
+        return None
+
+    # Store a baseline per resource under the same PR directory so each
+    # one can be rolled back independently.
+    token = os.getenv("GITHUB_TOKEN")
+    repo_name = os.getenv("GITHUB_REPO")
+    g = Github(auth=Auth.Token(token))
+    repo = g.get_repo(repo_name)
+
+    for f in actionable:
+        changes = f.get("changes")
+        if not changes:
+            continue
+        rid = f["resource_id"]
+        safe_rid = rid.replace(".", "-")
+        baseline_path = f".drift-baselines/pr-{pr.number}/{safe_rid}.json"
+        baseline_content = json.dumps(
+            {
+                "resource_id": rid,
+                "file_path": to_repo_relative_path(file_path),
+                "changes": changes,
+                "captured_at": datetime.utcnow().isoformat() + "Z",
+            },
+            indent=2,
+        )
+        try:
+            repo.create_file(
+                path=baseline_path,
+                message=f"[baseline] Store drift baseline for {rid}",
+                content=baseline_content,
+                branch=pr.head.ref,
+            )
+        except GithubException as e:
+            print(f"  ⚠ Failed to store drift baseline for {rid}: {e}")
+
+    return pr
 
 
 def get_resource_block_text(file_path, resource_type, resource_name):
@@ -322,6 +395,60 @@ def get_resource_block_text(file_path, resource_type, resource_name):
         depth += 1 if content[i] == "{" else -1 if content[i] == "}" else 0
         i += 1
     return content[m.start():i]
+
+
+def _extract_field_values(
+    plan_json: dict,
+    resource_address: str,
+    fields: list[str],
+) -> tuple[str, dict[str, str]]:
+    """Extract live field values for *resource_address* from a terraform
+    plan JSON (``terraform show -json`` output).
+
+    Returns ``(outcome, values)`` where *outcome* is one of:
+
+    ``"present"``
+        Resource found, *values* contains ``change.before`` for each
+        requested field.
+    ``"no_diff"``
+        Resource found but ``change.before == change.after`` for every
+        requested field — nothing to reconcile.
+    ``"not_found"``
+        Resource address does not appear in ``resource_changes[]`` or
+        the resource is absent from the plan entirely (e.g. deleted
+        externally).
+
+    Always reads from ``change.before`` (live AWS state), NOT
+    ``change.after`` (what the code proposes).  Getting this backwards
+    makes the freshness check silently useless.
+    """
+    resource_changes = plan_json.get("resource_changes", [])
+    for rc in resource_changes:
+        if rc.get("address") != resource_address:
+            continue
+        change = rc.get("change", {})
+        before = change.get("before", {})
+        after = change.get("after", {})
+
+        if not before:
+            # Resource has no live state — possibly deleted externally.
+            return ("not_found", {})
+
+        all_same = True
+        values: dict[str, str] = {}
+        for field in fields:
+            b_val = before.get(field)
+            a_val = after.get(field)
+            if b_val is not None:
+                values[field] = str(b_val)
+            if b_val != a_val:
+                all_same = False
+
+        if all_same and values:
+            return ("no_diff", values)
+        return ("present", values)
+
+    return ("not_found", {})
 
 
 def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, deleted: bool) -> str | None:

@@ -544,6 +544,152 @@ def _print_drift_exceptions(drift_report_str: str):
                 print()
 
 
+def _run_rollback(tf_dir: str, pr_number: int) -> None:
+    """Checkpoint 1: validate freshness and open a rollback PR for every
+    resource in the baseline of *pr_number*.
+
+    Skips the normal drift-detection pipeline — this is a standalone
+    rollback flow."""
+    import glob
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    baseline_dir = os.path.join(repo_root, ".drift-baselines", f"pr-{pr_number}")
+    if not os.path.isdir(baseline_dir):
+        print(f"Error: baseline directory not found — {baseline_dir}")
+        sys.exit(1)
+
+    baseline_files = sorted(glob.glob(os.path.join(baseline_dir, "*.json")))
+    if not baseline_files:
+        print(f"Error: no baseline files found in {baseline_dir}")
+        sys.exit(1)
+
+    print(f"\n--- Rollback checkpoint 1: {len(baseline_files)} resource(s) in PR #{pr_number} ---\n")
+
+    rollback_ready: list[dict] = []
+    for bf in baseline_files:
+        with open(bf, encoding="utf-8") as fh:
+            baseline = json.load(fh)
+
+        resource_id = baseline["resource_id"]
+        original_changes = baseline["changes"]
+        file_path = baseline.get("file_path", "")
+        if not file_path or not os.path.isfile(file_path):
+            print(f"  ⚠ {resource_id}: source file not found — {file_path}")
+            continue
+
+        # Swap before↔after to produce the reverse patch.
+        reversed_changes: dict[str, dict] = {}
+        for field, vals in original_changes.items():
+            reversed_changes[field] = {"before": vals["after"], "after": vals["before"]}
+
+        print(f"  ↻ {resource_id}: reversing {len(reversed_changes)} field(s) …")
+
+        # Apply the reverse patch to a temp copy.
+        patched = gi.apply_changes_to_file(file_path, resource_id, reversed_changes)
+        if patched is None:
+            print(f"  ✗ {resource_id}: reverse-patch produced no changes — skipping")
+            continue
+
+        # Write the patched content back so terraform plan sees it.
+        try:
+            with open(file_path, "w", encoding="utf-8") as fh:
+                fh.write(patched)
+        except OSError as exc:
+            print(f"  ✗ {resource_id}: failed to write patched file — {exc}")
+            continue
+
+        # Run terraform plan on the patched directory.
+        plan_result = subprocess.run(
+            ["terraform", "plan", "-out=tfplan", "-input=false"],
+            cwd=tf_dir,
+            capture_output=True,
+            text=True,
+        )
+        if plan_result.returncode != 0:
+            print(f"  ✗ {resource_id}: terraform plan failed — {plan_result.stderr[:300]}")
+            continue
+
+        show_result = subprocess.run(
+            ["terraform", "show", "-json", "tfplan"],
+            cwd=tf_dir,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            plan_json = json.loads(show_result.stdout)
+        except json.JSONDecodeError:
+            print(f"  ✗ {resource_id}: failed to parse plan JSON")
+            continue
+
+        # Freshness check.
+        fields = list(original_changes.keys())
+        outcome, live_values = gi._extract_field_values(plan_json, resource_id, fields)
+
+        if outcome == "not_found":
+            print(f"  ⏭  {resource_id}: not found in plan — may have been deleted externally")
+            continue
+
+        if outcome == "no_diff":
+            print(f"  ✓ {resource_id}: already matches rollback target — nothing to do")
+            continue
+
+        # outcome == "present" — check staleness.
+        stale_fields = []
+        for field in fields:
+            expected = reversed_changes[field]["after"]  # the original "before" value
+            actual = live_values.get(field, "<missing>")
+            if actual != expected:
+                stale_fields.append((field, expected, actual))
+
+        if stale_fields:
+            print(f"  ✗ {resource_id}: STALE — intervening changes detected:")
+            for field, expected, actual in stale_fields:
+                print(f"      {field}: expected={expected}  actual={actual}")
+            continue
+
+        print(f"  ✓ {resource_id}: freshness confirmed — ready for rollback")
+        rollback_ready.append(
+            {
+                "resource_id": resource_id,
+                "file_path": file_path,
+                "reversed_changes": reversed_changes,
+                "risk_level": "LOW",
+                "drift_summary": f"Rollback of PR #{pr_number}: reverting {resource_id} to pre-fix state.",
+                "plan_output": json.dumps(
+                    {"reversed_changes": {f: {"before": v["before"], "after": v["after"]}
+                                          for f, v in reversed_changes.items()}},
+                    indent=2,
+                ),
+            }
+        )
+
+    if not rollback_ready:
+        print("\nNo resources passed freshness check — rollback aborted.")
+        sys.exit(1)
+
+    print(f"\n{len(rollback_ready)} resource(s) passed freshness check — opening rollback PR …")
+    for rb in rollback_ready:
+        patched_content = gi.apply_changes_to_file(
+            rb["file_path"], rb["resource_id"], rb["reversed_changes"]
+        )
+        if patched_content is None:
+            print(f"  ⚠ {rb['resource_id']}: re-patch failed, skipping")
+            continue
+        gi.create_drift_pr(
+            resource_id=f"{rb['resource_id']}-rollback",
+            pr_title=f"[ROLLBACK] Drift fix: {rb['resource_id']}",
+            drift_summary=rb["drift_summary"],
+            plan_output=rb["plan_output"],
+            file_path=gi.to_repo_relative_path(rb["file_path"]),
+            file_content=patched_content,
+            risk_level="LOW",
+            account_label=_account_label,
+            is_rollback=True,
+        )
+
+    print("\nRollback PR(s) created. Review and merge to revert the original fix.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Terraform drift detection and reconciliation agent."
@@ -569,6 +715,18 @@ if __name__ == "__main__":
         default=False,
         help="Scan for AWS resources that exist outside of Terraform state",
     )
+    parser.add_argument(
+        "--rollback",
+        action="store_true",
+        default=False,
+        help="Roll back a previously merged drift-fix PR",
+    )
+    parser.add_argument(
+        "--rollback-pr",
+        type=int,
+        default=None,
+        help="PR number whose drift fix to roll back (required with --rollback)",
+    )
     args = parser.parse_args()
 
     tf_dir = os.path.abspath(args.tf_dir)
@@ -582,6 +740,13 @@ if __name__ == "__main__":
     _region = args.region
     _account_label = args.account_label
     _tf_dir = tf_dir
+
+    if args.rollback:
+        if not args.rollback_pr:
+            print("Error: --rollback-pr is required with --rollback")
+            sys.exit(1)
+        _run_rollback(tf_dir, args.rollback_pr)
+        sys.exit(0)
 
     # Gather the data using our folder-aware pipeline
     drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)

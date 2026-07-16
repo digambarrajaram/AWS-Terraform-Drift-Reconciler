@@ -187,7 +187,40 @@ jobs:
         run: |
           echo "✅ ACCEPTED: Applying approved drift fix to ${{ needs.resolve-scope.outputs.scope }}..."
           terraform plan -out=tfplan -input=false
-          terraform apply -auto-approve tfplan
+          terraform show -json tfplan > tfplan.json
+
+      - name: "[ACCEPT] Rollback freshness gate"
+        id: freshness
+        if: |
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
+        run: |
+          echo "🔍 Running rollback freshness check …"
+          python ${{ github.workspace }}/test/rollback_check.py \
+            ${{ github.event.pull_request.number }} \
+            ${{ needs.resolve-scope.outputs.tf_working_dir }}/tfplan.json \
+            --pagerduty-scope ${{ needs.resolve-scope.outputs.scope }}
+
+      - name: "[ACCEPT] Rollback recovery — revert merge"
+        if: |
+          steps.freshness.outcome == 'failure' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.merged == true
+        run: |
+          echo "❌ Rollback freshness check failed — reverting merge to restore consistency."
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git revert --no-edit -m 1 ${{ github.sha }}
+          git push origin ${{ github.event.pull_request.base.ref }}
+          echo "Merge reverted. Code and live state are consistent again."
+
+      - name: "[ACCEPT] Apply"
+        if: |
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
+        working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
+        run: terraform apply -auto-approve tfplan
 
       # =================================================================
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code

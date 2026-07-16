@@ -128,7 +128,7 @@ resource "aws_instance" "drift_web_server" {
     http_tokens = "required" # IMDSv2
   }
 
-  tags = { "Name" : "WebServer" }
+  tags = "{'Name': 'WebServer123'}"
 }
 
 # ─────────────────────────────────────────────

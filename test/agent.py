@@ -18,6 +18,7 @@ from typing_extensions import TypedDict
 from langchain_aws import ChatBedrockConverse
 from langgraph.graph import StateGraph, START, END
 import pagerduty_alert as pga
+import slack_notify as slack
 import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
@@ -366,11 +367,26 @@ def trivy_gate(state: State):
 
 
 def drift_alert(state: State):
+    """Route findings by severity.
+
+    HIGH          → PagerDuty page (on-call gets paged immediately).
+    MEDIUM / LOW  → Slack channel post (no page, informational only).
+
+    This project uses a HIGH | MEDIUM | LOW risk model.  There is no
+    CRITICAL tier — the word appears nowhere in the codebase."""
     if not state.get("drift_detected"):
         return {"messages": []}
-    for finding in state["drift_findings"]:
-        if finding.get("status") == "externally_managed":
-            continue  # expected drift — don't page
+
+    active = [f for f in state["drift_findings"]
+              if f.get("status") != "externally_managed"]
+    if not active:
+        return {"messages": []}
+
+    high_findings = [f for f in active if f.get("risk_level") == "HIGH"]
+    low_med_findings = [f for f in active if f.get("risk_level") != "HIGH"]
+
+    # HIGH → page the on-call.
+    for finding in high_findings:
         if finding.get("status") in ("unmanaged", "unmanaged_tagged"):
             event_type = "Unmanaged resource"
         else:
@@ -379,13 +395,18 @@ def drift_alert(state: State):
         cost = finding.get("cost_impact")
         if cost:
             summary += f" (${cost['monthly_estimate_usd']:.2f}/mo)"
-        result = pga.trigger_pagerduty_alert(
+        pga.trigger_pagerduty_alert(
             summary=summary,
             severity="error",
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
             account_label=_account_label,
         )
+
+    # MEDIUM / LOW → Slack channel post (batched, no page).
+    if low_med_findings:
+        slack.notify_all(low_med_findings, _account_label)
+
     return {"messages": []}
 def drift_pr_from_finding(state: State):
     if not state.get("drift_detected"):

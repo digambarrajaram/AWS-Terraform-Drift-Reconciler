@@ -253,3 +253,33 @@ jobs:
               repo: context.repo.repo,
               body: outcome
             });
+
+      # ------------------------------------------------------------------
+      # Slack notification on every outcome (success, failure, or abort).
+      # ------------------------------------------------------------------
+      - name: "[NOTIFY] Slack"
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          SCOPE="${{ needs.resolve-scope.outputs.scope }}"
+          PR="${{ github.event.pull_request.number }}"
+
+          # Determine outcome from job state and step results.
+          if [ "${{ steps.freshness.outcome }}" = "failure" ]; then
+            OUTCOME="rollback_blocked"
+            DETAILS="Rollback freshness check failed — merge was reverted."
+          elif [ "${{ job.status }}" = "failure" ]; then
+            OUTCOME="failed"
+            DETAILS="One or more steps failed. Check the run logs."
+          elif [ "${{ github.event.pull_request.merged }}" = "true" ] || \
+               [ "${{ github.event.inputs.action_type }}" = "Accept (Align State)" ]; then
+            OUTCOME="accepted"
+            DETAILS=""
+          else
+            OUTCOME="rejected"
+            DETAILS=""
+          fi
+
+          python ${{ github.workspace }}/test/workflow_notify.py "$OUTCOME" "$SCOPE" "$PR" "$DETAILS"

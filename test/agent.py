@@ -642,12 +642,13 @@ def _run_rollback(tf_dir: str, pr_number: int) -> None:
                 stale_fields.append((field, expected, actual))
 
         if stale_fields:
-            print(f"  ✗ {resource_id}: STALE — intervening changes detected:")
+            print(f"  ⚠ {resource_id}: intervening changes detected since original fix:")
             for field, expected, actual in stale_fields:
                 print(f"      {field}: expected={expected}  actual={actual}")
-            continue
+            print(f"      (checkpoint 2 at apply time will still validate freshness)")
+        else:
+            print(f"  ✓ {resource_id}: freshness confirmed")
 
-        print(f"  ✓ {resource_id}: freshness confirmed — ready for rollback")
         rollback_ready.append(
             {
                 "resource_id": resource_id,

@@ -89,9 +89,9 @@ resource "aws_vpc_security_group_ingress_rule" "https_ingress" {
 
 resource "aws_vpc_security_group_ingress_rule" "ssh_ingress" {
   security_group_id = aws_security_group.drift_web_ssh_sg.id
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
+  from_port         = "-1"
+  to_port           = "-1"
+  ip_protocol       = "icmpv6"
   cidr_ipv4         = "192.0.2.0/24"
   description       = "SSH access from trusted corporate network"
 }

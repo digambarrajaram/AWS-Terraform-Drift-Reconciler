@@ -15,9 +15,38 @@ import json
 import os
 import sys
 
-# Add the test directory to the path so we can import from github_integration.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from github_integration import _extract_field_values  # noqa: E402
+
+def _extract_field_values(
+    plan_json: dict,
+    resource_address: str,
+    fields: list[str],
+) -> tuple[str, dict[str, str]]:
+    """Extract live field values from a terraform plan JSON.
+
+    Returns ``(outcome, values)`` — see github_integration.py for full
+    docstring.  Inlined here to avoid pulling in PyGithub as a dependency
+    on the CI runner."""
+    for rc in plan_json.get("resource_changes", []):
+        if rc.get("address") != resource_address:
+            continue
+        change = rc.get("change", {})
+        before = change.get("before", {})
+        after = change.get("after", {})
+        if not before:
+            return ("not_found", {})
+        all_same = True
+        values: dict[str, str] = {}
+        for field in fields:
+            b_val = before.get(field)
+            a_val = after.get(field)
+            if b_val is not None:
+                values[field] = str(b_val)
+            if b_val != a_val:
+                all_same = False
+        if all_same and values:
+            return ("no_diff", values)
+        return ("present", values)
+    return ("not_found", {})
 
 
 def main() -> int:

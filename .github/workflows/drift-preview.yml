@@ -13,6 +13,8 @@ permissions:
 
 env:
   TF_VERSION: "1.9.8"
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
 jobs:
   # ------------------------------------------------------------------

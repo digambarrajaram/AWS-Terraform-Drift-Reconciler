@@ -39,6 +39,10 @@ terraform/.terraform.lock.hcl
 # Drift reports
 drift_reconciliation_report_*.md
 
+# Drift history (now stored in Supabase — local files are ephemeral cache)
+.drift-history/
+drift-trends-report-*.md
+
 
 Set-Content .gitignore @'
 # Ignore environment variables and credentials

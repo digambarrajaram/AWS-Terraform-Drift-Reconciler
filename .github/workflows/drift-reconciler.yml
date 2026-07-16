@@ -32,6 +32,8 @@ permissions:
 env:
   TF_VERSION: "1.9.8"
   PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -232,11 +234,6 @@ jobs:
             ${{ github.event.pull_request.number }} \
             ${{ needs.resolve-scope.outputs.scope }} \
             "PR merged — code updated to match live AWS state"
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add .drift-history/
-          git diff --cached --quiet || git commit -m "[history] Mark PR #${{ github.event.pull_request.number }} as resolved (accepted)"
-          git push origin ${{ github.event.pull_request.base.ref }}
 
       # =================================================================
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
@@ -261,11 +258,6 @@ jobs:
             ${{ github.event.pull_request.number }} \
             ${{ needs.resolve-scope.outputs.scope }} \
             "PR closed — AWS reverted to match original code"
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add .drift-history/
-          git diff --cached --quiet || git commit -m "[history] Mark PR #${{ github.event.pull_request.number }} as resolved (rejected)"
-          git push origin ${{ github.event.pull_request.base.ref }}
 
       - name: Comment Result
         if: github.event_name == 'pull_request'

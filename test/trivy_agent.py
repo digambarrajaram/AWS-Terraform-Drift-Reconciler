@@ -45,6 +45,8 @@ class State(TypedDict):
     passed: bool
     trivy_error: bool
     messages: Annotated[list[str], lambda a, b: a + b]
+    baseline_issues: list[dict]
+    baseline_captured: bool
 
 
 # ==========================================
@@ -248,14 +250,29 @@ def _run_trivy(tf_dir: str) -> dict:
         return {"error": str(e)}
 
 
-def _extract_issues(trivy_output: dict, tf_dir: str) -> list[dict]:
+def _extract_issues(trivy_output: dict, tf_dir: str, baseline: list[dict] | None = None) -> list[dict]:
     """Pull failed checks from Trivy's Results, using CauseMetadata for exact
     file/line/resource location instead of guessing from resolution text.
+
+    When *baseline* is provided each issue is tagged with ``origin`` —
+    ``"pre-existing"`` if the same (rule_id, target, resource) tuple
+    appears in the baseline scan, ``"newly-introduced"`` otherwise.
 
     Findings suppressed via ``# trivy:ignore:<rule-id>`` comments
     (placed on the line immediately above the resource block) are
     silently dropped — same convention as Trivy, Checkov, and tfsec.
     """
+    # Build a fast-lookup set from the baseline (filesystem paths in
+    # the baseline are relative to the original directory; the post-fix
+    # scan runs in a temp copy.  Use the basename of target so the
+    # match survives the directory change.)
+    baseline_set: set[tuple[str, str, str]] = set()
+    if baseline:
+        for bi in baseline:
+            baseline_set.add(
+                (bi.get("rule_id", ""), os.path.basename(bi.get("target", "")), bi.get("resource", ""))
+            )
+
     results = trivy_output.get("Results", [])
     issues = []
     seen = set()
@@ -287,6 +304,11 @@ def _extract_issues(trivy_output: dict, tf_dir: str) -> list[dict]:
                 continue
             seen.add(key)
 
+            # ---- classify origin against baseline ----
+            origin = "pre-existing" if baseline_set and (
+                rule_id, os.path.basename(target), resource_addr
+            ) in baseline_set else "newly-introduced"
+
             resource_type = None
             if resource_addr and "." in resource_addr and not resource_addr.startswith("module."):
                 resource_type = resource_addr.split(".")[0]
@@ -303,6 +325,7 @@ def _extract_issues(trivy_output: dict, tf_dir: str) -> list[dict]:
                     "resource_type": resource_type,
                     "start_line": start_line,
                     "end_line": end_line,
+                    "origin": origin,
                 }
             )
     return issues
@@ -844,21 +867,21 @@ def scan_terraform(state: State) -> dict:
             "scan_results": [],
         }
 
-    issues = _extract_issues(raw, tf_dir)
+    baseline = state.get("baseline_issues") if state.get("baseline_captured") else None
+    issues = _extract_issues(raw, tf_dir, baseline=baseline)
     passed = len(issues) == 0
 
     if passed:
         print(f"[iter {iteration + 1}] ✓ No issues found.\n")
     else:
-        severity_counts: dict[str, int] = {}
-        for i in issues:
-            sev = i["severity"]
-            severity_counts[sev] = severity_counts.get(sev, 0) + 1
-        counts = ", ".join(f"{k}={v}" for k, v in sorted(severity_counts.items()))
-        print(f"[iter {iteration + 1}] ✗ {len(issues)} issue(s) found ({counts})")
+        pre = sum(1 for i in issues if i.get("origin") == "pre-existing")
+        new = len(issues) - pre
+        origin_line = f"({pre} pre-existing, {new} newly-introduced)" if baseline else ""
+        print(f"[iter {iteration + 1}] ✗ {len(issues)} issue(s) found {origin_line}")
         for i in issues:
             resource = i.get('resource') or os.path.basename(i.get('target', '') or '?')
-            print(f"    {i['severity']:8s}  {i['rule_id']:12s}  {resource}")
+            tag = "[pre]" if i.get("origin") == "pre-existing" else "[new]"
+            print(f"    {i['severity']:8s}  {tag} {i['rule_id']:12s}  {resource}")
         print()
 
     return {
@@ -884,16 +907,31 @@ def fix_issues(state: State) -> dict:
         issues, key=lambda i: _SEVERITY_RANK.get((i.get("severity") or "UNKNOWN").upper(), 4)
     )
 
-    # Partition: findings that need a human decision (CIDR range, KMS ARN,
-    # IAM role, etc.) go to needs_review instead of the fix loop.
+    # Partition into three buckets:
+    #   pre_existing  — was in the baseline; don't auto-fix (not our bug)
+    #   needs_review  — requires a human decision (CIDR, KMS ARN, etc.)
+    #   auto_fixable  — safe for the LLM to attempt
     auto_fixable: list[dict] = []
     needs_review: list[dict] = []
+    pre_existing: list[dict] = []
     for issue in ordered_issues:
+        if issue.get("origin") == "pre-existing":
+            pre_existing.append(issue)
+            continue
         resolution = issue.get("resolution", "")
         if resolution and _requires_human_context(resolution, issue["rule_id"]):
             needs_review.append(issue)
         else:
             auto_fixable.append(issue)
+
+    if pre_existing:
+        print(f"  ⚠ {len(pre_existing)} finding(s) existed before the drift fix "
+              f"— will not attempt auto-fix:\n")
+        for issue in pre_existing:
+            resource = issue.get('resource') or os.path.basename(issue.get('target', '') or '?')
+            print(f"      {issue['rule_id']}  on  {resource}")
+            print(f"      → {issue.get('description', issue.get('title', ''))[:140]}")
+            print()
 
     if needs_review:
         print(f"  ⚠ {len(needs_review)} finding(s) need a human decision "
@@ -939,10 +977,10 @@ def fix_issues(state: State) -> dict:
     if fixes:
         _repair_syntax_errors(tf_dir)
 
-    # When every remaining issue requires a human decision (CIDR range,
-    # KMS ARN, etc.), there is nothing the agent can do — force the loop
-    # to exit by saturating the iteration counter, so should_continue
-    # routes to END immediately instead of burning max_iterations cycles.
+    # When every remaining issue requires a human decision or is
+    # pre-existing (not our bug), there is nothing the agent can do —
+    # force the loop to exit by saturating the iteration counter, so
+    # should_continue routes to END immediately.
     next_iteration = max_iter if (not auto_fixable and not fixes) else iteration + 1
     return {"iteration": next_iteration, "fixes_applied": fixes}
 
@@ -953,6 +991,11 @@ def should_continue(state: State) -> Literal["fix_issues", "__end__"]:
     if state["passed"]:
         return "__end__"
     if state["iteration"] >= state["max_iterations"]:
+        return "__end__"
+    # Every remaining issue was in the baseline — nothing the LLM can
+    # fix here, and no point burning another iteration.
+    if state["issues"] and all(i.get("origin") == "pre-existing" for i in state["issues"]):
+        print("[trivy] All remaining issues are pre-existing — exiting loop.\n")
         return "__end__"
     return "fix_issues"
 
@@ -1033,6 +1076,8 @@ def main():
         "passed": False,
         "trivy_error": False,
         "messages": [],
+        "baseline_issues": [],
+        "baseline_captured": False,
     }
 
     final_state = graph.invoke(initial)

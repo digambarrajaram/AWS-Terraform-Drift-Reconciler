@@ -22,6 +22,7 @@ import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
 from trivy_agent import graph as trivy_graph, State as TrivyState
+from trivy_agent import _run_trivy, _extract_issues
 import unmanaged_scanner
 
 # Resolved at startup from CLI args (or env fallback).
@@ -288,12 +289,22 @@ def trivy_gate(state: State):
         return {"trivy_scanned": False}
 
     tmpdir = tempfile.mkdtemp(prefix="trivy_gate_")
+
+    # Take a baseline scan of the ORIGINAL code before applying any
+    # drift fixes so the Trivy loop can distinguish pre-existing
+    # issues from regressions introduced by the LLM's patch.
+    src_dir = os.path.dirname(os.path.abspath(actionable[0]["file_path"]))
+    baseline_raw = _run_trivy(src_dir)
+    baseline_issues: list[dict] = []
+    if "error" not in baseline_raw:
+        baseline_issues = _extract_issues(baseline_raw, src_dir)
+    print(f"  [trivy-gate] Baseline scan: {len(baseline_issues)} pre-existing issue(s)")
+
     print(f"  [trivy-gate] Running security scan on proposed drift fixes …")
 
     try:
         # Copy the terraform directory into the temp workspace so Trivy
         # scans the proposed fix, not the current (pre-drift) code.
-        src_dir = os.path.dirname(os.path.abspath(actionable[0]["file_path"]))
         for item in os.listdir(src_dir):
             s = os.path.join(src_dir, item)
             d = os.path.join(tmpdir, item)
@@ -317,24 +328,33 @@ def trivy_gate(state: State):
             "passed": False,
             "trivy_error": False,
             "messages": [],
+            "baseline_issues": baseline_issues,
+            "baseline_captured": True,
         }
         trivy_result = trivy_graph.invoke(trivy_initial)
 
         # Enrich each finding with trivy scan metadata.
+        remaining_issues = trivy_result.get("issues", [])
+        pre_existing = [i for i in remaining_issues if i.get("origin") == "pre-existing"]
+        newly_introduced = [i for i in remaining_issues if i.get("origin") != "pre-existing"]
+
         for f in findings:
             f["trivy_passed"] = trivy_result.get("passed", False)
             f["trivy_error"] = trivy_result.get("trivy_error", False)
+            f["trivy_pre_existing_count"] = len(pre_existing)
+            f["trivy_newly_introduced_count"] = len(newly_introduced)
         if trivy_result.get("fixes_applied"):
             for f in findings:
                 f["trivy_security_fixes"] = len(trivy_result["fixes_applied"])
 
         fixes_count = len(trivy_result.get("fixes_applied", []))
-        issues_count = len(trivy_result.get("issues", []))
         if fixes_count:
             print(f"  [trivy-gate] Applied {fixes_count} security fix(es) to proposed drift HCL")
-        if issues_count:
-            print(f"  [trivy-gate] {issues_count} security finding(s) remain (need human review)")
-        elif trivy_result.get("passed") and not trivy_result.get("trivy_error"):
+        if newly_introduced:
+            print(f"  [trivy-gate] {len(newly_introduced)} newly-introduced finding(s) (may need review)")
+        if pre_existing:
+            print(f"  [trivy-gate] {len(pre_existing)} pre-existing finding(s) (not caused by this fix, not auto-fixed)")
+        if not remaining_issues and trivy_result.get("passed") and not trivy_result.get("trivy_error"):
             print(f"  [trivy-gate] ✓ Proposed drift fix passes security scan")
         if trivy_result.get("trivy_error"):
             print(f"  [trivy-gate] ⚠ Trivy scan encountered an error — proceeding without security validation")

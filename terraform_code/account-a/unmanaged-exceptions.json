@@ -1,7 +1,31 @@
+
 {
-  "exceptions": [{
+  "_description": "Known unmanaged resources that should not trigger alerts or PRs",
+  "exceptions": [
+    {
     "resource_type": "aws_security_group",
     "resource_id_pattern": "launch-wizard",
     "reason": "Created by EC2 Launch Wizard"
-  }]
+  },
+    {
+      "resource_type": "aws_security_group",
+      "resource_id_pattern": "launch-wizard",
+      "reason": "Ephemeral SGs created by EC2 Launch Wizard"
+    },
+    {
+      "resource_type": "aws_s3_bucket",
+      "resource_id_pattern": "scope-a-tf-state",
+      "reason": "State bucket managed by backend-state-a bootstrap"
+    },
+    {
+      "resource_type": "aws_dynamodb_table",
+      "resource_id_pattern": "terraform-locks",
+      "reason": "Lock table managed by backend-state-a bootstrap"
+    },
+    {
+      "resource_type": "aws_internet_gateway",
+      "resource_id_pattern": "",
+      "reason": "Default VPC IGW — exists in every account"
+    }
+  ]
 }

@@ -1,0 +1,19 @@
+{
+  "resource_id": "aws_vpc_security_group_ingress_rule.ssh_ingress",
+  "file_path": "terraform_code/ec2_terraform_account_a/main.tf",
+  "changes": {
+    "from_port": {
+      "before": 0,
+      "after": 22
+    },
+    "ip_protocol": {
+      "before": "udp",
+      "after": "tcp"
+    },
+    "to_port": {
+      "before": 65535,
+      "after": 22
+    }
+  },
+  "captured_at": "2026-07-16T14:37:12.798596Z"
+}

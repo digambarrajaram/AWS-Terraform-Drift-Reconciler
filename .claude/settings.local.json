@@ -20,7 +20,12 @@
       "Bash(terraform providers *)",
       "Bash(python *)",
       "Bash(git -C /mnt/d/aws-terraform-drift-reconciler ls-files)",
-      "Bash(hcledit --version)"
+      "Bash(hcledit --version)",
+      "Bash(git -C /mnt/d/aws-terraform-drift-reconciler status --short)",
+      "Bash(git -C /mnt/d/aws-terraform-drift-reconciler log --oneline --diff-filter=D -- \"terraform_code/\")",
+      "Bash(git -C /mnt/d/aws-terraform-drift-reconciler log --oneline -3)",
+      "Bash(git -C /mnt/d/aws-terraform-drift-reconciler show --stat 55021e7)",
+      "Bash(git *)"
     ]
   }
 }

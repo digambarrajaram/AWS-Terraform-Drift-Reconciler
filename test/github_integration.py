@@ -164,6 +164,17 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         pr_title = f"Drift fix: {resource_id} [{risk_level}]"
         content = patched_file_content
         target_path = to_repo_relative_path(file_path)
+    elif finding.get("status") in ("unmanaged", "unmanaged_tagged"):
+        pr_title = f"Unmanaged resource: {resource_id} [{risk_level}]"
+        content = (
+            f"# Unmanaged resource: {resource_id}\n\n"
+            f"{finding['drift_summary']}\n\n"
+            f"```json\n{finding['plan_output']}\n```\n\n"
+            f"**Action:** Import this resource into Terraform or create "
+            f"the corresponding `.tf` resource block, then re-run the "
+            f"drift reconciler to track it."
+        )
+        target_path = f"drift-reports/{resource_id.replace('.', '-')}.md"
     else:
         pr_title = f"Drift fix: {resource_id} [{risk_level}] (report only)"
         content = (f"# Drift report: {resource_id}\n\n{finding['drift_summary']}\n\n"

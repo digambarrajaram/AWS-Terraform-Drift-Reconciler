@@ -1,0 +1,12 @@
+{
+  "_description": "Resources found in AWS but not in Terraform state that should NOT trigger alerts or PRs. resource_type is the Terraform resource type (e.g. aws_security_group). resource_id_pattern is matched as a substring against the resource's identifier (name or ID). reason is mandatory — it documents why this resource is accepted outside of Terraform management.",
+  "_example": {
+    "resource_type": "aws_security_group",
+    "resource_id_pattern": "launch-wizard",
+    "reason": "Ephemeral SG created by EC2 Launch Wizard; does not need IaC management",
+    "approved_by": "platform-team",
+    "approved_date": "2026-07-15"
+  },
+  "exceptions": [
+  ]
+}

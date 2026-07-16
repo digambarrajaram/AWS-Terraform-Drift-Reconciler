@@ -22,10 +22,12 @@ import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
 from trivy_agent import graph as trivy_graph, State as TrivyState
+import unmanaged_scanner
 
 # Resolved at startup from CLI args (or env fallback).
 _account_label = "default"
 _region = os.environ.get("AWS_REGION", "us-east-1")
+_tf_dir: str | None = None
 
 # Derived from this script's location — the drift-formatting script lives
 # alongside it in the same directory.
@@ -116,6 +118,7 @@ class State(TypedDict):
     drift_detected: bool
     drift_findings: list[dict]   # one entry per drifted resource
     trivy_scanned: bool
+    scan_unmanaged: bool
 
 
 def map_risk(security_impact) -> str:
@@ -175,10 +178,13 @@ def agent_node(state: State):
     drift_detected = drift_report_json.get("report_type") == "drift"
 
     if not drift_detected:
+        # Preserve any unmanaged findings that were already attached
+        # by the optional unmanaged-scan node.
+        existing = state.get("drift_findings") or []
         return {
             "messages": [AIMessage(content="STATUS: NO_DRIFT\nNo configuration drift detected.")],
-            "drift_detected": False,
-            "drift_findings": [],
+            "drift_detected": state.get("drift_detected", False),
+            "drift_findings": existing,
         }
 
     # Strip externally_managed resources from the LLM prompt — the LLM
@@ -200,11 +206,14 @@ def agent_node(state: State):
             llm_messages.append(msg)
 
     response = _get_llm().invoke(llm_messages)
-    findings = build_drift_findings(drift_report_json)
+    drift_only = build_drift_findings(drift_report_json)
+    # Merge any unmanaged findings that were already attached by the
+    # optional unmanaged-scan node so they survive the state update.
+    existing = state.get("drift_findings") or []
     return {
         "messages": [response],
         "drift_detected": True,
-        "drift_findings": findings,
+        "drift_findings": existing + drift_only,
     }
 
 
@@ -335,8 +344,12 @@ def drift_alert(state: State):
     for finding in state["drift_findings"]:
         if finding.get("status") == "externally_managed":
             continue  # expected drift — don't page
+        if finding.get("status") in ("unmanaged", "unmanaged_tagged"):
+            event_type = "Unmanaged resource"
+        else:
+            event_type = "Drift detected"
         result = pga.trigger_pagerduty_alert(
-            summary=f"Drift detected: {finding['resource_id']}",
+            summary=f"{event_type}: {finding['resource_id']}",
             severity="error",
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
@@ -377,13 +390,51 @@ def drift_pr_from_finding(state: State):
     return {"pr_urls": pr_urls}
 
 
+def unmanaged_scan_node(state: State):
+    """Enumerate live AWS resources, subtract what Terraform manages.
+
+    Runs before the reconcile agent when --scan-unmanaged is set.
+    Findings are appended to drift_findings so the existing alert/PR
+    nodes pick them up without changes."""
+    if _tf_dir is None:
+        return {"messages": []}
+
+    print("\n--- Unmanaged resource scan ---")
+    live = unmanaged_scanner.scan_unmanaged_resources(_region)
+    if not live:
+        print("  (no live resources found)")
+        return {"messages": []}
+
+    managed = unmanaged_scanner.load_managed_resources(_tf_dir)
+    findings = unmanaged_scanner.diff_unmanaged(live, managed, tf_dir=_tf_dir)
+
+    if not findings:
+        print("  (every live resource is tracked in state)")
+        return {"messages": []}
+
+    print(f"  {len(findings)} unmanaged resource(s) found:")
+    for f in findings:
+        print(f"    [{f['risk_level']}] {f['resource_id']}")
+
+    # Merge into drift_findings — downstream alert/PR nodes iterate
+    # this list and will surface unmanaged entries alongside drift.
+    existing = state.get("drift_findings") or []
+    return {"drift_findings": existing + findings, "drift_detected": True}
+
+
 workflow = StateGraph(State)
+workflow.add_node("unmanaged_scan", unmanaged_scan_node)
 workflow.add_node("reconcile_agent", agent_node)
 workflow.add_node("trivy_gate", trivy_gate)
 workflow.add_node("alert_agent", drift_alert)
 workflow.add_node("drift_pr", drift_pr_from_finding)
 
-workflow.add_edge(START, "reconcile_agent")
+workflow.add_conditional_edges(
+    START,
+    lambda state: "unmanaged_scan" if state.get("scan_unmanaged") else "reconcile_agent",
+    {"unmanaged_scan": "unmanaged_scan", "reconcile_agent": "reconcile_agent"},
+)
+workflow.add_edge("unmanaged_scan", "reconcile_agent")
 workflow.add_edge("reconcile_agent", "trivy_gate")
 workflow.add_edge("trivy_gate", "alert_agent")
 workflow.add_edge("trivy_gate", "drift_pr")
@@ -477,6 +528,12 @@ if __name__ == "__main__":
         default=os.environ.get("ACCOUNT_LABEL", "default"),
         help="Human-readable label for the AWS account being scanned",
     )
+    parser.add_argument(
+        "--scan-unmanaged",
+        action="store_true",
+        default=False,
+        help="Scan for AWS resources that exist outside of Terraform state",
+    )
     args = parser.parse_args()
 
     tf_dir = os.path.abspath(args.tf_dir)
@@ -486,9 +543,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Set module-level globals before the pipeline runs so graph nodes
-    # (alerts, LLM calls) pick up the right account and region.
+    # (alerts, LLM calls, unmanaged scanner) pick up the right values.
     _region = args.region
     _account_label = args.account_label
+    _tf_dir = tf_dir
 
     # Gather the data using our folder-aware pipeline
     drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
@@ -552,6 +610,7 @@ if __name__ == "__main__":
             {"role": "user", "content": user_query}
         ],
         "trivy_scanned": False,
+        "scan_unmanaged": args.scan_unmanaged,
     }
 
     agent_output = ""

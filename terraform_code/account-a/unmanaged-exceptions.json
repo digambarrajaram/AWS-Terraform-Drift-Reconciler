@@ -1,0 +1,7 @@
+{
+  "exceptions": [{
+    "resource_type": "aws_security_group",
+    "resource_id_pattern": "launch-wizard",
+    "reason": "Created by EC2 Launch Wizard"
+  }]
+}

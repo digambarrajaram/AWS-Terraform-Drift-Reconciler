@@ -13,9 +13,6 @@ import os
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Conservative — worst-case payload for 5 findings stays well under
 # Slack's 4 000-character text field limit per block.

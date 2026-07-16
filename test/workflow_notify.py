@@ -11,9 +11,6 @@ import os
 import sys
 
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 ICONS = {
     "accepted":  ":white_check_mark:",

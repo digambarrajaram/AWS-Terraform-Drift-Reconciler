@@ -1,10 +1,5 @@
 import os
-import requests 
-from dotenv import load_dotenv
-
-# 1. Load the environment variables from the .env file
-# This must be called at the very top of your script execution
-load_dotenv()
+import requests
 
 def trigger_pagerduty_alert(summary: str, severity: str = "error", source: str = "Terraform Drift Engine", dedup_key: str = None, account_label: str = None) -> dict:
     """Trigger a PagerDuty alert.

@@ -210,10 +210,17 @@ def agent_node(state: State):
     # Merge any unmanaged findings that were already attached by the
     # optional unmanaged-scan node so they survive the state update.
     existing = state.get("drift_findings") or []
+    merged = existing + drift_only
+    # Sort so findings with cost impact appear first (highest $ first)
+    # — the LLM sees the most expensive untracked resources upfront.
+    merged.sort(
+        key=lambda f: (f.get("cost_impact") or {}).get("monthly_estimate_usd", -1),
+        reverse=True,
+    )
     return {
         "messages": [response],
         "drift_detected": True,
-        "drift_findings": existing + drift_only,
+        "drift_findings": merged,
     }
 
 
@@ -348,8 +355,12 @@ def drift_alert(state: State):
             event_type = "Unmanaged resource"
         else:
             event_type = "Drift detected"
+        summary = f"{event_type}: {finding['resource_id']}"
+        cost = finding.get("cost_impact")
+        if cost:
+            summary += f" (${cost['monthly_estimate_usd']:.2f}/mo)"
         result = pga.trigger_pagerduty_alert(
-            summary=f"{event_type}: {finding['resource_id']}",
+            summary=summary,
             severity="error",
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
@@ -406,7 +417,7 @@ def unmanaged_scan_node(state: State):
         return {"messages": []}
 
     managed = unmanaged_scanner.load_managed_resources(_tf_dir)
-    findings = unmanaged_scanner.diff_unmanaged(live, managed, tf_dir=_tf_dir)
+    findings = unmanaged_scanner.diff_unmanaged(live, managed, region=_region, tf_dir=_tf_dir)
 
     if not findings:
         print("  (every live resource is tracked in state)")
@@ -414,7 +425,11 @@ def unmanaged_scan_node(state: State):
 
     print(f"  {len(findings)} unmanaged resource(s) found:")
     for f in findings:
-        print(f"    [{f['risk_level']}] {f['resource_id']}")
+        cost = f.get("cost_impact")
+        cost_line = ""
+        if cost:
+            cost_line = f"  — ${cost['monthly_estimate_usd']:.2f}/mo"
+        print(f"    [{f['risk_level']}] {f['resource_id']}{cost_line}")
 
     # Merge into drift_findings — downstream alert/PR nodes iterate
     # this list and will surface unmanaged entries alongside drift.
@@ -599,7 +614,10 @@ if __name__ == "__main__":
         "   authoritative (rule 5), the correct reconciliation is to REMOVE this resource's\n"
         "   block from the .tf file — NOT to re-add or restore it. Phrase the fix as\n"
         "   'Remove resource.<address> from Terraform configuration to match live AWS state'\n"
-        "   and never suggest re-adding, restoring, or recreating a deleted_externally resource.\n\n"
+        "   and never suggest re-adding, restoring, or recreating a deleted_externally resource.\n"
+        "7. For findings that include a ``cost_impact`` field, include the estimated\n"
+        "   monthly cost in your analysis and flag any resource costing more than\n"
+        "   $50/mo with ⚠️ COST WARNING.\n\n"
     )
 
     user_query = f"Here is the processed drift report data:\n\n{drift_report}\n\nProvide a plan to resolve this drift."

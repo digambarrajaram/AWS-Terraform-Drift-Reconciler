@@ -5,7 +5,15 @@
     "resource_id_pattern": "launch-wizard",
     "reason": "Ephemeral SG created by EC2 Launch Wizard; does not need IaC management",
     "approved_by": "platform-team",
-    "approved_date": "2026-07-15"
+    "approved_date": "2026-07-15",
+    "max_monthly_cost_usd": 5.00
+  },
+  "_example_cost_cap": {
+    "_note": "When max_monthly_cost_usd is set the resource is only suppressed if its estimated monthly cost is BELOW this threshold.  An expensive resource that matches the pattern still triggers an alert.",
+    "resource_type": "aws_instance",
+    "resource_id_pattern": "dev-sandbox",
+    "max_monthly_cost_usd": 10.00,
+    "reason": "Suppress dev sandbox instances unless they cost over $10/mo"
   },
   "exceptions": [
   ]

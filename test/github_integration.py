@@ -182,6 +182,22 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
                    f"Merging is a no-op on code — run `terraform apply` to revert AWS.")
         target_path = f"drift-reports/{resource_id.replace('.', '-')}.md"
 
+    # Append cost estimate when available.
+    cost = finding.get("cost_impact")
+    if cost:
+        runtime = cost.get("runtime_hours")
+        runtime_line = (
+            f"- Running for: {runtime:.1f} hours" if runtime is not None
+            else "- Running for: unknown (≥4 hours)"
+        )
+        content += (
+            f"\n\n### Cost Estimate\n\n"
+            f"- Hourly rate: ${cost['hourly_usd']:.4f}\n"
+            f"- Estimated monthly: **${cost['monthly_estimate_usd']:.2f}**\n"
+            f"- Accrued since creation: ${cost['accrued_usd']:.2f}\n"
+            f"{runtime_line}\n"
+        )
+
     return create_drift_pr(
         resource_id=resource_id,
         pr_title=pr_title,

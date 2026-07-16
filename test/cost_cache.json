@@ -1,0 +1,208 @@
+{
+  "_description": "On-demand hourly rates in USD for common AWS resources.  Update quarterly from the AWS Price List API.  Resources not listed here are silently skipped by the cost estimator (no cost impact shown).",
+  "_updated": "2026-07-15",
+  "_regions": ["us-east-1", "us-west-2", "eu-west-1", "ap-south-1"],
+
+  "ec2_instance": {
+    "_unit": "per instance-hour (Linux, on-demand, x86 unless noted)",
+    "us-east-1": {
+      "t2.micro": 0.0116,   "t2.small": 0.023,    "t2.medium": 0.0464,
+      "t3.micro": 0.0104,   "t3.small": 0.0208,   "t3.medium": 0.0416,
+      "t3.large": 0.0832,   "t3.xlarge": 0.1664,   "t3.2xlarge": 0.3328,
+      "m6i.large": 0.096,   "m6i.xlarge": 0.192,   "m6i.2xlarge": 0.384,
+      "m7i.large": 0.1008,  "m7i.xlarge": 0.2016,  "m7i.2xlarge": 0.4032,
+      "c6i.large": 0.085,   "c6i.xlarge": 0.17,    "c6i.2xlarge": 0.34,
+      "c7i.large": 0.0893,  "c7i.xlarge": 0.1786,  "c7i.2xlarge": 0.357,
+      "r6i.large": 0.126,   "r6i.xlarge": 0.252,   "r6i.2xlarge": 0.504,
+      "r7i.large": 0.1323,  "r7i.xlarge": 0.2646,  "r7i.2xlarge": 0.5292,
+      "t4g.micro": 0.0084,  "t4g.small": 0.0168,   "t4g.medium": 0.0336,
+      "m6g.large": 0.077,   "m6g.xlarge": 0.154,   "m6g.2xlarge": 0.308,
+      "c6g.large": 0.068,   "c6g.xlarge": 0.136,   "c6g.2xlarge": 0.272,
+      "r6g.large": 0.1008,  "r6g.xlarge": 0.2016,  "r6g.2xlarge": 0.4032
+    },
+    "us-west-2": {
+      "t2.micro": 0.0116,   "t2.small": 0.023,    "t2.medium": 0.0464,
+      "t3.micro": 0.0104,   "t3.small": 0.0208,   "t3.medium": 0.0416,
+      "t3.large": 0.0832,   "t3.xlarge": 0.1664,   "t3.2xlarge": 0.3328,
+      "m6i.large": 0.096,   "m6i.xlarge": 0.192,   "m6i.2xlarge": 0.384,
+      "m7i.large": 0.1008,  "m7i.xlarge": 0.2016,  "m7i.2xlarge": 0.4032,
+      "c6i.large": 0.085,   "c6i.xlarge": 0.17,    "c6i.2xlarge": 0.34,
+      "r6i.large": 0.126,   "r6i.xlarge": 0.252,   "r6i.2xlarge": 0.504,
+      "t4g.micro": 0.0084,  "t4g.small": 0.0168,   "t4g.medium": 0.0336,
+      "m6g.large": 0.077,   "m6g.xlarge": 0.154,   "m6g.2xlarge": 0.308
+    },
+    "eu-west-1": {
+      "t3.micro": 0.0112,   "t3.small": 0.0224,   "t3.medium": 0.0448,
+      "m6i.large": 0.102,   "m6i.xlarge": 0.204,   "m6i.2xlarge": 0.408,
+      "c6i.large": 0.091,   "c6i.xlarge": 0.182,
+      "r6i.large": 0.134,   "r6i.xlarge": 0.268
+    },
+    "ap-south-1": {
+      "t3.micro": 0.0108,   "t3.small": 0.0216,   "t3.medium": 0.0432,
+      "m6i.large": 0.098,   "m6i.xlarge": 0.196,
+      "c6i.large": 0.087,   "c6i.xlarge": 0.174
+    }
+  },
+
+  "ebs_volume": {
+    "_unit": "per GB-month → divide by 730 for hourly",
+    "_note": "cost = (size_gb * rate_per_gb_month) / 730",
+    "gp2": { "us-east-1": 0.10, "us-west-2": 0.10, "eu-west-1": 0.11, "ap-south-1": 0.114 },
+    "gp3": { "us-east-1": 0.08, "us-west-2": 0.08, "eu-west-1": 0.088, "ap-south-1": 0.0912 },
+    "io1": { "us-east-1": 0.125, "us-west-2": 0.125, "eu-west-1": 0.138, "ap-south-1": 0.1425 },
+    "io2": { "us-east-1": 0.125, "us-west-2": 0.125, "eu-west-1": 0.138, "ap-south-1": 0.1425 },
+    "st1": { "us-east-1": 0.045, "us-west-2": 0.045, "eu-west-1": 0.05, "ap-south-1": 0.0513 },
+    "sc1": { "us-east-1": 0.015, "us-west-2": 0.015, "eu-west-1": 0.017, "ap-south-1": 0.0171 }
+  },
+
+  "nat_gateway": {
+    "_unit": "per NAT gateway-hour",
+    "us-east-1": 0.045,
+    "us-west-2": 0.045,
+    "eu-west-1": 0.048,
+    "ap-south-1": 0.0495
+  },
+
+  "rds_instance": {
+    "_unit": "per instance-hour (MySQL/PostgreSQL, on-demand, single-AZ, x86 unless noted as graviton)",
+    "us-east-1": {
+      "db.t3.micro": 0.017,  "db.t3.small": 0.034,  "db.t3.medium": 0.068,
+      "db.t3.large": 0.136,  "db.t3.xlarge": 0.272,  "db.t3.2xlarge": 0.544,
+      "db.r6i.large": 0.252, "db.r6i.xlarge": 0.504, "db.r6i.2xlarge": 1.008,
+      "db.r6g.large": 0.226, "db.r6g.xlarge": 0.453, "db.r6g.2xlarge": 0.907,
+      "db.m6i.large": 0.216, "db.m6i.xlarge": 0.432, "db.m6i.2xlarge": 0.864,
+      "db.m6g.large": 0.194, "db.m6g.xlarge": 0.389, "db.m6g.2xlarge": 0.778
+    },
+    "us-west-2": {
+      "db.t3.micro": 0.017,  "db.t3.small": 0.034,  "db.t3.medium": 0.068,
+      "db.t3.large": 0.136,  "db.r6i.large": 0.252,  "db.r6i.xlarge": 0.504,
+      "db.m6i.large": 0.216, "db.m6i.xlarge": 0.432
+    },
+    "eu-west-1": {
+      "db.t3.micro": 0.019,  "db.t3.small": 0.038,  "db.t3.medium": 0.076,
+      "db.r6i.large": 0.268, "db.m6i.large": 0.23
+    },
+    "ap-south-1": {
+      "db.t3.micro": 0.018,  "db.t3.small": 0.036,  "db.t3.medium": 0.072,
+      "db.r6i.large": 0.265, "db.m6i.large": 0.224
+    }
+  },
+
+  "elasticache_node": {
+    "_unit": "per node-hour (cache.m6g/cache.r6g, on-demand)",
+    "us-east-1": {
+      "cache.t3.micro": 0.017,  "cache.t3.small": 0.034,  "cache.t3.medium": 0.068,
+      "cache.m6g.large": 0.124, "cache.m6g.xlarge": 0.248, "cache.m6g.2xlarge": 0.496,
+      "cache.r6g.large": 0.158, "cache.r6g.xlarge": 0.316, "cache.r6g.2xlarge": 0.632
+    },
+    "us-west-2": {
+      "cache.t3.micro": 0.017,  "cache.t3.small": 0.034,  "cache.t3.medium": 0.068,
+      "cache.m6g.large": 0.124, "cache.m6g.xlarge": 0.248
+    },
+    "eu-west-1": {
+      "cache.t3.micro": 0.019,  "cache.t3.small": 0.038,
+      "cache.m6g.large": 0.132
+    },
+    "ap-south-1": {
+      "cache.t3.micro": 0.018,  "cache.t3.small": 0.036,
+      "cache.m6g.large": 0.13
+    }
+  },
+
+  "alb": {
+    "_unit": "per ALB-hour (plus LCUs billed separately — not estimated)",
+    "us-east-1": 0.0225,
+    "us-west-2": 0.0225,
+    "eu-west-1": 0.0248,
+    "ap-south-1": 0.0243
+  },
+
+  "nlb": {
+    "_unit": "per NLB-hour (plus LCUs billed separately — not estimated)",
+    "us-east-1": 0.0225,
+    "us-west-2": 0.0225,
+    "eu-west-1": 0.0248,
+    "ap-south-1": 0.0243
+  },
+
+  "kms_key": {
+    "_unit": "per key-month → divide by 730 for hourly",
+    "us-east-1": 1.00,
+    "us-west-2": 1.00,
+    "eu-west-1": 1.00,
+    "ap-south-1": 1.09
+  },
+
+  "secrets_manager_secret": {
+    "_unit": "per secret-month → divide by 730 for hourly",
+    "us-east-1": 0.40,
+    "us-west-2": 0.40,
+    "eu-west-1": 0.44,
+    "ap-south-1": 0.44
+  },
+
+  "eip": {
+    "_unit": "per unattached Elastic IP-hour",
+    "_note": "Only charged when not attached to a running instance",
+    "us-east-1": 0.005,
+    "us-west-2": 0.005,
+    "eu-west-1": 0.005,
+    "ap-south-1": 0.005
+  },
+
+  "eks_cluster": {
+    "_unit": "per cluster-hour",
+    "_note": "Flat rate regardless of node count. Worker nodes (EC2/Fargate) billed separately.",
+    "us-east-1": 0.10,
+    "us-west-2": 0.10,
+    "eu-west-1": 0.11,
+    "ap-south-1": 0.11
+  },
+
+  "ecs_fargate": {
+    "_unit": "per vCPU-hour and per GB-memory-hour",
+    "_note": "ECS itself is free — you pay for Fargate compute.  cost = (vcpu * vcpu_rate + memory_gb * gb_rate) per hour.",
+    "us-east-1": { "vcpu_per_hour": 0.04048, "gb_per_hour": 0.004445 },
+    "us-west-2": { "vcpu_per_hour": 0.04048, "gb_per_hour": 0.004445 },
+    "eu-west-1": { "vcpu_per_hour": 0.04453, "gb_per_hour": 0.00489 },
+    "ap-south-1": { "vcpu_per_hour": 0.0417,  "gb_per_hour": 0.00458 }
+  },
+
+  "ecr": {
+    "_unit": "per GB-month of storage → divide by 730 for hourly",
+    "_note": "Data transfer out is billed separately and not estimated here.",
+    "us-east-1": 0.10,
+    "us-west-2": 0.10,
+    "eu-west-1": 0.10,
+    "ap-south-1": 0.10
+  },
+
+  "lambda_function": {
+    "_unit": "base cost per function-month (excl. invocations + duration)",
+    "_note": "Actual cost depends on invocation count and GB-seconds consumed.  This estimate assumes zero-invocation idle (no charge beyond the function's attached resources).  For non-zero invocation estimates, add $0.20 per million requests + $0.0000166667 per GB-second.",
+    "requests_per_million": 0.20,
+    "gb_second": 0.0000166667,
+    "idle_monthly": 0.00
+  },
+
+  "route53_zone": {
+    "_unit": "per hosted zone-month → divide by 730 for hourly",
+    "_note": "Queries are billed separately at $0.40-$0.90 per million depending on type.",
+    "public": {
+      "us-east-1": 0.50, "us-west-2": 0.50, "eu-west-1": 0.50, "ap-south-1": 0.50
+    },
+    "private": {
+      "us-east-1": 0.10, "us-west-2": 0.10, "eu-west-1": 0.10, "ap-south-1": 0.10
+    }
+  },
+
+  "cloudfront_distribution": {
+    "_unit": "base cost per distribution-month (excl. data transfer + requests)",
+    "_note": "Actual cost is dominated by data transfer out to internet ($0.085/GB US) and HTTP requests ($0.0075-$0.0100 per 10k).  This estimate assumes zero-traffic idle (no charge beyond the distribution itself if unused).",
+    "idle_monthly": 0.00,
+    "data_transfer_per_gb": {
+      "us": 0.085, "europe": 0.085, "india": 0.17
+    },
+    "https_requests_per_10k": 0.0100
+  }
+}

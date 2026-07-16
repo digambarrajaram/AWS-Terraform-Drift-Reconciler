@@ -26,11 +26,12 @@ on:
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
   pull-requests: write
 
 env:
   TF_VERSION: "1.9.8"
+  PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -199,7 +200,7 @@ jobs:
           echo "🔍 Running rollback freshness check …"
           python ${{ github.workspace }}/test/rollback_check.py \
             ${{ github.event.pull_request.number }} \
-            ${{ needs.resolve-scope.outputs.tf_working_dir }}/tfplan.json \
+            tfplan.json \
             --pagerduty-scope ${{ needs.resolve-scope.outputs.scope }}
 
       - name: "[ACCEPT] Rollback recovery — revert merge"

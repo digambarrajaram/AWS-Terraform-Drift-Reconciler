@@ -169,6 +169,25 @@ def load_baselines(pr_number: int, account: str) -> list[dict[str, Any]]:
         return []
 
 
+def has_unresolved_drift(account: str) -> bool:
+    """Return ``True`` if *account* has any open (unresolved) drift entries."""
+    if not _URL or not _KEY:
+        return False
+    try:
+        resp = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=id&account=eq.{account}&status=eq.open&limit=1",
+            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json() if resp.text else []
+            return len(data) > 0 if isinstance(data, list) else False
+        return False
+    except requests.RequestException:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

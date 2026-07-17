@@ -192,6 +192,18 @@ jobs:
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > tfplan.json
 
+      - name: "[ACCEPT] Pre-apply drift gate"
+        if: |
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
+        run: |
+          MODE="${{ vars.DRIFT_GATE_MODE }}"
+          ARGS="${{ needs.resolve-scope.outputs.scope }}"
+          if [ "$MODE" = "block" ]; then
+            ARGS="$ARGS --block"
+          fi
+          python ${{ github.workspace }}/test/pre_apply_check.py $ARGS
+
       - name: "[ACCEPT] Rollback freshness gate"
         id: freshness
         if: |

@@ -28,7 +28,12 @@
       "Bash(git *)",
       "Bash(sed -i 's|python test/|python drift_reconciler/|g' README.md drift_reconciler/*.py)",
       "Bash(sed -i 's|/test/|/drift_reconciler/|g' .github/workflows/drift-reconciler.yml .github/workflows/drift-preview.yml)",
-      "Bash(sed -i 's|test/|drift_reconciler/|g' README.md)"
+      "Bash(sed -i 's|test/|drift_reconciler/|g' README.md)",
+      "Bash(sed -i '670,834d' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/trivy_agent.py)",
+      "Bash(sed -i '64d' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/trivy_agent.py)",
+      "Bash(awk -F: '{print $2}')",
+      "Bash(sed -i '39,56d' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)",
+      "Bash(sed -i 's/from drift_history import _patch/from drift_history import _patch, _post/' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)"
     ]
   }
 }

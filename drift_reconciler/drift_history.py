@@ -11,21 +11,12 @@ Usage (standalone test):
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import requests
 
-# Load .env manually (zero-dependency, works without python-dotenv installed).
-# Looks for a .env file in the repo root (two levels up from this file).
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-if _ENV_PATH.is_file():
-    for _line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _key, _, _val = _line.partition("=")
-            if _key.strip() not in os.environ:
-                os.environ[_key.strip()] = _val.strip()
+from env_loader import load_env
+load_env()
 
 _URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
 _KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()

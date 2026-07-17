@@ -2,8 +2,8 @@
 
 import os
 from datetime import datetime
+from pathlib import Path
 from github import Github, Auth, GithubException, UnknownObjectException
-from dotenv import load_dotenv
 import subprocess
 import json
 import re
@@ -12,10 +12,10 @@ import tempfile
 
 import drift_history
 
-load_dotenv()
+from env_loader import load_env
+load_env()
 
-
-REPO_ROOT = r"D:\aws-terraform-drift-reconciler"
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
 UNPATCHABLE_BLOCK_FIELDS = {
     "aws_security_group": {"ingress", "egress"},
@@ -392,8 +392,6 @@ def _json_to_hcl(val) -> str:
     A human reviews the resulting PR before merging, so the conversion
     doesn't need to be perfect — just valid enough for ``terraform validate``
     to pass or at least produce a readable diff."""
-    import json as _json
-
     if isinstance(val, dict):
         items = []
         for k, v in val.items():
@@ -410,10 +408,10 @@ def _json_to_hcl(val) -> str:
         return "null"
     s = str(val)
     try:
-        parsed = _json.loads(s)
+        parsed = json.loads(s)
         if isinstance(parsed, (dict, list)):
             return _json_to_hcl(parsed)
-    except (_json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError):
         pass
     escaped = s.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'

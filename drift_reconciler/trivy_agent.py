@@ -61,7 +61,6 @@ TF_RESOURCE_RE = re.compile(r'resource\s+"([^"]+)"\s+"([^"]+)"')
 _FAILING_STATUSES = {"FAIL", "FAILED"}
 
 # How many times to ask the LLM to repair a syntax error before giving up.
-MAX_SYNTAX_REPAIR_ATTEMPTS = 3
 
 # Order in which issues get fixed within an iteration, highest first.
 _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
@@ -667,171 +666,6 @@ def _is_terraform_initialized(tf_dir: str) -> bool:
     return os.path.isfile(modules_json)
 
 
-def _terraform_validate(tf_dir: str) -> tuple[bool, list[dict]]:
-    """Run `terraform validate -json` and return (valid, diagnostics)."""
-    try:
-        result = subprocess.run(
-            ["terraform", "validate", "-json"],
-            cwd=tf_dir,
-            capture_output=True,
-            text=True,
-        )
-        if not result.stdout:
-            return False, [{"summary": "terraform validate produced no output", "detail": result.stderr}]
-        parsed = json.loads(result.stdout)
-    except (json.JSONDecodeError, OSError) as e:
-        return False, [{"summary": f"terraform validate failed to run: {e}", "detail": ""}]
-
-    return bool(parsed.get("valid", False)), parsed.get("diagnostics", [])
-
-
-def _llm_fix_syntax(file_content: str, error_text: str) -> str | None:
-    """Ask the LLM to repair validation errors using the full file, since a
-    syntax error can affect parsing beyond the block that was edited."""
-    system_prompt = (
-        "You are a Terraform syntax repair assistant. You are given the full "
-        "contents of a .tf file and the exact `terraform validate` errors it "
-        "produced. Fix ONLY what is necessary to resolve these errors — do not "
-        "change resource logic, attribute values, or formatting beyond what the "
-        "errors require, and do not remove any resource blocks. Return the "
-        "complete corrected file inside a single ```hcl code block, with no "
-        "other commentary."
-    )
-    user_prompt = f"Validation errors:\n{error_text}\n\nFile contents:\n```hcl\n{file_content}\n```"
-    try:
-        llm = _get_llm()
-        response = llm.invoke(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-    except Exception as e:
-        print(f"  ⚠ LLM syntax repair call failed: {e}")
-        return None
-
-    return _extract_hcl_block(getattr(response, "content", "") or "")
-
-
-def _ensure_terraform_initialized(tf_dir: str) -> bool:
-    """Idempotent: returns True if the dir is (or becomes) initialized."""
-    if _is_terraform_initialized(tf_dir):
-        return True
-
-    result = subprocess.run(
-        ["terraform", "init", "-input=false", "-no-color", "-backend=false"],
-        cwd=tf_dir,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        print(f"  ⚠ terraform init failed: {result.stderr[:500]}")
-        return False
-    return True
-
-def _repair_syntax_errors(tf_dir: str) -> bool:
-    """Validate the terraform dir; if invalid, feed the exact diagnostics
-    back to the LLM per affected file and retry, up to
-    MAX_SYNTAX_REPAIR_ATTEMPTS times. Never reverts — always tries to move
-    the files forward to a valid state instead of discarding the fix."""
-    if not _ensure_terraform_initialized(tf_dir):   
-        print(
-            "\n  ┌─────────────────────────────────────────────────────────────┐\n"
-            "  │  WARNING: .terraform/ not found                              │\n"
-            "  │  Syntax validation + LLM repair is SKIPPED this run.         │\n"
-            "  │  Any syntax errors introduced by fixes will go undetected.   │\n"
-            "  │  Run `terraform init` in the target dir before re-running.   │\n"
-            "  └─────────────────────────────────────────────────────────────┘\n"
-        )
-        return False  # validation was skipped, not passed
-
-    for attempt in range(1, MAX_SYNTAX_REPAIR_ATTEMPTS + 1):
-        valid, diagnostics = _terraform_validate(tf_dir)
-        if valid:
-            if attempt > 1:
-                print(f"  ✓ terraform validate passed after {attempt - 1} repair attempt(s).")
-            return True
-
-        print(f"  ⚠ terraform validate failed (repair attempt {attempt}/{MAX_SYNTAX_REPAIR_ATTEMPTS})")
-
-        by_file: dict[str, list[dict]] = {}
-        global_diags: list[dict] = []
-        for d in diagnostics:
-            rng = d.get("range") or {}
-            fname = rng.get("filename")
-            if fname:
-                by_file.setdefault(fname, []).append(d)
-            else:
-                global_diags.append(d)
-
-        if not by_file:
-            print("  ⚠ All validation errors are non-file-scoped (provider / backend level):")
-            for d in global_diags:
-                detail = d.get("detail", "") or ""
-                print(f"     - {d.get('summary', '?')}: {detail[:120]}")
-            return False
-
-        # Non-file-scoped diagnostics (provider, backend) carry context the
-        # LLM needs — surface them alongside file-specific errors.
-        global_context = ""
-        if global_diags:
-            global_context = "\n".join(
-                f"- [global] {d.get('summary', '')} — {d.get('detail', '')}"
-                for d in global_diags
-            )
-
-        for fname, diags in by_file.items():
-            fpath = _resolve_file_path(tf_dir, fname)
-            if not fpath:
-                print(f"  ⚠ Could not locate file '{fname}' to repair")
-                continue
-
-            content = _read_file(fpath)
-            if content is None:
-                continue
-
-            blocks_before = _parse_resource_blocks(content)
-
-            error_text = "\n".join(
-                f"- line {d.get('range', {}).get('start', {}).get('line', '?')}: "
-                f"{d.get('summary', '')} — {d.get('detail', '')}"
-                for d in diags
-            )
-            if global_context:
-                error_text = global_context + "\n" + error_text
-
-            fixed = _llm_fix_syntax(content, error_text)
-            if not fixed or fixed.strip() == content.strip():
-                print(f"  ⏭  No repair produced for {os.path.basename(fpath)}")
-                continue
-
-            blocks_after = _parse_resource_blocks(fixed)
-            # Verify every resource address that existed before the repair
-            # still exists after.  A simple count check isn't enough — the
-            # LLM could silently replace one resource with a different one
-            # and the counts would match.
-            before_addrs = {(t, n) for t, n, _s, _e in blocks_before}
-            after_addrs  = {(t, n) for t, n, _s, _e in blocks_after}
-            missing = before_addrs - after_addrs
-            if missing:
-                print(
-                    f"  ⚠ Repair for {os.path.basename(fpath)} would drop or alter "
-                    f"{len(missing)} resource(s): {sorted(missing)} — rejecting, not written"
-                )
-                continue
-
-            if _write_file(fpath, fixed):
-                print(f"  🔧 Repaired syntax in {os.path.basename(fpath)}")
-
-    valid, _ = _terraform_validate(tf_dir)
-    if not valid:
-        print(
-            f"  ✗ Still invalid after {MAX_SYNTAX_REPAIR_ATTEMPTS} repair attempt(s) — "
-            "proceeding anyway, next Trivy scan will likely surface this too."
-        )
-    return valid
-
 
 # ==========================================
 # LANGGRAPH NODES
@@ -973,9 +807,6 @@ def fix_issues(state: State) -> dict:
             print(f"  ✓ {rule_id}: {desc}  ({os.path.basename(file_path)}, {issue.get('resource')})")
         else:
             print(f"  ⏭  {rule_id}: no applicable fix  ({resolution[:80]})")
-
-    if fixes:
-        _repair_syntax_errors(tf_dir)
 
     # When every remaining issue requires a human decision or is
     # pre-existing (not our bug), there is nothing the agent can do —

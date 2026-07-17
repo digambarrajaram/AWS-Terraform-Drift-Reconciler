@@ -16,15 +16,8 @@ from typing import Any
 
 import requests
 
-# Zero-dependency .env loader — same pattern as drift_history.py.
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-if _ENV_PATH.is_file():
-    for _line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            if _k.strip() not in os.environ:
-                os.environ[_k.strip()] = _v.strip()
+from env_loader import load_env
+load_env()
 
 _URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
 _KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()

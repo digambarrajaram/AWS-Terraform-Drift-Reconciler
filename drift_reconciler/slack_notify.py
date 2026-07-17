@@ -19,60 +19,6 @@ import requests
 _MAX_FINDINGS_PER_CARD = 5
 
 
-def send_slack_notification(finding: dict[str, Any], account_label: str) -> bool:
-    """Post a single drift finding to Slack.
-
-    Returns ``True`` on HTTP 2xx, ``False`` otherwise.  Does not raise
-    on network / config errors — the caller decides whether to abort or
-    continue."""
-    webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        print("[slack] SLACK_WEBHOOK_URL is empty — skipping notification")
-        return False
-
-    resource_id = finding.get("resource_id", "unknown")
-    severity = finding.get("risk_level", "LOW")
-    summary = finding.get("drift_summary", "")
-    pr_url = finding.get("pr_url", "")
-    region = os.environ.get("AWS_REGION", "unknown")
-
-    fields = [
-        {"type": "mrkdwn", "text": f"*Account:*\n{account_label}"},
-        {"type": "mrkdwn", "text": f"*Region:*\n{region}"},
-        {"type": "mrkdwn", "text": f"*Severity:*\n{severity}"},
-    ]
-    if summary:
-        fields.append({"type": "mrkdwn", "text": f"*Change:*\n{summary[:200]}"})
-
-    blocks: list[dict[str, Any]] = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f":red_circle: *Drift detected:* `{resource_id}`",
-            },
-        },
-        {"type": "section", "fields": fields},
-    ]
-    if pr_url:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"<{pr_url}|View PR>"},
-        })
-
-    payload = {"blocks": blocks}
-
-    try:
-        resp = requests.post(webhook_url, json=payload, timeout=10)
-        if resp.status_code == 200 and resp.text.strip() == "ok":
-            return True
-        print(f"[slack] Webhook returned {resp.status_code}: {resp.text[:200]}")
-        return False
-    except requests.RequestException as exc:
-        print(f"[slack] Webhook request failed: {exc}")
-        return False
-
-
 def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
     """Post all *findings* to Slack, batched into messages of at most
     ``_MAX_FINDINGS_PER_CARD`` findings each.

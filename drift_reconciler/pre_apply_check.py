@@ -14,15 +14,8 @@ import os
 import sys
 from pathlib import Path
 
-# Zero-dependency .env loader.
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-if _ENV_PATH.is_file():
-    for _line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            if _k.strip() not in os.environ:
-                os.environ[_k.strip()] = _v.strip()
+from env_loader import load_env
+load_env()
 
 from drift_history import has_unresolved_drift  # noqa: E402
 

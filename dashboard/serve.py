@@ -33,7 +33,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path == "/" or path == "/index.html":
+        if path in ("/", "/index.html", "/explorer", "/explorer.html"):
             self._serve_injected()
         else:
             super().do_GET()
@@ -50,8 +50,9 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         return str(_DASHBOARD_DIR / rel)
 
     def _serve_injected(self):
-        html_path = _DASHBOARD_DIR / "index.html"
-        html = html_path.read_text(encoding="utf-8")
+        path = self.path.split("?")[0]
+        fname = "explorer.html" if "explorer" in path else "index.html"
+        html = (_DASHBOARD_DIR / fname).read_text(encoding="utf-8")
         html = html.replace("__SUPABASE_URL__", os.environ.get("SUPABASE_URL", ""))
         anon = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         html = html.replace("__SUPABASE_ANON_KEY__", anon)

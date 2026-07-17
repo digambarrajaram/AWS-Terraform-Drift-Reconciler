@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Explorer</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+  <script src="explorer.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Explorer</h1>
+  </header>
+
+  <main>
+  <div class="filter-bar">
+    <label class="filter-group">
+      Severity
+      <select id="filter-severity">
+        <option value="">All</option>
+        <option value="HIGH">HIGH</option>
+        <option value="MEDIUM">MEDIUM</option>
+        <option value="LOW">LOW</option>
+      </select>
+    </label>
+
+    <div class="filter-group">
+      <span>Account</span>
+      <nav class="scope-tabs">
+        <button class="scope-tab active" id="tab-scope-a" data-scope="scope-a">scope-a</button>
+        <button class="scope-tab" id="tab-scope-b" data-scope="scope-b">scope-b</button>
+      </nav>
+    </div>
+
+    <div class="filter-group">
+      <span>Status</span>
+      <div class="status-pills">
+        <button class="pill active" id="status-open" data-status="open">open</button>
+        <button class="pill" id="status-resolved" data-status="resolved">resolved</button>
+        <button class="pill" id="status-suppressed" data-status="suppressed">suppressed</button>
+      </div>
+    </div>
+
+    <label class="filter-group">
+      Resource
+      <input type="search" id="search-resource" placeholder="Search resource...">
+    </label>
+  </div>
+
+  <div id="error-banner" hidden></div>
+
+  <table class="explorer" id="findings-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Resource</th>
+        <th>Severity</th>
+        <th>Status</th>
+        <th>PR</th>
+      </tr>
+    </thead>
+    <tbody id="findings-body"></tbody>
+  </table>
+
+  <button id="load-more" hidden>Load more</button>
+  </main>
+</body>
+</html>

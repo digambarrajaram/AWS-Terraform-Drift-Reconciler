@@ -523,16 +523,50 @@ def _print_drift_exceptions(drift_report_str: str):
         print()
 
     if suppressed:
-        print(f"  📋 {len(suppressed)} drift finding(s) suppressed by drift-exceptions.json:")
-        for r in suppressed:
-            exc = r.get("_suppressed_by", {})
-            print(f"    - {r.get('address', '?')}  →  {exc.get('reason', '?')[:100]}")
-        print()
+        auto_exc = [r for r in suppressed if r.get("_suppressed_by", {}).get("auto")]
+        manual_exc = [r for r in suppressed if not r.get("_suppressed_by", {}).get("auto")]
+        if auto_exc:
+            print(f"  🔇 {len(auto_exc)} drift finding(s) auto-suppressed by drift-exceptions.json:")
+            for r in auto_exc:
+                exc = r.get("_suppressed_by", {})
+                print(f"    - {r.get('address', '?')}  →  {exc.get('reason', '?')[:100]}")
+            print()
+        if manual_exc:
+            print(f"  📋 {len(manual_exc)} drift finding(s) suppressed by drift-exceptions.json (manual ack):")
+            for r in manual_exc:
+                exc = r.get("_suppressed_by", {})
+                print(f"    - {r.get('address', '?')}  →  {exc.get('reason', '?')[:100]}")
+            print()
 
     resources = report.get("resources") or []
     if resources:
+        auto = [r for r in resources if r.get("status") == "auto_suppressed"]
         external = [r for r in resources if r.get("status") == "externally_managed"]
-        actionable = [r for r in resources if r not in external]
+        actionable = [r for r in resources
+                      if r not in external and r not in auto]
+
+        if auto:
+            print(f"  🔇 {len(auto)} resource(s) auto-suppressed "
+                  f"(expected drift — ASG-managed, AWS-managed tags, etc.):")
+            for r in auto:
+                reasons = r.get("_auto_reasons", [])
+                print(f"      {r['address']}  ({'; '.join(reasons[:2])})")
+                # Log auto-suppressed events to history for trend visibility.
+                try:
+                    import drift_history
+                    drift_history.append_entry(
+                        resource_id=r["address"],
+                        account_label=_account_label,
+                        region=_region,
+                        pr_type="auto_suppressed",
+                        severity=r.get("security_impact", "LOW"),
+                        fields_changed=[],
+                        drift_summary="; ".join(reasons),
+                        status="suppressed",
+                    )
+                except Exception:
+                    pass
+            print()
 
         if external:
             print(f"  ⚠ {len(external)} resource(s) have drift covered by lifecycle.ignore_changes "
@@ -562,6 +596,16 @@ def _print_drift_exceptions(drift_report_str: str):
                         }
                         print(f"      Add to drift-exceptions.json:")
                         print(f"      {json.dumps(snippet, indent=6)}")
+
+                # ── Summary ──
+                total_suppressed = len(auto) + len(external) + len(suppressed)
+                if total_suppressed:
+                    types = []
+                    if auto: types.append(f"{len(auto)} auto-suppressed")
+                    if external: types.append(f"{len(external)} lifecycle.ignore_changes")
+                    if suppressed: types.append(f"{len(suppressed)} drift-exceptions")
+                    print(f"  📊 Suppression summary: {', '.join(types)} — "
+                          f"{len(actionable)} actionable remaining")
                 print()
 
 

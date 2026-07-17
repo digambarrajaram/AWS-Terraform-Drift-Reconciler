@@ -1,5 +1,5 @@
 # Drift Trends — scope-a
-_Last 90 days.  Generated 2026-07-17 04:08 UTC._
+_Last 90 days.  Generated 2026-07-17 05:42 UTC._
 
 ## Most Drifted Resources
 
@@ -14,7 +14,7 @@ _Last 90 days.  Generated 2026-07-17 04:08 UTC._
 
 | Severity | Avg Hours | Count |
 |---|---|---|
-| HIGH | 0 | 1 |
+| HIGH | 0 | 3 |
 | LOW | 0.1 | 7 |
 
 ## Rollbacks
@@ -23,16 +23,9 @@ _Last 90 days.  Generated 2026-07-17 04:08 UTC._
 |---|
 | 1 |
 
-## Unresolved
-
-| Resource | Account | Severity | Detected |
-|---|---|---|---|
-| `aws_vpc_security_group_ingress_rule.ssh_ingress` | scope-a | HIGH | 2026-07-16 |
-| `aws_vpc_security_group_ingress_rule.ssh_ingress` | scope-a | HIGH | 2026-07-16 |
-
 ## Summary
 
 - **Total drifts:** 11
 - **Unique resources:** 4
-- **Resolved:** 9
-- **Unresolved:** 2
+- **Resolved:** 11
+- **Unresolved:** 0

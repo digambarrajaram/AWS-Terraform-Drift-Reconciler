@@ -265,13 +265,35 @@ def report_drift(plan, tf_dir: str = None) -> dict:
                 })
                 continue
 
-        resources.append({
-            "address": address,
-            "changes": changes_dict,
-            "sensitive": False,
-            "security_impact": classify_security_impact(address, changes_dict),
-            "file_path": fpath,
-        })
+        # ── Auto-suppress check ──
+        resource_type = address.split(".")[0]
+        auto_fields = set()
+        auto_reasons: list[str] = []
+        for field in list(changes_dict.keys()):
+            rule = _is_auto_suppressed(resource_type, field)
+            if rule:
+                auto_fields.add(field)
+                auto_reasons.append(f"{field}: {rule['reason']}")
+
+        if auto_fields == set(changes_dict.keys()):
+            # Every drifted field is auto-suppressed — silence it completely.
+            resources.append({
+                "address": address,
+                "status": "auto_suppressed",
+                "changes": {},
+                "sensitive": False,
+                "security_impact": classify_security_impact(address, changes_dict),
+                "file_path": fpath,
+                "_auto_reasons": auto_reasons,
+            })
+        else:
+            resources.append({
+                "address": address,
+                "changes": changes_dict,
+                "sensitive": False,
+                "security_impact": classify_security_impact(address, changes_dict),
+                "file_path": fpath,
+            })
 
     # Apply drift-exceptions registry if a terraform directory was provided.
     suppressed, expired_exc = [], []
@@ -334,6 +356,40 @@ def _get_ignored_fields(file_path: str, resource_address: str) -> set[str]:
                     return {f for f in fields if f}
                 return set()
     return set()
+
+
+# ---------------------------------------------------------------------------
+# Auto-suppress rules — these patterns match drift that is expected and
+# should never trigger alerts or PRs (ASG-managed changes, AWS-managed
+# tags, etc.).  Unlike drift-exceptions.json which requires human
+# acknowledgement, auto-suppressed resources are filtered silently.
+# ---------------------------------------------------------------------------
+
+AUTO_SUPPRESS_RULES = [
+    # ASG-managed tags on instances — AWS adds these, Terraform can't set them.
+    {
+        "resource_type": "aws_instance",
+        "field_pattern": re.compile(r"^aws:"),
+        "reason": "AWS-managed tag — cannot be set in Terraform",
+    },
+    # ASG scaling attributes — these change constantly by design.
+    {
+        "resource_type": "aws_autoscaling_group",
+        "field_pattern": re.compile(r"^(desired_capacity|max_size|min_size|max_instance_lifetime)$"),
+        "reason": "ASG scaling attribute — expected to change outside Terraform",
+    },
+]
+
+
+def _is_auto_suppressed(resource_type: str, field_name: str) -> dict | None:
+    """Return the matching rule dict if *field_name* on *resource_type*
+    should be auto-suppressed, or ``None``."""
+    for rule in AUTO_SUPPRESS_RULES:
+        if rule["resource_type"] != resource_type:
+            continue
+        if rule["field_pattern"].search(field_name):
+            return rule
+    return None
 
 
 def build_resource_file_index(tf_dir: str) -> dict:

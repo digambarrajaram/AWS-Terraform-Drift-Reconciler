@@ -87,6 +87,17 @@ terraform plan → format drift JSON → LangGraph agent pipeline
 | Severity-based routing: HIGH → PagerDuty, MEDIUM/LOW → Slack only | ✅ |
 | All notification modules CI-safe (stdlib + `requests`, no dotenv dependency) | ✅ |
 
+### Noise suppression
+
+| Feature | Status |
+|---|---|
+| `drift-exceptions.json` with expiry, pattern matching, and optional `auto` flag | ✅ |
+| `unmanaged-exceptions.json` with cost-cap threshold | ✅ |
+| Auto-suppress rules for ASG-managed / AWS-managed drift (no human review needed) | ✅ |
+| `🍄` / `📋` console icons distinguish auto vs manual suppression | ✅ |
+| Summary line: total suppressed + actionable remaining | ✅ |
+| Auto-suppressed events logged to Supabase with `status: "suppressed"` | ✅ |
+
 ### Patching
 
 | Feature | Status |

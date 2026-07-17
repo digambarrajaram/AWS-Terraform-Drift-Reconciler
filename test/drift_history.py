@@ -94,6 +94,7 @@ def append_entry(
     unmanaged: bool = False,
     changes_jsonb: dict | None = None,
     file_path: str = "",
+    status: str = "open",
 ) -> None:
     """Insert a new drift event row into Supabase."""
     _post({
@@ -103,7 +104,7 @@ def append_entry(
         "severity": severity,
         "pr_number": pr_number,
         "pr_type": pr_type,
-        "status": "open",
+        "status": status,
         "fields_changed": json.dumps(fields_changed or []),
         "drift_summary": drift_summary,
         "unmanaged": unmanaged,

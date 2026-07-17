@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Dashboard</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+  <script src="dashboard.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler</h1>
+    <nav class="scope-tabs">
+      <button class="scope-tab active" data-scope="scope-a">scope-a</button>
+      <button class="scope-tab" data-scope="scope-b">scope-b</button>
+    </nav>
+  </header>
+
+  <main class="dashboard-grid">
+    <div class="card" id="drift-summary-card">
+      <h2><span role="img" aria-label="Red circle">&#x1F534;</span> Open Drift</h2>
+      <div class="card-body" aria-live="polite"></div>
+    </div>
+    <div class="card" id="cost-impact-card">
+      <h2><span role="img" aria-label="Money bag">&#x1F4B0;</span> Monthly Cost Impact</h2>
+      <div class="card-body" aria-live="polite"></div>
+    </div>
+    <div class="card" id="rollback-card">
+      <h2><span role="img" aria-label="Leftwards arrow with hook">&#x21A9;&#xFE0F;</span> Pending Rollbacks</h2>
+      <div class="card-body" aria-live="polite"></div>
+    </div>
+    <div class="card" id="last-scan-card">
+      <h2><span role="img" aria-label="Clock">&#x1F550;</span> Last Scan</h2>
+      <div class="card-body" aria-live="polite"></div>
+    </div>
+  </main>
+</body>
+</html>

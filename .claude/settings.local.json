@@ -33,7 +33,8 @@
       "Bash(sed -i '64d' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/trivy_agent.py)",
       "Bash(awk -F: '{print $2}')",
       "Bash(sed -i '39,56d' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)",
-      "Bash(sed -i 's/from drift_history import _patch/from drift_history import _patch, _post/' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)"
+      "Bash(sed -i 's/from drift_history import _patch/from drift_history import _patch, _post/' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('/mnt/d/aws-terraform-drift-reconciler/dashboard/dashboard.js','utf8'\\); console.log\\('JS syntax OK'\\)\")"
     ]
   }
 }

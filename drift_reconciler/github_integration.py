@@ -69,7 +69,8 @@ def create_drift_pr(
         base_branch: str = None,
         account_label: str = "default",
         changes: dict | None = None,
-        is_rollback: bool = False):
+        is_rollback: bool = False,
+        cost_impact: dict | None = None):
     token = os.getenv("GITHUB_TOKEN")
     repo_name = os.getenv("GITHUB_REPO")
     auth = Auth.Token(token)
@@ -152,6 +153,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             drift_summary=drift_summary,
             changes_jsonb=changes,
             file_path=file_path,
+            cost_impact=cost_impact,
         )
     except Exception as exc:
         print(f"  ⚠ Failed to append drift history: {exc}")
@@ -222,6 +224,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         risk_level=risk_level,
         account_label=account_label,
         changes=finding.get("changes") if finding.get("file_path") else None,
+        cost_impact=finding.get("cost_impact"),
     )
 
 
@@ -329,6 +332,7 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
                 drift_summary=f.get("drift_summary", ""),
                 changes_jsonb=f.get("changes"),
                 file_path=to_repo_relative_path(file_path),
+                cost_impact=f.get("cost_impact"),
             )
         except Exception as exc:
             print(f"  ⚠ Failed to append drift history for {f['resource_id']}: {exc}")

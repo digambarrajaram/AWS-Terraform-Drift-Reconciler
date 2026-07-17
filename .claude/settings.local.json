@@ -25,7 +25,10 @@
       "Bash(git -C /mnt/d/aws-terraform-drift-reconciler log --oneline --diff-filter=D -- \"terraform_code/\")",
       "Bash(git -C /mnt/d/aws-terraform-drift-reconciler log --oneline -3)",
       "Bash(git -C /mnt/d/aws-terraform-drift-reconciler show --stat 55021e7)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(sed -i 's|python test/|python drift_reconciler/|g' README.md drift_reconciler/*.py)",
+      "Bash(sed -i 's|/test/|/drift_reconciler/|g' .github/workflows/drift-reconciler.yml .github/workflows/drift-preview.yml)",
+      "Bash(sed -i 's|test/|drift_reconciler/|g' README.md)"
     ]
   }
 }

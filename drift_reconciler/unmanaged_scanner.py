@@ -2,7 +2,7 @@
 Enumerate live AWS resources that may exist outside of Terraform state.
 
 Usage (standalone test):
-    python test/unmanaged_scanner.py --region us-east-1
+    python drift_reconciler/unmanaged_scanner.py --region us-east-1
 """
 
 import argparse

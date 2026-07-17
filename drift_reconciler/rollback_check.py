@@ -8,7 +8,7 @@ is stale (intervening change detected — abort the apply).  Exits 2 when
 the baseline directory or files are missing (not a rollback PR — skip).
 
 Usage:
-    python test/rollback_check.py <pr_number> <plan_json_path>
+    python drift_reconciler/rollback_check.py <pr_number> <plan_json_path>
 """
 
 import json
@@ -51,7 +51,7 @@ def _extract_field_values(
 
 def main() -> int:
     if len(sys.argv) < 3:
-        print("Usage: python test/rollback_check.py <pr_number> <plan_json_path> [--pagerduty-scope <label>]")
+        print("Usage: python drift_reconciler/rollback_check.py <pr_number> <plan_json_path> [--pagerduty-scope <label>]")
         return 2
 
     pr_number = sys.argv[1]

@@ -17,7 +17,7 @@ terraform plan → format drift JSON → LangGraph agent pipeline
             [alert + PR]          [PagerDuty / Slack]    [drift_history]
 ```
 
-- **Agent**: Python (`test/agent.py`) — LangGraph pipeline with configurable nodes.
+- **Agent**: Python (`drift_reconciler/agent.py`) — LangGraph pipeline with configurable nodes.
 - **Workflow**: GitHub Actions (`drift-reconciler.yml`, `drift-preview.yml`).
 - **State**: Terraform remote state in S3, lock table in DynamoDB.
 - **Alerting**: PagerDuty (high-severity) + Slack (all severities + workflow outcomes).
@@ -166,16 +166,16 @@ terraform plan → format drift JSON → LangGraph agent pipeline
 
 ```bash
 # Drift detection only
-python test/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1
+python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1
 
 # With unmanaged resource scan
-python test/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1 --scan-unmanaged
+python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1 --scan-unmanaged
 
 # Rollback a previous fix
-python test/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1 --rollback --rollback-pr 50
+python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1 --rollback --rollback-pr 50
 
 # Trend report
-python test/agent.py --trends --trends-account scope-a
+python drift_reconciler/agent.py --trends --trends-account scope-a
 ```
 
 ### Environment
@@ -205,7 +205,7 @@ Required GitHub Secrets: `AWS_ROLE_ARN` (or scope-specific `SCOPE_A_APPLY_ROLE_A
 ## Project structure
 
 ```
-test/
+drift_reconciler/
   agent.py                    # LangGraph pipeline entrypoint
   trivy_agent.py              # Trivy scan → fix → scan loop
   github_integration.py       # PR creation, hcledit/regex .tf patching

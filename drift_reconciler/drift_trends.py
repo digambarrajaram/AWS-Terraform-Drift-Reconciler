@@ -4,8 +4,8 @@ Generate a drift-trends markdown report from Supabase (PostgreSQL via REST API).
 Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment.
 
 Usage:
-    python test/drift_trends.py --account scope-a
-    python test/drift_trends.py --account scope-a --days 90
+    python drift_reconciler/drift_trends.py --account scope-a
+    python drift_reconciler/drift_trends.py --account scope-a --days 90
 """
 
 import argparse

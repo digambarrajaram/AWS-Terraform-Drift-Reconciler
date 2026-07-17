@@ -2,7 +2,7 @@
 Post workflow outcome to Slack.
 
 Usage:
-    python test/workflow_notify.py <outcome> <scope> <pr_number> [details]
+    python drift_reconciler/workflow_notify.py <outcome> <scope> <pr_number> [details]
 
 Requires SLACK_WEBHOOK_URL in the environment.
 """
@@ -29,7 +29,7 @@ MESSAGES = {
 
 def main() -> int:
     if len(sys.argv) < 4:
-        print("Usage: python test/workflow_notify.py <outcome> <scope> <pr_number> [details]")
+        print("Usage: python drift_reconciler/workflow_notify.py <outcome> <scope> <pr_number> [details]")
         return 2
 
     outcome = sys.argv[1]

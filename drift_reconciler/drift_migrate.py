@@ -5,9 +5,9 @@ Reads every JSONL line, POSTs each as a row to the drift_events table.
 Skips lines that are already in Supabase (matched by pr_number + account).
 
 Usage:
-    python test/drift_migrate.py --account scope-a
-    python test/drift_migrate.py --account scope-b
-    python test/drift_migrate.py --all        # migrate every account
+    python drift_reconciler/drift_migrate.py --account scope-a
+    python drift_reconciler/drift_migrate.py --account scope-b
+    python drift_reconciler/drift_migrate.py --all        # migrate every account
 """
 
 import argparse

@@ -203,7 +203,7 @@ jobs:
           if [ "$MODE" = "block" ]; then
             ARGS="$ARGS --block"
           fi
-          python ${{ github.workspace }}/test/pre_apply_check.py $ARGS
+          python ${{ github.workspace }}/drift_reconciler/pre_apply_check.py $ARGS
 
       - name: "[ACCEPT] Drift gate recovery — revert merge"
         if: |
@@ -226,7 +226,7 @@ jobs:
         working-directory: ${{ needs.resolve-scope.outputs.tf_working_dir }}
         run: |
           echo "🔍 Running rollback freshness check …"
-          python ${{ github.workspace }}/test/rollback_check.py \
+          python ${{ github.workspace }}/drift_reconciler/rollback_check.py \
             ${{ github.event.pull_request.number }} \
             tfplan.json \
             --pagerduty-scope ${{ needs.resolve-scope.outputs.scope }}
@@ -256,7 +256,7 @@ jobs:
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
         run: |
-          python ${{ github.workspace }}/test/drift_history.py resolve \
+          python ${{ github.workspace }}/drift_reconciler/drift_history.py resolve \
             ${{ github.event.pull_request.number }} \
             ${{ needs.resolve-scope.outputs.scope }} \
             "PR merged — code updated to match live AWS state"
@@ -275,7 +275,7 @@ jobs:
           if [ "$MODE" = "block" ]; then
             ARGS="$ARGS --block"
           fi
-          python ${{ github.workspace }}/test/pre_apply_check.py $ARGS
+          python ${{ github.workspace }}/drift_reconciler/pre_apply_check.py $ARGS
 
       - name: "[REJECT] Revert Drift to Match Code"
         if: |
@@ -293,7 +293,7 @@ jobs:
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
         run: |
-          python ${{ github.workspace }}/test/drift_history.py resolve \
+          python ${{ github.workspace }}/drift_reconciler/drift_history.py resolve \
             ${{ github.event.pull_request.number }} \
             ${{ needs.resolve-scope.outputs.scope }} \
             "PR closed — AWS reverted to match original code"
@@ -343,4 +343,4 @@ jobs:
             DETAILS=""
           fi
 
-          python ${{ github.workspace }}/test/workflow_notify.py "$OUTCOME" "$SCOPE" "$PR" "$DETAILS"
+          python ${{ github.workspace }}/drift_reconciler/workflow_notify.py "$OUTCOME" "$SCOPE" "$PR" "$DETAILS"

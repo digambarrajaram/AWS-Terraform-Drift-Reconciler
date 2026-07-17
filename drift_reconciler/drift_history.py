@@ -5,7 +5,7 @@ Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment.
 No local file I/O — all reads and writes go to the remote database.
 
 Usage (standalone test):
-    python test/drift_history.py
+    python drift_reconciler/drift_history.py
 """
 
 import json

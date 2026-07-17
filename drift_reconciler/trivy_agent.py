@@ -3,7 +3,7 @@ LangGraph-based agent that scans Terraform code with Trivy
 and loops until all misconfigurations are fixed.
 
 Usage:
-    python test/trivy_agent.py [--tf-dir <path>] [--max-iterations <N>]
+    python drift_reconciler/trivy_agent.py [--tf-dir <path>] [--max-iterations <N>]
 """
 
 import argparse

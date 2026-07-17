@@ -3,7 +3,7 @@ Pre-apply drift gate — checks Supabase for unresolved drift findings
 in the target scope before allowing terraform apply to proceed.
 
 Usage:
-    python test/pre_apply_check.py <scope> [--block]
+    python drift_reconciler/pre_apply_check.py <scope> [--block]
 
 Exit codes:
     0 — no unresolved drift (or warn mode, apply proceeds regardless)
@@ -29,7 +29,7 @@ from drift_history import has_unresolved_drift  # noqa: E402
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: python test/pre_apply_check.py <scope> [--block]")
+        print("Usage: python drift_reconciler/pre_apply_check.py <scope> [--block]")
         return 2
 
     scope = sys.argv[1]

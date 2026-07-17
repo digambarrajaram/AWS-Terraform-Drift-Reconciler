@@ -6,7 +6,7 @@ primary function per finding, one batch wrapper.  No new dependencies
 beyond ``requests`` (already available).
 
 Usage (standalone test):
-    python test/slack_notify.py
+    python drift_reconciler/slack_notify.py
 """
 
 import os

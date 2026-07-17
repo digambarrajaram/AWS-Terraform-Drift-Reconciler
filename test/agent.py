@@ -570,30 +570,24 @@ def _run_rollback(tf_dir: str, pr_number: int) -> None:
     resource in the baseline of *pr_number*.
 
     Skips the normal drift-detection pipeline — this is a standalone
-    rollback flow."""
-    import glob
+    rollback flow.  Baselines are loaded from Supabase (no local file
+    dependency — works from any machine, no git pull needed)."""
+    import drift_history
+
+    baselines = drift_history.load_baselines(pr_number, _account_label)
+    if not baselines:
+        print(f"Error: no baselines found in Supabase for PR #{pr_number} ({_account_label})")
+        sys.exit(1)
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    baseline_dir = os.path.join(repo_root, ".drift-baselines", f"pr-{pr_number}")
-    if not os.path.isdir(baseline_dir):
-        print(f"Error: baseline directory not found — {baseline_dir}")
-        sys.exit(1)
-
-    baseline_files = sorted(glob.glob(os.path.join(baseline_dir, "*.json")))
-    if not baseline_files:
-        print(f"Error: no baseline files found in {baseline_dir}")
-        sys.exit(1)
-
-    print(f"\n--- Rollback checkpoint 1: {len(baseline_files)} resource(s) in PR #{pr_number} ---\n")
+    print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 
     rollback_ready: list[dict] = []
-    for bf in baseline_files:
-        with open(bf, encoding="utf-8") as fh:
-            baseline = json.load(fh)
-
+    for baseline in baselines:
         resource_id = baseline["resource_id"]
         original_changes = baseline["changes"]
-        file_path = baseline.get("file_path", "")
+        rel_path = baseline.get("file_path", "")
+        file_path = os.path.join(repo_root, rel_path) if rel_path else ""
         if not file_path or not os.path.isfile(file_path):
             print(f"  ⚠ {resource_id}: source file not found — {file_path}")
             continue

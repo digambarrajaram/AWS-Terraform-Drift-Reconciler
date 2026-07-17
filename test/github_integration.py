@@ -1,3 +1,5 @@
+"""GitHub integration — PR creation, .tf file patching, rollback support."""
+
 import os
 from datetime import datetime
 from github import Github, Auth, GithubException, UnknownObjectException
@@ -19,24 +21,21 @@ UNPATCHABLE_BLOCK_FIELDS = {
     "aws_security_group": {"ingress", "egress"},
 }
 
+
 def is_unpatchable_finding(resource_id: str, changes: dict) -> bool:
     resource_type = resource_id.split(".")[0]
     unpatchable = UNPATCHABLE_BLOCK_FIELDS.get(resource_type)
     if not unpatchable:
         return False
-    # True only if every changed field is one of the known-unpatchable block fields —
-    # if the SG has some other real attribute change mixed in, still create the PR.
     return bool(changes) and all(field in unpatchable for field in changes)
 
+
 def to_repo_relative_path(local_path: str) -> str:
-    """Convert an absolute local path to a repo-relative, forward-slash path
-    that GitHub's API expects."""
     rel = os.path.relpath(local_path, REPO_ROOT)
     return rel.replace("\\", "/")
 
 
 def _safe_label(account_label: str) -> str:
-    """Sanitise *account_label* for use in git branch names and PR titles."""
     return re.sub(r"[^a-zA-Z0-9_-]", "-", account_label)
 
 
@@ -45,15 +44,6 @@ def is_hcledit_available() -> bool:
 
 
 def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch: str, is_rollback: bool = False):
-    """Close older OPEN drift PRs for the same resource+account before opening
-    a new one.  Only touches currently-open PRs — a resource that drifted, was
-    fixed (PR merged or closed), and later drifts again independently will NOT
-    be suppressed, since get_pulls(state='open') no longer sees the earlier
-    resolved PR at all.
-
-    When *is_rollback* is True, only closes other rollback PRs.  When False,
-    only closes regular drift-fix PRs.  The two types never supersede each
-    other — a human may want both a fix and a rollback open simultaneously."""
     safe_id = resource_id.replace(".", "-")
     safe_account = _safe_label(account_label)
     prefix = f"drift-fix/{safe_account}/{safe_id}-"
@@ -63,7 +53,7 @@ def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch
             continue
         branch_is_rollback = "-rollback-" in pr.head.ref
         if branch_is_rollback != is_rollback:
-            continue  # never cross-type supersede
+            continue
         pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
         pr.edit(state="closed")
 
@@ -90,8 +80,6 @@ def create_drift_pr(
 
     safe_account = _safe_label(account_label)
 
-    # Prevent duplicate open PRs for the same resource+account across
-    # repeated runs.
     close_superseded_prs(repo, resource_id, account_label, base_branch, is_rollback=is_rollback)
 
     safe_id = resource_id.replace(".", "-")
@@ -104,7 +92,6 @@ def create_drift_pr(
 
     try:
         existing = repo.get_contents(file_path, ref=head_branch)
-        #print(f"[DEBUG] existing file found, sha={existing.sha}")
         repo.update_file(
             path=file_path,
             message=pr_title,
@@ -112,9 +99,7 @@ def create_drift_pr(
             sha=existing.sha,
             branch=head_branch,
         )
-        #print(f"[DEBUG] update_file succeeded for {file_path}")
     except UnknownObjectException:
-        #print(f"[DEBUG] get_contents 404'd, creating new file at {file_path}")
         repo.create_file(
             path=file_path,
             message=pr_title,
@@ -122,7 +107,6 @@ def create_drift_pr(
             branch=head_branch,
         )
     except GithubException as e:
-        #print(f"[ERROR] Unexpected GitHub API failure: status={e.status} data={e.data}")
         raise
 
     pr_body = f"""## Drift detected: `{resource_id}`
@@ -153,32 +137,9 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
     except GithubException:
         pass
 
-    # Store a drift baseline so future rollbacks can reverse this exact
-    # fix by swapping before/after and re-patching.  One baseline per
-    # resource per PR — never overwritten.
-    if changes:
-        safe_rid = resource_id.replace(".", "-")
-        baseline_path = f".drift-baselines/pr-{pr.number}/{safe_rid}.json"
-        baseline_content = json.dumps(
-            {
-                "resource_id": resource_id,
-                "file_path": file_path,
-                "changes": changes,
-                "captured_at": datetime.utcnow().isoformat() + "Z",
-            },
-            indent=2,
-        )
-        try:
-            repo.create_file(
-                path=baseline_path,
-                message=f"[baseline] Store drift baseline for {resource_id}",
-                content=baseline_content,
-                branch=head_branch,
-            )
-        except GithubException as e:
-            print(f"  ⚠ Failed to store drift baseline for {resource_id}: {e}")
-
-    # Append to the per-account drift history for trend reporting.
+    # Append to the per-account drift history (Supabase) for trend
+    # reporting and rollback.  The changes_jsonb column stores the full
+    # {field: {before, after}} dict.
     try:
         drift_history.append_entry(
             resource_id=resource_id,
@@ -189,6 +150,8 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             severity=risk_level,
             fields_changed=list(changes.keys()) if changes else [],
             drift_summary=drift_summary,
+            changes_jsonb=changes,
+            file_path=file_path,
         )
     except Exception as exc:
         print(f"  ⚠ Failed to append drift history: {exc}")
@@ -234,7 +197,6 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
                    f"Merging is a no-op on code — run `terraform apply` to revert AWS.")
         target_path = f"drift-reports/{resource_id.replace('.', '-')}.md"
 
-    # Append cost estimate when available.
     cost = finding.get("cost_impact")
     if cost:
         runtime = cost.get("runtime_hours")
@@ -264,11 +226,6 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
 
 
 def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
-    """Apply changes from multiple findings to one temp copy of the file.
-
-    Each finding's before→after replacements (or block removal for
-    deleted_externally) are applied sequentially so every drift fix
-    lands in a single commit."""
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tf")
     os.close(tmp_fd)
     shutil.copy(file_path, tmp_path)
@@ -291,18 +248,20 @@ def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
                         check=False, capture_output=True, text=True,
                     )
                 else:
+                    total = 0
                     for field, vals in changes.items():
                         if "." in field or "[" in field:
                             continue
-                        if _is_complex_value(vals.get("after")):
-                            print(f"  ⚠ {resource_id}.{field}: complex value (map/list) — "
-                                  f"skipping auto-patch, requires manual HCL edit")
-                            continue
+                        total += 1
+                        hcl_val = _json_to_hcl(vals.get("after"))
                         subprocess.run(
                             ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                             json.dumps(str(vals["after"])), "-f", tmp_path, "-u"],
+                             hcl_val, "-f", tmp_path, "-u"],
                             check=False,
                         )
+                    if total == 0:
+                        print(f"  ⚠ {resource_id}: no patchable fields — "
+                              f"PR may contain no file changes (manual HCL edit required)")
 
         with open(tmp_path, encoding="utf-8") as fh:
             return fh.read()
@@ -311,10 +270,6 @@ def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
 
 
 def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str = "default"):
-    """Create a single PR that reconciles every drift finding for one file.
-
-    All before→after value replacements and deleted-resource block removals
-    are applied to the same temp copy so related changes ship together."""
     if not findings:
         return None
 
@@ -322,7 +277,6 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
     if not file_path:
         return None
 
-    # Skip findings that are unpatchable (computed block fields only).
     actionable = [f for f in findings
                   if not is_unpatchable_finding(f["resource_id"], f.get("changes", {}))]
     if not actionable:
@@ -347,10 +301,6 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
         f"### `{f['resource_id']}`\n```text\n{f['plan_output']}\n```" for f in actionable
     )
 
-    # Use the first resource id as the git-ref anchor with a batch-size
-    # suffix so the branch name stays valid (no commas / spaces / special
-    # chars beyond what git allows).  The full resource list is in the
-    # PR title and body.
     branch_id = resource_ids[0] if count == 1 else f"{resource_ids[0]}-batch-{count}"
 
     pr = create_drift_pr(
@@ -366,40 +316,6 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
     if pr is None:
         return None
 
-    # Store a baseline per resource under the same PR directory so each
-    # one can be rolled back independently.
-    token = os.getenv("GITHUB_TOKEN")
-    repo_name = os.getenv("GITHUB_REPO")
-    g = Github(auth=Auth.Token(token))
-    repo = g.get_repo(repo_name)
-
-    for f in actionable:
-        changes = f.get("changes")
-        if not changes:
-            continue
-        rid = f["resource_id"]
-        safe_rid = rid.replace(".", "-")
-        baseline_path = f".drift-baselines/pr-{pr.number}/{safe_rid}.json"
-        baseline_content = json.dumps(
-            {
-                "resource_id": rid,
-                "file_path": to_repo_relative_path(file_path),
-                "changes": changes,
-                "captured_at": datetime.utcnow().isoformat() + "Z",
-            },
-            indent=2,
-        )
-        try:
-            repo.create_file(
-                path=baseline_path,
-                message=f"[baseline] Store drift baseline for {rid}",
-                content=baseline_content,
-                branch=pr.head.ref,
-            )
-        except GithubException as e:
-            print(f"  ⚠ Failed to store drift baseline for {rid}: {e}")
-
-    # One history entry per resource in the batch.
     for f in actionable:
         try:
             drift_history.append_entry(
@@ -411,6 +327,8 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
                 severity=f.get("risk_level", "LOW"),
                 fields_changed=list(f.get("changes", {}).keys()),
                 drift_summary=f.get("drift_summary", ""),
+                changes_jsonb=f.get("changes"),
+                file_path=to_repo_relative_path(file_path),
             )
         except Exception as exc:
             print(f"  ⚠ Failed to append drift history for {f['resource_id']}: {exc}")
@@ -419,7 +337,6 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
 
 
 def get_resource_block_text(file_path, resource_type, resource_name):
-    """Read-only lookup — safe to read the real local file directly, never writes."""
     with open(file_path, encoding="utf-8") as f:
         content = f.read()
     pattern = re.compile(rf'resource\s+"{re.escape(resource_type)}"\s+"{re.escape(resource_name)}"\s*\{{')
@@ -439,26 +356,6 @@ def _extract_field_values(
     resource_address: str,
     fields: list[str],
 ) -> tuple[str, dict[str, str]]:
-    """Extract live field values for *resource_address* from a terraform
-    plan JSON (``terraform show -json`` output).
-
-    Returns ``(outcome, values)`` where *outcome* is one of:
-
-    ``"present"``
-        Resource found, *values* contains ``change.before`` for each
-        requested field.
-    ``"no_diff"``
-        Resource found but ``change.before == change.after`` for every
-        requested field — nothing to reconcile.
-    ``"not_found"``
-        Resource address does not appear in ``resource_changes[]`` or
-        the resource is absent from the plan entirely (e.g. deleted
-        externally).
-
-    Always reads from ``change.before`` (live AWS state), NOT
-    ``change.after`` (what the code proposes).  Getting this backwards
-    makes the freshness check silently useless.
-    """
     resource_changes = plan_json.get("resource_changes", [])
     for rc in resource_changes:
         if rc.get("address") != resource_address:
@@ -468,7 +365,6 @@ def _extract_field_values(
         after = change.get("after", {})
 
         if not before:
-            # Resource has no live state — possibly deleted externally.
             return ("not_found", {})
 
         all_same = True
@@ -488,32 +384,42 @@ def _extract_field_values(
     return ("not_found", {})
 
 
-def _is_complex_value(val) -> bool:
-    """Return True when *val* looks like a JSON-serialised map or list.
+def _json_to_hcl(val) -> str:
+    """Convert a JSON value (dict, list, string, number, bool) to HCL
+    literal syntax so it can be passed to hcledit or used in regex
+    replacement without producing invalid HCL.
 
-    The drift report serialises HCL maps / lists as JSON strings (e.g.
-    ``{"Name":"WebServer"}``).  Neither the hcledit nor the regex fallback
-    patcher can convert these back to valid HCL reliably, so they must be
-    skipped with a warning rather than blindly inserted as string literals
-    (which produces ``tags = "{'Name': 'WebServer'}"`` — invalid HCL)."""
+    A human reviews the resulting PR before merging, so the conversion
+    doesn't need to be perfect — just valid enough for ``terraform validate``
+    to pass or at least produce a readable diff."""
+    import json as _json
+
     if isinstance(val, dict):
-        return True
+        items = []
+        for k, v in val.items():
+            items.append(f"{k} = {_json_to_hcl(v)}")
+        return "{\n  " + "\n  ".join(items) + "\n}"
     if isinstance(val, list):
-        return True
-    if isinstance(val, str):
-        stripped = val.strip()
-        if stripped.startswith("{") or stripped.startswith("["):
-            return True
-    return False
+        parts = [_json_to_hcl(v) for v in val]
+        return "[" + ", ".join(parts) + "]"
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        return str(val)
+    if val is None:
+        return "null"
+    s = str(val)
+    try:
+        parsed = _json.loads(s)
+        if isinstance(parsed, (dict, list)):
+            return _json_to_hcl(parsed)
+    except (_json.JSONDecodeError, TypeError):
+        pass
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, deleted: bool) -> str | None:
-    """Regex-based fallback when hcledit is not available.
-
-    For *deleted* resources the entire resource block is removed.  For
-    drifted attributes each before → after value is replaced inside the
-    block.  Returns the patched content on success, or None when the
-    resource block cannot be located."""
     try:
         with open(file_path, encoding="utf-8") as f:
             content = f.read()
@@ -550,23 +456,25 @@ def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, delete
         return "\n".join(lines[:block_start] + lines[block_end + 1:])
 
     applied = False
+    total = 0
     for i in range(block_start, block_end + 1):
         for field, vals in changes.items():
-            if _is_complex_value(vals.get("before")) or _is_complex_value(vals.get("after")):
-                continue  # map/list — can't safely regex-replace, skip
-            before_val = str(vals.get("before", ""))
-            after_val = str(vals.get("after", ""))
+            total += 1
+            before_val = _json_to_hcl(vals.get("before"))
+            after_val = _json_to_hcl(vals.get("after"))
             if before_val and before_val in lines[i]:
                 lines[i] = lines[i].replace(before_val, after_val, 1)
                 applied = True
                 break
 
+    if total == 0:
+        print(f"  ⚠ {resource_id}: no patchable fields — "
+              f"PR may contain no file changes (manual HCL edit required)")
+
     return "\n".join(lines) if applied else None
 
 
 def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
-    """Patch a TEMP COPY of the file via hcledit — the real local file on disk
-    is never modified. Returns the patched content as a string for upload to GitHub."""
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tf")
     os.close(tmp_fd)
     shutil.copy(file_path, tmp_path)
@@ -590,21 +498,23 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
             if result.returncode != 0:
                 print(f"[WARN] hcledit block rm failed for {resource_id}: {result.stderr}")
         else:
+            total = 0
             for field, vals in changes.items():
                 if "." in field or "[" in field:
                     continue
-                if _is_complex_value(vals.get("after")):
-                    print(f"  ⚠ {resource_id}.{field}: complex value (map/list) — "
-                          f"skipping auto-patch, requires manual HCL edit")
-                    continue
+                total += 1
+                hcl_val = _json_to_hcl(vals.get("after"))
                 try:
                     subprocess.run(
                         ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                         json.dumps(str(vals["after"])), "-f", tmp_path, "-u"],
+                         hcl_val, "-f", tmp_path, "-u"],
                         check=False,
                     )
                 except FileNotFoundError:
                     print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
+            if total == 0:
+                print(f"  ⚠ {resource_id}: no patchable fields — "
+                      f"PR may contain no file changes (manual HCL edit required)")
 
         with open(tmp_path, encoding="utf-8") as f:
             return f.read()

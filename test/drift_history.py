@@ -92,6 +92,8 @@ def append_entry(
     fields_changed: list[str] | None = None,
     drift_summary: str = "",
     unmanaged: bool = False,
+    changes_jsonb: dict | None = None,
+    file_path: str = "",
 ) -> None:
     """Insert a new drift event row into Supabase."""
     _post({
@@ -105,6 +107,8 @@ def append_entry(
         "fields_changed": json.dumps(fields_changed or []),
         "drift_summary": drift_summary,
         "unmanaged": unmanaged,
+        "changes_jsonb": json.dumps(changes_jsonb) if changes_jsonb else None,
+        "file_path": file_path,
     })
 
 
@@ -125,6 +129,44 @@ def resolve_entry(pr_number: int, account: str, resolution: str = "") -> None:
         print(f"  [history] PR #{pr_number} resolved — {resolution}")
     else:
         print(f"  [history] Failed to resolve PR #{pr_number}")
+
+
+def load_baselines(pr_number: int, account: str) -> list[dict[str, Any]]:
+    """Return rollback baselines for *pr_number* from Supabase.
+
+    Each dict has ``resource_id``, ``changes`` (the ``changes_jsonb``
+    column), and ``drift_summary`` — the same shape ``_run_rollback``
+    expects from the old file-based ``.drift-baselines/pr-{n}/`` reader."""
+    if not _URL or not _KEY:
+        print("  [history] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
+        return []
+    try:
+        resp = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=resource_id,changes_jsonb,drift_summary,file_path"
+            f"&pr_number=eq.{pr_number}&account=eq.{account}",
+            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            rows = resp.json() if resp.text else []
+            return [
+                {
+                    "resource_id": r["resource_id"],
+                    "changes": json.loads(r["changes_jsonb"])
+                    if isinstance(r.get("changes_jsonb"), str)
+                    else r.get("changes_jsonb", {}),
+                    "drift_summary": r.get("drift_summary", ""),
+                    "file_path": r.get("file_path", ""),
+                }
+                for r in rows
+                if r.get("changes_jsonb")
+            ]
+        print(f"  [history] load_baselines failed ({resp.status_code}): {resp.text[:200]}")
+        return []
+    except (requests.RequestException, json.JSONDecodeError) as exc:
+        print(f"  [history] load_baselines request failed: {exc}")
+        return []
 
 
 # ---------------------------------------------------------------------------

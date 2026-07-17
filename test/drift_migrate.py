@@ -80,6 +80,28 @@ def _already_exists(pr_number: int, account: str) -> bool:
         return False
 
 
+def _patch(params: dict[str, Any], data: dict[str, Any]) -> bool:
+    """Update matching rows.  Returns True on success."""
+    if not _URL or not _KEY:
+        print("  SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
+        return False
+    filters = "&".join(f"{k}=eq.{v}" for k, v in params.items())
+    try:
+        resp = requests.patch(
+            f"{_URL}/rest/v1/{_TABLE}?{filters}",
+            headers=_HEADERS,
+            json=data,
+            timeout=10,
+        )
+        if resp.status_code in (200, 204):
+            return True
+        print(f"  PATCH failed ({resp.status_code}): {resp.text[:200]}")
+        return False
+    except requests.RequestException as exc:
+        print(f"  PATCH request failed: {exc}")
+        return False
+
+
 def migrate_account(account: str) -> int:
     path = _HISTORY_DIR / account / "drift-log.jsonl"
     if not path.is_file():
@@ -127,19 +149,64 @@ def migrate_account(account: str) -> int:
     return count
 
 
+def migrate_baselines(repo_root: Path) -> int:
+    """Read .drift-baselines/pr-*/ and UPDATE the matching Supabase row
+    with changes_jsonb from the baseline JSON files."""
+    baseline_dir = repo_root / ".drift-baselines"
+    if not baseline_dir.is_dir():
+        print("  No .drift-baselines directory — nothing to migrate")
+        return 0
+
+    count = 0
+    for pr_dir in sorted(baseline_dir.iterdir()):
+        if not pr_dir.is_dir():
+            continue
+        pr_number = pr_dir.name.replace("pr-", "")
+        if not pr_number.isdigit():
+            continue
+        pr_number_int = int(pr_number)
+
+        for bf in sorted(pr_dir.glob("*.json")):
+            try:
+                baseline = json.loads(bf.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            rid = baseline.get("resource_id", "")
+            changes = baseline.get("changes")
+            if not rid or not changes:
+                continue
+
+            ok = _patch(
+                {"pr_number": pr_number_int, "resource_id": rid},
+                {"changes_jsonb": json.dumps(changes)},
+            )
+            if ok:
+                count += 1
+            else:
+                print(f"  Failed to migrate baseline for {rid} (PR #{pr_number_int})")
+
+    return count
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Migrate local .drift-history JSONL files to Supabase."
+        description="Migrate local files to Supabase."
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--account", help="Single account to migrate")
-    group.add_argument("--all", action="store_true", help="Migrate all accounts")
+    group.add_argument("--account", help="Migrate .drift-history for a single account")
+    group.add_argument("--all", action="store_true", help="Migrate .drift-history for all accounts")
+    group.add_argument("--baselines", action="store_true", help="Migrate .drift-baselines to changes_jsonb")
+    args = parser.parse_args()
     args = parser.parse_args()
 
-    if args.all:
+    if args.baselines:
+        total = migrate_baselines(_REPO_ROOT)
+        print(f"\nTotal baseline files migrated: {total}")
+    elif args.all:
         if not _HISTORY_DIR.is_dir():
             print("No .drift-history directory found — nothing to migrate")
             sys.exit(0)

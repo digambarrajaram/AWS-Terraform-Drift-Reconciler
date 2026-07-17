@@ -195,8 +195,14 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) >= 3 and sys.argv[1] == "resolve":
+        try:
+            pr_number = int(sys.argv[2])
+        except (ValueError, TypeError):
+            print(f"  [history] Invalid PR number: {sys.argv[2]} — skipping resolve")
+            sys.exit(0)
+        account = sys.argv[3] if len(sys.argv) >= 4 else ""
         resolution = sys.argv[4] if len(sys.argv) >= 5 else ""
-        resolve_entry(int(sys.argv[2]), sys.argv[3], resolution)
+        resolve_entry(pr_number, account, resolution)
     elif len(sys.argv) >= 2 and sys.argv[1] == "resolve-all":
         # Backfill: mark every open entry as resolved in one query.
         account = sys.argv[2] if len(sys.argv) >= 3 else None

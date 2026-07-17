@@ -5,23 +5,24 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 
 ## Architecture
 
-```
-terraform plan → format drift JSON → LangGraph agent pipeline
-                                          │
-                    ┌─────────────────────┼─────────────────────┐
-                    ▼                     ▼                     ▼
-            [unmanaged scan]      [reconcile agent]       [trivy gate]
-            (optional)            classify + propose      scan→fix→scan
-                    │                     │                     │
-                    ▼                     ▼                     ▼
-            [alert + PR]          [PagerDuty / Slack]    [drift_history]
-```
+<p align="center">
+  <img src="agent_pipeline_flow.png" alt="Agent Pipeline Flow" width="720">
+</p>
 
-- **Agent**: Python (`drift_reconciler/agent.py`) — LangGraph pipeline with configurable nodes.
-- **Workflow**: GitHub Actions (`drift-reconciler.yml`, `drift-preview.yml`).
-- **State**: Terraform remote state in S3, lock table in DynamoDB.
-- **Alerting**: PagerDuty (high-severity) + Slack (all severities + workflow outcomes).
-- **History**: Supabase PostgreSQL (drift events + trend reporting).
+<p align="center">
+  <img src="cicd_accept_reject_flow.png" alt="CI/CD Accept/Reject Flow" width="800">
+</p>
+
+**Pipeline** (`drift_reconciler/agent.py`) — 5 LangGraph nodes in sequence
+- `unmanaged_scan` (optional, `--scan-unmanaged`) — boto3 AWS enumeration
+- `reconcile_agent` — Nova Pro classifies drift, proposes HCL fix
+- `trivy_gate` — baseline scan → patch → scan → fix loop with pre-existing classification
+- `drift_alert` — HIGH→PagerDuty, MEDIUM/LOW→Slack (batched)
+- `drift_pr` — GitHub PR (fix/batch/rollback) + Supabase history append
+
+**CLI** — `--rollback`, `--rollback-pr`, `--scan-unmanaged`, `--trends`, `--tf-dir`, `--account-label`, `--region`
+
+**CI/CD** (`.github/workflows/`) — OIDC auth, scope-resolved, dual-gate (drift + freshness), auto-revert on block
 
 ---
 

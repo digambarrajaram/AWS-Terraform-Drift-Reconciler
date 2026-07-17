@@ -193,6 +193,7 @@ jobs:
           terraform show -json tfplan > tfplan.json
 
       - name: "[ACCEPT] Pre-apply drift gate"
+        id: drift_gate
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
@@ -203,6 +204,19 @@ jobs:
             ARGS="$ARGS --block"
           fi
           python ${{ github.workspace }}/test/pre_apply_check.py $ARGS
+
+      - name: "[ACCEPT] Drift gate recovery — revert merge"
+        if: |
+          steps.drift_gate.outcome == 'failure' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.merged == true
+        run: |
+          echo "❌ Pre-apply drift gate blocked — unresolved drift exists. Reverting merge."
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git revert --no-edit -m 1 ${{ github.sha }}
+          git push origin ${{ github.event.pull_request.base.ref }}
+          echo "Merge reverted. Code and live state are consistent again."
 
       - name: "[ACCEPT] Rollback freshness gate"
         id: freshness
@@ -251,6 +265,7 @@ jobs:
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
       # =================================================================
       - name: "[REJECT] Pre-apply drift gate"
+        id: reject_drift_gate
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')

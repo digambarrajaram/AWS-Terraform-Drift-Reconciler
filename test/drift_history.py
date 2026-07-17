@@ -188,17 +188,41 @@ def has_unresolved_drift(account: str) -> bool:
         return False
 
 
+def log_manual_entry(account: str, resolution: str) -> None:
+    """Append a standalone resolved entry for a manual workflow run
+    (workflow_dispatch) where there is no PR to resolve."""
+    _post({
+        "account": account,
+        "region": os.environ.get("AWS_REGION", "unknown"),
+        "resource_id": "workflow_dispatch",
+        "severity": "LOW",
+        "pr_type": "manual",
+        "status": "resolved",
+        "resolution": resolution,
+        "drift_summary": f"Manual workflow run — {resolution}",
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) >= 3 and sys.argv[1] == "resolve":
+    if len(sys.argv) >= 2 and sys.argv[1] == "log-manual":
+        account = sys.argv[2] if len(sys.argv) >= 3 else ""
+        resolution = sys.argv[3] if len(sys.argv) >= 4 else "Manual workflow run"
+        log_manual_entry(account, resolution)
+    elif len(sys.argv) >= 3 and sys.argv[1] == "resolve":
         try:
             pr_number = int(sys.argv[2])
         except (ValueError, TypeError):
-            print(f"  [history] Invalid PR number: {sys.argv[2]} — skipping resolve")
+            # workflow_dispatch — no PR number.  Log a standalone entry.
+            account = sys.argv[3] if len(sys.argv) >= 4 else sys.argv[2]
+            resolution = sys.argv[4] if len(sys.argv) >= 5 else "Manual workflow run"
+            print(f"  [history] No PR number — logging manual entry for {account}")
+            log_manual_entry(account, resolution)
             sys.exit(0)
         account = sys.argv[3] if len(sys.argv) >= 4 else ""
         resolution = sys.argv[4] if len(sys.argv) >= 5 else ""

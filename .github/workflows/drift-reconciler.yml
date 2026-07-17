@@ -250,6 +250,18 @@ jobs:
       # =================================================================
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
       # =================================================================
+      - name: "[REJECT] Pre-apply drift gate"
+        if: |
+          (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
+        run: |
+          MODE="${{ vars.DRIFT_GATE_MODE }}"
+          ARGS="${{ needs.resolve-scope.outputs.scope }}"
+          if [ "$MODE" = "block" ]; then
+            ARGS="$ARGS --block"
+          fi
+          python ${{ github.workspace }}/test/pre_apply_check.py $ARGS
+
       - name: "[REJECT] Revert Drift to Match Code"
         if: |
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||

@@ -81,23 +81,43 @@ terraform plan → format drift JSON → LangGraph agent pipeline
 
 | Feature | Status |
 |---|---|
-| PagerDuty (HIGH severity → page) | ✅ |
-| Slack incoming webhook (MEDIUM/LOW → channel post) | ✅ |
-| Batched Slack messages (max 5 findings per card) | ✅ |
-| Workflow outcome notifications (accept/reject/failure/rollback-blocked) | ✅ |
-| All notification modules CI-safe (zero external dependencies beyond `requests`) | ✅ |
+| PagerDuty (HIGH severity → page, including rollback aborts) | ✅ |
+| Slack incoming webhook (MEDIUM/LOW → channel post, batched max 5/card) | ✅ |
+| Workflow outcome → Slack (accept/reject/failure/rollback-blocked) | ✅ |
+| Severity-based routing: HIGH → PagerDuty, MEDIUM/LOW → Slack only | ✅ |
+| All notification modules CI-safe (stdlib + `requests`, no dotenv dependency) | ✅ |
+
+### Patching
+
+| Feature | Status |
+|---|---|
+| hcledit-based `.tf` patching for simple types (string, number, bool) | ✅ |
+| Regex fallback when hcledit not available | ✅ |
+| JSON-to-HCL converter for complex types (maps, lists, tags) — no field skipped | ✅ |
+| Human-in-the-loop reviews every PR before merge | ✅ |
 
 ### Rollback
 
 | Feature | Status |
 |---|---|
-| Baseline stored per-PR (`.drift-baselines/pr-{n}/`) | ✅ |
-| `--rollback --rollback-pr <n>` CLI | ✅ |
-| Freshness gate at PR creation (checkpoint 1, informational) | ✅ |
+| Baselines stored in Supabase (`changes_jsonb` column) — no local files needed | ✅ |
+| `--rollback --rollback-pr <n>` CLI (reads from Supabase, works from any machine) | ✅ |
+| Freshness gate at PR creation (checkpoint 1, always creates PR — warns if stale) | ✅ |
 | Freshness gate at apply time (checkpoint 2, blocks apply + reverts merge if stale) | ✅ |
 | PagerDuty on checkpoint-2 abort | ✅ |
-| Self-similar rollback chain (every rollback creates a new baseline) | ✅ |
+| Self-similar rollback chain (every rollback creates a new baseline in Supabase) | ✅ |
 | Never cross-type supersede (regular ↔ rollback PRs don't collide) | ✅ |
+| One-time migration script for old `.drift-baselines/` files → Supabase | ✅ |
+
+### CI/CD drift gate
+
+| Feature | Status |
+|---|---|
+| Pre-apply check via `pre_apply_check.py` (reads Supabase for unresolved drift) | ✅ |
+| `DRIFT_GATE_MODE` variable (`warn` or `block`) | ✅ |
+| Blocked apply auto-reverts merge to keep code + AWS consistent | ✅ |
+| Gate runs on both ACCEPT and REJECT paths | ✅ |
+| Manual workflow_dispatch runs logged to Supabase history | ✅ |
 
 ### Historical drift store
 
@@ -182,8 +202,10 @@ test/
   workflow_notify.py          # Workflow outcome → Slack
   drift_history.py            # Supabase drift event log
   drift_trends.py             # Markdown trend report generator
-  drift_migrate.py            # Local JSONL → Supabase migration
+  drift_migrate.py            # Local JSONL / baselines → Supabase migration
   rollback_check.py           # Checkpoint-2 freshness gate
+  pre_apply_check.py          # CI/CD pre-apply drift gate (warn/block)
+  workflow_notify.py          # Workflow outcome → Slack notifications
   unmanaged_scanner.py        # boto3 AWS resource enumeration
   formatting_drift_json.py    # terraform plan JSON → drift report
   cost_cache.json             # Static on-demand hourly rates

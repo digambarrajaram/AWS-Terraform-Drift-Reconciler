@@ -1,5 +1,5 @@
 # Drift Trends — scope-a
-_Last 90 days.  Generated 2026-07-17 05:42 UTC._
+_Last 90 days.  Generated 2026-07-19 15:00 UTC._
 
 ## Most Drifted Resources
 
@@ -7,7 +7,7 @@ _Last 90 days.  Generated 2026-07-17 05:42 UTC._
 |---|---|
 | `aws_instance.drift_web_server` | 5 |
 | `aws_vpc_security_group_ingress_rule.ssh_ingress` | 3 |
-| `aws_instance.test` | 2 |
+| `aws_instance.test` | 1 |
 | `aws_instance.drift_web_server-rollback` | 1 |
 
 ## Mean Time to Remediate
@@ -15,7 +15,7 @@ _Last 90 days.  Generated 2026-07-17 05:42 UTC._
 | Severity | Avg Hours | Count |
 |---|---|---|
 | HIGH | 0 | 3 |
-| LOW | 0.1 | 7 |
+| LOW | 0.1 | 5 |
 
 ## Rollbacks
 
@@ -23,9 +23,16 @@ _Last 90 days.  Generated 2026-07-17 05:42 UTC._
 |---|
 | 1 |
 
+## Unresolved
+
+| Resource | Account | Severity | Detected |
+|---|---|---|---|
+| `aws_instance.drift_web_server` | scope-a | LOW | 2026-07-16 |
+| `aws_instance.drift_web_server-rollback` | scope-a | LOW | 2026-07-17 |
+
 ## Summary
 
-- **Total drifts:** 11
+- **Total drifts:** 10
 - **Unique resources:** 4
-- **Resolved:** 11
-- **Unresolved:** 0
+- **Resolved:** 8
+- **Unresolved:** 2

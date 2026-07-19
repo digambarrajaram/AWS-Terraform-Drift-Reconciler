@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Run Scan</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Run Scan</h1>
+  </header>
+
+  <main>
+    <form id="scan-form" class="scan-form">
+      <label class="filter-group">
+        Scope
+        <select id="scan-scope" required>
+          <option value="">Select scope...</option>
+          <option value="scope-a">scope-a</option>
+          <option value="scope-b">scope-b</option>
+        </select>
+      </label>
+
+      <label class="filter-group">
+        <input type="checkbox" id="scan-unmanaged">
+        Scan unmanaged resources
+      </label>
+
+      <button type="submit" id="scan-submit">Run Scan</button>
+    </form>
+
+    <div id="scan-stages" class="stages">
+      <div class="stage" id="stage-1" data-stage="unmanaged_scan">
+        <span class="stage-dot"></span>
+        Unmanaged Scan
+      </div>
+      <div class="stage" id="stage-2" data-stage="reconcile_agent">
+        <span class="stage-dot"></span>
+        Reconcile Agent
+      </div>
+      <div class="stage" id="stage-3" data-stage="trivy_gate">
+        <span class="stage-dot"></span>
+        Trivy Gate
+      </div>
+      <div class="stage" id="stage-4" data-stage="drift_alert">
+        <span class="stage-dot"></span>
+        Alert
+      </div>
+      <div class="stage" id="stage-5" data-stage="drift_pr">
+        <span class="stage-dot"></span>
+        Drift PR
+      </div>
+    </div>
+
+    <div id="scan-result" hidden>
+      <h2>Results</h2>
+      <div id="scan-result-body"></div>
+    </div>
+  </main>
+<script>
+let _client = null;
+
+function _supabase() {
+  if (_client) return _client;
+  const url = document.querySelector('meta[name="supabase-url"]').content;
+  const key = document.querySelector('meta[name="supabase-anon-key"]').content;
+  if (!url || !key || url.startsWith("__")) {
+    throw new Error("Supabase URL or anon key not configured.");
+  }
+  _client = window.supabase.createClient(url, key);
+  return _client;
+}
+
+function _errorMsg(message) {
+  const el = document.getElementById("scan-result");
+  el.hidden = false;
+  document.getElementById("scan-result-body").textContent = message;
+}
+
+function _resetStages() {
+  document.querySelectorAll(".stage").forEach(s => {
+    s.classList.remove("active", "done", "failed");
+  });
+}
+
+const _STAGE_ORDER = ["unmanaged_scan", "reconcile_agent", "trivy_gate", "drift_alert", "drift_pr"];
+
+function updateTracker(row) {
+  const current = row.current_stage;
+  const status = row.status;
+
+  document.querySelectorAll(".stage").forEach(el => {
+    const stage = el.dataset.stage;
+    const idx = _STAGE_ORDER.indexOf(stage);
+    const curIdx = _STAGE_ORDER.indexOf(current);
+
+    el.classList.remove("active", "done", "failed");
+
+    if (status === "failed" && idx === curIdx) {
+      el.classList.add("failed");
+    } else if (status === "complete") {
+      el.classList.add("done");
+    } else if (idx < curIdx) {
+      el.classList.add("done");
+    } else if (idx === curIdx) {
+      el.classList.add("active");
+    }
+  });
+
+  const resultEl = document.getElementById("scan-result");
+  const bodyEl = document.getElementById("scan-result-body");
+
+  if (status === "complete") {
+    resultEl.hidden = false;
+    const summary = row.result_summary || {};
+    const prLinks = row.pr_links || [];
+    let html = "";
+    if (summary.report_path) {
+      html += '<p>Report: <code>' + summary.report_path + '</code></p>';
+    }
+    if (prLinks.length > 0) {
+      html += "<ul>" + prLinks.map(function(url) {
+        return '<li><a href="' + url + '" target="_blank">' + url + '</a></li>';
+      }).join("") + "</ul>";
+    }
+    if (!html) html = "<p>Scan completed successfully.</p>";
+    bodyEl.innerHTML = html;
+  } else if (status === "failed") {
+    resultEl.hidden = false;
+    const summary = row.result_summary || {};
+    bodyEl.innerHTML = '<div class="error">Scan failed: ' + (summary.error || "unknown error") + '</div>';
+  }
+}
+
+function startPolling(runId) {
+  var fallbackTimer = null;
+  var stopped = false;
+
+  function _fallbackPoll() {
+    clearTimeout(fallbackTimer);
+    fallbackTimer = setTimeout(async function() {
+      if (stopped) return;
+      try {
+        var result = await _supabase()
+          .from("scan_runs")
+          .select("status, current_stage, result_summary, pr_links")
+          .eq("id", runId)
+          .single();
+        if (result.data) updateTracker(result.data);
+      } catch (err) { /* silent */ }
+    }, 30000);
+  }
+
+  function _stop() {
+    stopped = true;
+    clearTimeout(fallbackTimer);
+  }
+
+  var channel = _supabase()
+    .channel("scan_run_" + runId)
+    .on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "scan_runs", filter: "id=eq." + runId },
+      function(payload) {
+        if (stopped) return;
+        updateTracker(payload.new);
+        _fallbackPoll();
+        if (payload.new.status === "complete" || payload.new.status === "failed") {
+          _stop();
+          var btn = document.getElementById("scan-submit");
+          btn.disabled = false;
+          btn.textContent = "Run Scan";
+        }
+      }
+    )
+    .subscribe(function(status) {
+      if (status === "SUBSCRIBED") {
+        _fallbackPoll();
+      }
+    });
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  var form = document.getElementById("scan-form");
+  var btn = document.getElementById("scan-submit");
+
+  form.addEventListener("submit", async function(e) {
+    e.preventDefault();
+
+    var scope = document.getElementById("scan-scope").value;
+    var unmanaged = document.getElementById("scan-unmanaged").checked;
+
+    if (!scope) return;
+
+    btn.disabled = true;
+    btn.textContent = "Starting...";
+    _resetStages();
+    document.getElementById("scan-result").hidden = true;
+
+    try {
+      var resp = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: scope, unmanaged_flag: unmanaged }),
+      });
+
+      var data = await resp.json().catch(function() { return {}; });
+
+      if (resp.status === 202 && data.run_id) {
+        startPolling(data.run_id);
+      } else if (resp.status === 409) {
+        _errorMsg("Scan already running for " + scope + " (run: " + (data.run_id || "unknown") + ")");
+        btn.disabled = false;
+        btn.textContent = "Run Scan";
+      } else {
+        _errorMsg(data.error || "Unexpected error (" + resp.status + ")");
+        btn.disabled = false;
+        btn.textContent = "Run Scan";
+      }
+    } catch (err) {
+      _errorMsg(err.message || "Network error — is the server running?");
+      btn.disabled = false;
+      btn.textContent = "Run Scan";
+    }
+  });
+});
+</script>
+</body>
+</html>

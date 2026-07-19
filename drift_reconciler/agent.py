@@ -24,12 +24,14 @@ import json
 from langchain_core.messages import AIMessage
 from trivy_agent import graph as trivy_graph, State as TrivyState
 from trivy_agent import _run_trivy, _extract_issues
+from scan_runs import report_stage
 import unmanaged_scanner
 
 # Resolved at startup from CLI args (or env fallback).
 _account_label = "default"
 _region = os.environ.get("AWS_REGION", "us-east-1")
 _tf_dir: str | None = None
+_run_id: str | None = None
 
 # Derived from this script's location — the drift-formatting script lives
 # alongside it in the same directory.
@@ -121,6 +123,7 @@ class State(TypedDict):
     drift_findings: list[dict]   # one entry per drifted resource
     trivy_scanned: bool
     scan_unmanaged: bool
+    run_id: str | None
 
 
 def map_risk(security_impact) -> str:
@@ -163,6 +166,7 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
 
 
 def agent_node(state: State):
+    report_stage(state.get("run_id"), "reconcile_agent")
     raw_report_str = ""
     for msg in state["messages"]:
         content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
@@ -276,6 +280,7 @@ def _apply_changes_to_file(file_path: str, resource_addr: str, changes: dict) ->
 
 
 def trivy_gate(state: State):
+    report_stage(state.get("run_id"), "trivy_gate")
     """Run the Trivy security scan→fix→scan loop against the proposed
     drift-reconciliation HCL before alerting or creating a PR."""
     if not state.get("drift_detected") or not state.get("drift_findings"):
@@ -367,6 +372,7 @@ def trivy_gate(state: State):
 
 
 def drift_alert(state: State):
+    report_stage(state.get("run_id"), "drift_alert")
     """Route findings by severity.
 
     HIGH          → PagerDuty page (on-call gets paged immediately).
@@ -409,6 +415,7 @@ def drift_alert(state: State):
 
     return {"messages": []}
 def drift_pr_from_finding(state: State):
+    report_stage(state.get("run_id"), "drift_pr")
     if not state.get("drift_detected"):
         return {"pr_urls": []}
 
@@ -443,6 +450,7 @@ def drift_pr_from_finding(state: State):
 
 
 def unmanaged_scan_node(state: State):
+    report_stage(state.get("run_id"), "unmanaged_scan")
     """Enumerate live AWS resources, subtract what Terraform manages.
 
     Runs before the reconcile agent when --scan-unmanaged is set.
@@ -799,6 +807,11 @@ if __name__ == "__main__":
         help="Account to report on with --trends (default: same as --account-label)",
     )
     parser.add_argument(
+        "--run-id",
+        default=None,
+        help="UUID of the scan_runs row (set by dashboard API, propagated for progress updates)",
+    )
+    parser.add_argument(
         "--trends-days",
         type=int,
         default=90,
@@ -810,6 +823,7 @@ if __name__ == "__main__":
     # (alerts, LLM calls, unmanaged scanner) pick up the right values.
     _region = args.region
     _account_label = args.account_label
+    _run_id = args.run_id
 
     # --trends mode: report only, no terraform directory needed.
     if args.trends:
@@ -902,34 +916,61 @@ if __name__ == "__main__":
         ],
         "trivy_scanned": False,
         "scan_unmanaged": args.scan_unmanaged,
+        "run_id": args.run_id,
     }
 
-    agent_output = ""
-    for event in graph.stream(initial_state):
-        for node, data in event.items():
-            if not data:
-                continue
-            messages = data.get("messages") or []
-            if messages:
-                agent_output = messages[-1].content
-
-    # Print out to the terminal as usual
-    print(f"\n[Agent Response]:\n{agent_output}")
-
-    # Automatically export the solution to a Markdown file
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
-    report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
-    report_path = os.path.join(tf_dir, report_filename)
-
     try:
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(f"# Terraform Drift Reconciliation Report\n")
-            f.write(f"**Account:** {_account_label}  \n")
-            f.write(f"**Region:** {_region}  \n")
-            f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
-            f.write(agent_output)
-        print(f"\n[Success] Report successfully written to: {report_path}")
+        agent_output = ""
+        for event in graph.stream(initial_state):
+            for node, data in event.items():
+                if not data:
+                    continue
+                messages = data.get("messages") or []
+                if messages:
+                    agent_output = messages[-1].content
+
+        # Print out to the terminal as usual
+        print(f"\n[Agent Response]:\n{agent_output}")
+
+        # Automatically export the solution to a Markdown file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
+        report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
+        report_path = os.path.join(tf_dir, report_filename)
+
+        try:
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(f"# Terraform Drift Reconciliation Report\n")
+                f.write(f"**Account:** {_account_label}  \n")
+                f.write(f"**Region:** {_region}  \n")
+                f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
+                f.write(agent_output)
+            print(f"\n[Success] Report successfully written to: {report_path}")
+        except Exception as e:
+            print(f"\n[Warning] Failed to write report file: {str(e)}")
+
+        # Mark scan as complete.
+        if _run_id:
+            from scan_runs import update_scan_run
+            from datetime import datetime as dt, timezone
+            update_scan_run(
+                _run_id,
+                status="complete",
+                completed_at=dt.now(timezone.utc).isoformat(),
+                result_summary={"report_path": report_path},
+            )
     except Exception as e:
-        print(f"\n[Warning] Failed to write report file: {str(e)}")
+        if _run_id:
+            try:
+                from scan_runs import update_scan_run
+                from datetime import datetime as dt, timezone
+                update_scan_run(
+                    _run_id,
+                    status="failed",
+                    completed_at=dt.now(timezone.utc).isoformat(),
+                    result_summary={"error": str(e)},
+                )
+            except Exception as se:
+                print(f"  [scan_runs] Failed to mark scan as failed: {se}")
+        raise

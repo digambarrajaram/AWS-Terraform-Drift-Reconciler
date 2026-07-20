@@ -196,6 +196,41 @@ html body main table#findings-table tbody#findings-body tr td a {
   .stage.failed  { border-top-color: #f85149; }
 }
 
+/* ── Rollback ── */
+.rollback-row {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 14px 18px; margin-bottom: 8px;
+}
+.rollback-summary {
+  color: #8b949e; font-size: 12px; margin-top: 6px; padding-left: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rollback-row-main {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+}
+.btn-preview {
+  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  padding: 4px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  margin-left: auto;
+}
+.btn-preview:hover { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+#rollback-detail {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 20px; margin-top: 24px;
+}
+.diff-table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+.diff-table th { text-align: left; color: #8b949e; padding: 6px 10px; border-bottom: 1px solid #30363d; }
+.diff-table td { padding: 6px 10px; border-bottom: 1px solid #21262d; }
+.diff-table .stale { color: #f85149; }
+.diff-table .match { color: #3fb950; }
+
+#rollback-confirm {
+  background: #da3633; border: 1px solid #da3633; color: #fff;
+  padding: 8px 24px; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+#rollback-confirm:hover { background: #f85149; }
+
 /* ── Responsive ── */
 @media (max-width: 640px) {
   .dashboard-grid { grid-template-columns: 1fr; }

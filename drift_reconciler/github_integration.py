@@ -72,7 +72,8 @@ def create_drift_pr(
         is_rollback: bool = False,
         cost_impact: dict | None = None,
         trivy_passed: bool | None = None,
-        trivy_summary: dict | None = None):
+        trivy_summary: dict | None = None,
+        rolled_back_from_pr: int | None = None):
     token = os.getenv("GITHUB_TOKEN")
     repo_name = os.getenv("GITHUB_REPO")
     auth = Auth.Token(token)
@@ -158,6 +159,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             cost_impact=cost_impact,
             trivy_passed=trivy_passed,
             trivy_summary=trivy_summary,
+            rolled_back_from_pr=rolled_back_from_pr,
         )
     except Exception as exc:
         print(f"  ⚠ Failed to append drift history: {exc}")

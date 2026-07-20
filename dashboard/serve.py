@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 import sys as _sys
 _sys.path.insert(0, str(_REPO_ROOT))
 from drift_reconciler.scan_runs import create_scan_run, update_scan_run
+from drift_reconciler.rollback_runs import create_rollback_run
 _DASHBOARD_DIR = _REPO_ROOT / "dashboard"
 _VALID_SCOPES = {"scope-a", "scope-b"}
 
@@ -36,6 +37,31 @@ def _supabase_headers():
 def _supabase_get(path, params=None):
     url = f"{os.environ.get('SUPABASE_URL', '').rstrip('/')}/rest/v1/{path}"
     return requests.get(url, headers=_supabase_headers(), params=params, timeout=10)
+
+
+def _tf_dir_for(scope: str) -> str:
+    tf_dirs = {
+        "scope-a": "terraform_code/ec2_terraform_account_a",
+        "scope-b": "terraform_code/ec2_terraform_account_b",
+    }
+    return tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
+
+
+def _spawn_agent(scope: str, extra_args: list[str]) -> None:
+    """Spawn agent.py as a non-blocking subprocess with the correct
+    AWS profile and PYTHONPATH for *scope*."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    # scope-a → account-a, scope-b → account-b
+    aws_profile = "account-a" if scope == "scope-a" else "account-b"
+    env["AWS_PROFILE"] = aws_profile
+    cmd = [
+        _sys.executable,
+        str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
+        "--tf-dir", _tf_dir_for(scope),
+        "--account-label", scope,
+    ] + extra_args
+    subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
 
 def _load_env() -> None:
@@ -55,7 +81,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html"):
+        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html"):
             self._serve_injected()
         elif path.endswith((".js", ".css", ".png")):
             self._serve_static(path)
@@ -66,7 +92,12 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/scan":
             length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length > 0 else {}
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._json_error(400, "Invalid or empty JSON body")
+                return
 
             scope = body.get("scope", "")
             if scope not in _VALID_SCOPES:
@@ -114,6 +145,119 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 cmd.append("--scan-unmanaged")
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            # Keep .env AWS keys for Bedrock, but use scope-specific profile
+            # for terraform AWS resource operations.
+            env["AWS_PROFILE"] = "account-a" if scope == "scope-a" else "account-b"
+            subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
+
+            resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
+        elif path == "/api/rollback/preview":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._json_error(400, "Invalid or empty JSON body")
+                return
+
+            pr_number = body.get("pr_number")
+            scope = body.get("scope", "")
+
+            if not pr_number or scope not in _VALID_SCOPES:
+                self._json_error(400, "pr_number (integer) and scope (scope-a/scope-b) are required")
+                return
+
+            try:
+                run_id = create_rollback_run(pr_number, scope, mode="preview")
+            except Exception as se:
+                self._json_error(502, f"Failed to create rollback run: {se}")
+                return
+
+            tf_dirs = {
+                "scope-a": "terraform_code/ec2_terraform_account_a",
+                "scope-b": "terraform_code/ec2_terraform_account_b",
+            }
+            tf_dir = tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
+
+            cmd = [
+                _sys.executable,
+                str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
+                "--tf-dir", tf_dir,
+                "--account-label", scope,
+                "--rollback-preview",
+                "--rollback-pr", str(pr_number),
+                "--run-id", run_id,
+            ]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            env["AWS_PROFILE"] = "account-a" if scope == "scope-a" else "account-b"
+            subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
+
+            resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
+        elif path == "/api/rollback/execute":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._json_error(400, "Invalid or empty JSON body")
+                return
+
+            pr_number = body.get("pr_number")
+            scope = body.get("scope", "")
+
+            if not pr_number or scope not in _VALID_SCOPES:
+                self._json_error(400, "pr_number (integer) and scope (scope-a/scope-b) are required")
+                return
+
+            # Concurrency check — only one rollback for a given PR at a time.
+            try:
+                resp = _supabase_get(
+                    "rollback_runs",
+                    {"select": "id", "pr_number": f"eq.{pr_number}", "status": "eq.running", "limit": "1"}
+                )
+                if resp.status_code == 200 and resp.json():
+                    existing_id = resp.json()[0]["id"]
+                    self._json_error(409, f"Rollback already running for PR #{pr_number}", run_id=existing_id)
+                    return
+            except requests.RequestException as exc:
+                self._json_error(502, f"Supabase unreachable: {exc}")
+                return
+
+            try:
+                run_id = create_rollback_run(pr_number, scope, mode="execute")
+            except Exception as se:
+                self._json_error(502, f"Failed to create rollback run: {se}")
+                return
+
+            tf_dirs = {
+                "scope-a": "terraform_code/ec2_terraform_account_a",
+                "scope-b": "terraform_code/ec2_terraform_account_b",
+            }
+            tf_dir = tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
+
+            cmd = [
+                _sys.executable,
+                str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
+                "--tf-dir", tf_dir,
+                "--account-label", scope,
+                "--rollback",
+                "--rollback-pr", str(pr_number),
+                "--run-id", run_id,
+            ]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            env["AWS_PROFILE"] = "account-a" if scope == "scope-a" else "account-b"
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -171,6 +315,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         if "pr-queue" in path:
             fname = "pr-queue.html"
+        elif "rollback" in path and "api" not in path:
+            fname = "rollback.html"
         elif "explorer" in path:
             fname = "explorer.html"
         elif "scan" in path:
@@ -181,7 +327,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         html = html.replace("__SUPABASE_URL__", os.environ.get("SUPABASE_URL", ""))
         anon = os.environ.get("SUPABASE_ANON_KEY", "")
         if not anon:
-            raise RuntimeError("SUPABASE_ANON_KEY is not set in .env — cannot serve frontend")
+            raise RuntimeError("SUPABASE_ANON_KEY is not set in .env")
         html = html.replace("__SUPABASE_ANON_KEY__", anon)
         data = html.encode("utf-8")
         self.send_response(200)
@@ -220,7 +366,7 @@ def main() -> int:
         pass
 
     print(f"Dashboard → http://localhost:{args.port}")
-    httpd = http.server.HTTPServer(("0.0.0.0", args.port), _Handler)
+    httpd = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), _Handler)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

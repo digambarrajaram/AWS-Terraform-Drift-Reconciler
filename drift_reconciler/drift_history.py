@@ -89,6 +89,7 @@ def append_entry(
     cost_impact: dict | None = None,
     trivy_passed: bool | None = None,
     trivy_summary: dict | None = None,
+    rolled_back_from_pr: int | None = None,
 ) -> None:
     """Insert a new drift event row into Supabase."""
     _post({
@@ -107,6 +108,7 @@ def append_entry(
         "cost_impact": json.dumps(cost_impact) if cost_impact else None,
         "trivy_passed": trivy_passed,
         "trivy_summary": json.dumps(trivy_summary) if trivy_summary else None,
+        "rolled_back_from_pr": rolled_back_from_pr,
     })
 
 

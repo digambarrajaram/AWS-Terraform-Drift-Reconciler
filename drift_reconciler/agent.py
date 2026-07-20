@@ -617,19 +617,170 @@ def _print_drift_exceptions(drift_report_str: str):
                 print()
 
 
-def _run_rollback(tf_dir: str, pr_number: int) -> None:
+def _report_rollback_stage(run_id: str | None, stage_name: str) -> None:
+    """Update rollback_runs.current_stage.  No-ops when run_id is None."""
+    if run_id is None:
+        return
+    from rollback_runs import update_rollback_run
+    update_rollback_run(run_id, current_stage=stage_name)
+
+
+def _load_rollback_baselines(pr_number: int, scope: str) -> list[dict]:
+    """Return rollback baselines for *pr_number* from Supabase."""
+    import drift_history
+    return drift_history.load_baselines(pr_number, scope)
+
+
+def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str]) -> tuple[str, dict[str, str]]:
+    """Run terraform plan in *tf_dir* and extract live field values for
+    *resource_id* from the plan JSON.  Returns (outcome, live_values)
+    where outcome is ``"present"``, ``"no_diff"``, or ``"not_found"``."""
+    try:
+        plan_result = subprocess.run(
+            ["terraform", "plan", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
+            cwd=tf_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if plan_result.returncode != 0:
+            raise RuntimeError(f"terraform plan failed: {plan_result.stderr[:300]}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("terraform plan timed out after 120s — check AWS credentials and state lock")
+
+    show_result = subprocess.run(
+        ["terraform", "show", "-json", "tfplan"],
+        cwd=tf_dir,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        plan_json = json.loads(show_result.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError("Failed to parse terraform plan JSON")
+
+    return gi._extract_field_values(plan_json, resource_id, fields)
+
+
+def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) -> None:
+    """Dry-run rollback: compare baselines against live AWS without
+    patching any files or creating a PR.  Results are written to
+    rollback_runs in Supabase."""
+    from datetime import datetime as dt, timezone
+    from rollback_runs import update_rollback_run
+
+    try:
+        _report_rollback_stage(run_id, "loading_baseline")
+        baselines = _load_rollback_baselines(pr_number, scope)
+        if not baselines:
+            raise RuntimeError(f"No baselines found for PR #{pr_number} ({scope})")
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        diff: list[dict] = []
+
+        for baseline in baselines:
+            resource_id = baseline["resource_id"]
+            original_changes = baseline["changes"]
+            rel_path = baseline.get("file_path", "")
+            file_path = os.path.join(repo_root, rel_path) if rel_path else ""
+            if not file_path or not os.path.isfile(file_path):
+                print(f"  [rollback-preview] SKIP {resource_id}: file not found — {file_path}")
+                diff.append({
+                    "resource_id": resource_id,
+                    "field": "*",
+                    "original": "(baseline loaded)",
+                    "fixed": "(baseline loaded)",
+                    "current_live": "SKIPPED: source .tf file not found on disk",
+                })
+                continue
+
+            fields = list(original_changes.keys())
+            if not fields:
+                print(f"  [rollback-preview] SKIP {resource_id}: no fields in baseline changes")
+                diff.append({
+                    "resource_id": resource_id,
+                    "field": "*",
+                    "original": "(empty baseline)",
+                    "fixed": "(empty baseline)",
+                    "current_live": "SKIPPED: baseline changes_jsonb has no fields",
+                })
+                continue
+
+            print(f"  [rollback-preview] CHECK {resource_id}: {len(fields)} field(s) — {list(fields)[:5]}...")
+            try:
+                _report_rollback_stage(run_id, "fetching_live_state")
+                outcome, live_values = _fetch_live_state(tf_dir, resource_id, fields)
+                print(f"  [rollback-preview] RESULT {resource_id}: outcome={outcome}")
+            except Exception as exc:
+                import traceback
+                print(f"  [rollback-preview] UNEXPECTED EXCEPTION for {resource_id}: {exc}")
+                traceback.print_exc()
+                diff.append({
+                    "resource_id": resource_id,
+                    "field": "*",
+                    "original": "(baseline loaded)",
+                    "fixed": "(baseline loaded)",
+                    "current_live": f"ERROR: {exc}",
+                })
+                continue
+
+            if outcome == "not_found":
+                continue
+
+            for field in fields:
+                original_val = original_changes[field].get("before")
+                fixed_val = original_changes[field].get("after")
+                current_val = live_values.get(field, "<missing>") if outcome == "present" else fixed_val
+                diff.append({
+                    "resource_id": resource_id,
+                    "field": field,
+                    "original": original_val,
+                    "fixed": fixed_val,
+                    "current_live": current_val,
+                })
+
+        update_rollback_run(
+            run_id,
+            status="complete",
+            completed_at=dt.now(timezone.utc).isoformat(),
+            result={"diff": diff},
+        )
+    except Exception as e:
+        update_rollback_run(
+            run_id,
+            status="failed",
+            completed_at=dt.now(timezone.utc).isoformat(),
+            result={"error": str(e)},
+        )
+        raise
+
+
+def _run_rollback(tf_dir: str, pr_number: int, run_id: str | None = None) -> None:
     """Checkpoint 1: validate freshness and open a rollback PR for every
     resource in the baseline of *pr_number*.
 
     Skips the normal drift-detection pipeline — this is a standalone
     rollback flow.  Baselines are loaded from Supabase (no local file
     dependency — works from any machine, no git pull needed)."""
-    import drift_history
+    try:
+        _do_run_rollback(tf_dir, pr_number, run_id)
+    except Exception as e:
+        if run_id:
+            from datetime import datetime as dt, timezone
+            from rollback_runs import update_rollback_run
+            try:
+                update_rollback_run(run_id, status="failed", completed_at=dt.now(timezone.utc).isoformat(), result={"error": str(e)})
+            except Exception:
+                pass
+        raise
 
-    baselines = drift_history.load_baselines(pr_number, _account_label)
+
+def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
+    """Inner implementation — wrapped by _run_rollback for error handling."""
+    _report_rollback_stage(run_id, "loading_baseline")
+    baselines = _load_rollback_baselines(pr_number, _account_label)
     if not baselines:
-        print(f"Error: no baselines found in Supabase for PR #{pr_number} ({_account_label})")
-        sys.exit(1)
+        raise RuntimeError(f"No baselines found in Supabase for PR #{pr_number} ({_account_label})")
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
@@ -651,6 +802,7 @@ def _run_rollback(tf_dir: str, pr_number: int) -> None:
 
         print(f"  ↻ {resource_id}: reversing {len(reversed_changes)} field(s) …")
 
+        _report_rollback_stage(run_id, "patching_file")
         # Apply the reverse patch to a temp copy.
         patched = gi.apply_changes_to_file(file_path, resource_id, reversed_changes)
         if patched is None:
@@ -665,32 +817,14 @@ def _run_rollback(tf_dir: str, pr_number: int) -> None:
             print(f"  ✗ {resource_id}: failed to write patched file — {exc}")
             continue
 
-        # Run terraform plan on the patched directory.
-        plan_result = subprocess.run(
-            ["terraform", "plan", "-out=tfplan", "-input=false"],
-            cwd=tf_dir,
-            capture_output=True,
-            text=True,
-        )
-        if plan_result.returncode != 0:
-            print(f"  ✗ {resource_id}: terraform plan failed — {plan_result.stderr[:300]}")
-            continue
-
-        show_result = subprocess.run(
-            ["terraform", "show", "-json", "tfplan"],
-            cwd=tf_dir,
-            capture_output=True,
-            text=True,
-        )
-        try:
-            plan_json = json.loads(show_result.stdout)
-        except json.JSONDecodeError:
-            print(f"  ✗ {resource_id}: failed to parse plan JSON")
-            continue
-
-        # Freshness check.
+        # Freshness check — run terraform plan and extract live values.
+        _report_rollback_stage(run_id, "fetching_live_state")
         fields = list(original_changes.keys())
-        outcome, live_values = gi._extract_field_values(plan_json, resource_id, fields)
+        try:
+            outcome, live_values = _fetch_live_state(tf_dir, resource_id, fields)
+        except RuntimeError as exc:
+            print(f"  ✗ {resource_id}: {exc}")
+            continue
 
         if outcome == "not_found":
             print(f"  ⏭  {resource_id}: not found in plan — may have been deleted externally")
@@ -733,17 +867,23 @@ def _run_rollback(tf_dir: str, pr_number: int) -> None:
 
     if not rollback_ready:
         print("\nNo resources passed freshness check — rollback aborted.")
-        sys.exit(1)
+        raise RuntimeError(
+            "No resources passed freshness check — live state already "
+            "matches rollback target, nothing to revert."
+        )
 
     print(f"\n{len(rollback_ready)} resource(s) passed freshness check — opening rollback PR …")
+    _report_rollback_stage(run_id, "creating_pr")
     for rb in rollback_ready:
-        patched_content = gi.apply_changes_to_file(
-            rb["file_path"], rb["resource_id"], rb["reversed_changes"]
-        )
-        if patched_content is None:
-            print(f"  ⚠ {rb['resource_id']}: re-patch failed, skipping")
+        # File was already patched on disk for the freshness check —
+        # just read it back instead of re-patching (which would double-patch).
+        try:
+            with open(rb["file_path"], encoding="utf-8") as fh:
+                patched_content = fh.read()
+        except OSError:
+            print(f"  ⚠ {rb['resource_id']}: failed to read patched file — skipping")
             continue
-        gi.create_drift_pr(
+        pr = gi.create_drift_pr(
             resource_id=f"{rb['resource_id']}-rollback",
             pr_title=f"[ROLLBACK] Drift fix: {rb['resource_id']}",
             drift_summary=rb["drift_summary"],
@@ -753,7 +893,18 @@ def _run_rollback(tf_dir: str, pr_number: int) -> None:
             risk_level="LOW",
             account_label=_account_label,
             is_rollback=True,
+            rolled_back_from_pr=pr_number,
         )
+        if pr and run_id:
+            from datetime import datetime as dt, timezone
+            from rollback_runs import update_rollback_run
+            update_rollback_run(
+                run_id,
+                status="complete",
+                completed_at=dt.now(timezone.utc).isoformat(),
+                result={"pr_url": pr.html_url},
+                rollback_pr_url=pr.html_url,
+            )
 
     print("\nRollback PR(s) created. Review and merge to revert the original fix.")
 
@@ -794,6 +945,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="PR number whose drift fix to roll back (required with --rollback)",
+    )
+    parser.add_argument(
+        "--rollback-preview",
+        action="store_true",
+        default=False,
+        help="Dry-run: show what a rollback would change without patching files or creating a PR",
     )
     parser.add_argument(
         "--trends",
@@ -847,7 +1004,18 @@ if __name__ == "__main__":
         if not args.rollback_pr:
             print("Error: --rollback-pr is required with --rollback")
             sys.exit(1)
-        _run_rollback(tf_dir, args.rollback_pr)
+        try:
+            _run_rollback(tf_dir, args.rollback_pr, run_id=args.run_id)
+        except Exception as e:
+            print(f"Rollback failed: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    if args.rollback_preview:
+        if not args.rollback_pr or not args.run_id:
+            print("Error: --rollback-pr and --run-id are required with --rollback-preview")
+            sys.exit(1)
+        _run_rollback_preview(tf_dir, args.rollback_pr, args.account_label, args.run_id)
         sys.exit(0)
 
     # Gather the data using our folder-aware pipeline

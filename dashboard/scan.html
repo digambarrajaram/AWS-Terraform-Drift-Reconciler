@@ -114,10 +114,14 @@ function updateTracker(row) {
   const resultEl = document.getElementById("scan-result");
   const bodyEl = document.getElementById("scan-result-body");
 
+  var rawSummary = row.result_summary;
+  var summary = rawSummary;
+  if (typeof summary === "string") { try { summary = JSON.parse(summary); } catch(e) { summary = {}; } }
+  var prLinks = row.pr_links || [];
+  if (typeof prLinks === "string") { try { prLinks = JSON.parse(prLinks); } catch(e) { prLinks = []; } }
+
   if (status === "complete") {
     resultEl.hidden = false;
-    const summary = row.result_summary || {};
-    const prLinks = row.pr_links || [];
     let html = "";
     if (summary.report_path) {
       html += '<p>Report: <code>' + summary.report_path + '</code></p>';
@@ -131,7 +135,6 @@ function updateTracker(row) {
     bodyEl.innerHTML = html;
   } else if (status === "failed") {
     resultEl.hidden = false;
-    const summary = row.result_summary || {};
     bodyEl.innerHTML = '<div class="error">Scan failed: ' + (summary.error || "unknown error") + '</div>';
   }
 }

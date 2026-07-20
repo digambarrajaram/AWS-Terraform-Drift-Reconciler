@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Rollback</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Rollback</h1>
+    <p class="empty" style="margin-bottom:16px">Reverts a specific drift-fix PR&rsquo;s field changes back to their pre-fix values. If live infrastructure has changed since the fix was applied, the fix may no longer be reversible &mdash; Preview will show &ldquo;no differences found&rdquo; in that case, which means nothing needs to change, not that something is broken.</p>
+  </header>
+
+  <main>
+    <div id="rollback-list">
+      <h2>Eligible Past PRs</h2>
+      <div id="rollback-list-body"></div>
+    </div>
+
+    <div id="rollback-detail" hidden>
+      <h2>Rollback Preview</h2>
+      <div id="rollback-detail-body"></div>
+      <button type="button" id="rollback-confirm" hidden>Confirm Rollback</button>
+    </div>
+  </main>
+<script>
+var _client = null;
+
+function _supabase() {
+  if (_client) return _client;
+  var url = document.querySelector('meta[name="supabase-url"]').content;
+  var key = document.querySelector('meta[name="supabase-anon-key"]').content;
+  if (!url || !key || url.startsWith("__")) {
+    throw new Error("Supabase URL or anon key not configured.");
+  }
+  _client = window.supabase.createClient(url, key);
+  return _client;
+}
+
+async function fetchEligiblePRs(scope) {
+  var resolved = await _supabase()
+    .from("drift_events")
+    .select("id,created_at,resource_id,severity,pr_number,pr_type,drift_summary,changes_jsonb")
+    .eq("account", scope)
+    .eq("status", "resolved")
+    .in("pr_type", ["fix", "batch", "rollback"])
+    .not("changes_jsonb", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(100);
+  if (resolved.error) throw resolved.error;
+  if (!resolved.data || resolved.data.length === 0) return [];
+
+  var rolledBack = await _supabase()
+    .from("drift_events")
+    .select("rolled_back_from_pr")
+    .not("rolled_back_from_pr", "is", null);
+  var rolledBackSet = new Set();
+  (rolledBack.data || []).forEach(function(r) { rolledBackSet.add(r.rolled_back_from_pr); });
+
+  return resolved.data.filter(function(r) { return !rolledBackSet.has(r.pr_number); });
+}
+
+function _fmtVal(v) {
+  if (typeof v === "string") return v;
+  return JSON.stringify(v);
+}
+
+function _baselineSummary(changesJsonb) {
+  if (!changesJsonb || typeof changesJsonb !== "object") return "";
+  var parts = [];
+  var keys = Object.keys(changesJsonb);
+  for (var i = 0; i < keys.length; i++) {
+    var field = keys[i];
+    var v = changesJsonb[field];
+    if (!v) continue;
+    var before = v.before;
+    var after  = v.after;
+    if (typeof before === "object" && before !== null && !Array.isArray(before)) {
+      var subKeys = Object.keys(before);
+      for (var j = 0; j < subKeys.length; j++) {
+        var sk = subKeys[j];
+        var bv = before[sk];
+        var av = (after && typeof after === "object" && !Array.isArray(after)) ? after[sk] : after;
+        parts.push(field + "." + sk + ": " + _fmtVal(bv) + " → " + _fmtVal(av));
+      }
+    } else {
+      parts.push(field + ": " + _fmtVal(before) + " → " + _fmtVal(after));
+    }
+  }
+  var text = parts.join(", ");
+  return text.length > 80 ? text.slice(0, 80) + "…" : text;
+}
+
+function renderRollbackList(rows) {
+  var body = document.getElementById("rollback-list-body");
+  body.innerHTML = "";
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<div class="empty">No eligible PRs for rollback.</div>';
+    return;
+  }
+  var html = rows.map(function(r) {
+    var prLink = r.pr_number ? '<a href="https://github.com/digambarrajaram/AWS-Terraform-Drift-Reconciler/pull/' + r.pr_number + '" target="_blank">#' + r.pr_number + '</a>' : "—";
+    var date = (r.created_at || "").slice(0, 10);
+    var sev = (r.severity || "LOW").toLowerCase();
+    var summary = _baselineSummary(r.changes_jsonb);
+    return '<div class="rollback-row"><div class="rollback-row-main"><span class="sev-' + sev + '">' + (r.severity || "LOW") + '</span> <code>' + (r.resource_id || "?") + '</code> <span>PR ' + prLink + '</span> <span class="empty">' + date + '</span> <button type="button" class="btn-preview" data-pr="' + r.pr_number + '" data-scope="' + (r.account || 'scope-a') + '">Preview Rollback</button></div>' + (summary ? '<div class="rollback-summary">' + summary + '</div>' : '') + '</div>';
+  }).join("");
+  body.innerHTML = html;
+  body.querySelectorAll(".btn-preview").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      startPreview(parseInt(btn.dataset.pr), btn.dataset.scope);
+    });
+  });
+}
+
+var _currentPrNumber = null;
+var _currentScope = "scope-a";
+var _activePollTimer = null;
+var _activeRunId = null;
+
+async function startPreview(prNumber, scope) {
+  // Kill any prior poll so a quick double-click never renders stale results.
+  if (_activePollTimer) { clearInterval(_activePollTimer); _activePollTimer = null; }
+  _activeRunId = null;
+  _currentPrNumber = prNumber;
+  _currentScope = scope;
+  document.getElementById("rollback-confirm").hidden = true;
+  var btn = document.querySelector('.btn-preview[data-pr="' + prNumber + '"]');
+  if (btn) { btn.disabled = true; btn.textContent = "Loading preview..."; }
+
+  try {
+    var resp = await fetch("/api/rollback/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pr_number: prNumber, scope: scope }),
+    });
+    var data = await resp.json().catch(function() { return {}; });
+
+    if (resp.status !== 202 || !data.run_id) {
+      _showRollbackError(data.error || "Unexpected error (" + resp.status + ")");
+      if (btn) { btn.disabled = false; btn.textContent = "Preview Rollback"; }
+      return;
+    }
+
+    _activeRunId = data.run_id;
+    var previewStart = Date.now();
+    _activePollTimer = setInterval(async function() {
+      var thisRunId = _activeRunId;
+      try {
+        // Safety timeout — stop polling after 90s.
+        if (Date.now() - previewStart > 90000) {
+          clearInterval(_activePollTimer);
+          _activePollTimer = null;
+          _activeRunId = null;
+          if (btn) { btn.disabled = false; btn.textContent = "Preview Rollback"; }
+          _showRollbackError("Preview timed out — check the run status in Supabase");
+          return;
+        }
+        var result = await _supabase()
+          .from("rollback_runs")
+          .select("status, result")
+          .eq("id", data.run_id)
+          .single();
+        if (result.error || !result.data) return;
+        if (result.data.status === "running") return;
+        clearInterval(_activePollTimer);
+        _activePollTimer = null;
+        _activeRunId = null;
+        if (btn) { btn.disabled = false; btn.textContent = "Preview Rollback"; }
+        // Guard: don't render if user clicked a different PR in the meantime.
+        if (thisRunId !== _activeRunId && _activeRunId !== null) return;
+        if (result.data.status === "complete" && result.data.result) {
+          var res = result.data.result;
+          if (typeof res === "string") { try { res = JSON.parse(res); } catch(e) { res = {}; } }
+          renderDiff(res.diff || []);
+        } else {
+          var errRes2 = result.data.result;
+          if (typeof errRes2 === "string") { try { errRes2 = JSON.parse(errRes2); } catch(e) { errRes2 = {}; } }
+          _showRollbackError((errRes2 && errRes2.error) || "Unknown error");
+        }
+      } catch (err) {
+        clearInterval(_activePollTimer);
+        _activePollTimer = null;
+        _activeRunId = null;
+        if (btn) { btn.disabled = false; btn.textContent = "Preview Rollback"; }
+      }
+    }, 2000);
+  } catch (err) {
+    _showRollbackError(err.message || "Network error");
+    if (btn) { btn.disabled = false; btn.textContent = "Preview Rollback"; }
+  }
+}
+
+function _showRollbackError(msg) {
+  var detail = document.getElementById("rollback-detail");
+  detail.hidden = false;
+  document.getElementById("rollback-detail-body").innerHTML = '<div class="error">' + msg + '</div>';
+}
+
+function renderDiff(diff) {
+  var detail = document.getElementById("rollback-detail");
+  detail.hidden = false;
+  if (!diff || diff.length === 0) {
+    document.getElementById("rollback-detail-body").innerHTML = "<p>No differences found &mdash; live state no longer matches this fix&rsquo;s target value (something else has changed this resource since), so there is nothing to revert.</p>";
+    document.getElementById("rollback-confirm").hidden = true;
+    return;
+  }
+  var byResource = {};
+  diff.forEach(function(d) {
+    var rid = d.resource_id || "?";
+    if (!byResource[rid]) byResource[rid] = [];
+    byResource[rid].push(d);
+  });
+  var html = "";
+  Object.keys(byResource).forEach(function(rid) {
+    html += "<h3>" + rid + "</h3>";
+    html += '<table class="diff-table"><thead><tr><th>Field</th><th>Original</th><th>Fixed</th><th>Current Live</th></tr></thead><tbody>';
+    byResource[rid].forEach(function(f) {
+      var stale = JSON.stringify(f.current_live) !== JSON.stringify(f.fixed);
+      var rowClass = stale ? "stale" : "match";
+      html += '<tr class="' + rowClass + '"><td>' + f.field + '</td><td>' + (JSON.stringify(f.original) || "—") + '</td><td>' + (JSON.stringify(f.fixed) || "—") + '</td><td>' + (JSON.stringify(f.current_live) || "—") + '</td></tr>';
+    });
+    html += "</tbody></table>";
+  });
+  document.getElementById("rollback-detail-body").innerHTML = html;
+  document.getElementById("rollback-confirm").hidden = false;
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  document.getElementById("rollback-confirm").addEventListener("click", async function() {
+    if (!_currentPrNumber) return;
+    var btn = document.getElementById("rollback-confirm");
+    btn.disabled = true;
+    btn.textContent = "Rolling back...";
+
+    try {
+      var resp = await fetch("/api/rollback/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pr_number: _currentPrNumber, scope: _currentScope }),
+      });
+      var data = await resp.json().catch(function() { return {}; });
+
+      if (resp.status === 409) {
+        _showRollbackError("A rollback is already in progress for this PR.");
+        btn.disabled = false; btn.textContent = "Confirm Rollback";
+        return;
+      }
+      if (resp.status !== 202 || !data.run_id) {
+        _showRollbackError(data.error || "Unexpected error (" + resp.status + ")");
+        btn.disabled = false; btn.textContent = "Confirm Rollback";
+        return;
+      }
+
+      if (_activePollTimer) { clearInterval(_activePollTimer); _activePollTimer = null; }
+      _activeRunId = data.run_id;
+      var pollStart = Date.now();
+      _activePollTimer = setInterval(async function() {
+        var thisRunId = _activeRunId;
+        try {
+          // Safety timeout — stop polling after 90s regardless.
+          if (Date.now() - pollStart > 90000) {
+            clearInterval(_activePollTimer);
+            _activePollTimer = null;
+            _activeRunId = null;
+            btn.disabled = false; btn.textContent = "Confirm Rollback";
+            _showRollbackError("Rollback timed out — check the run status in Supabase");
+            return;
+          }
+          var result = await _supabase()
+            .from("rollback_runs")
+            .select("status, result, rollback_pr_url")
+            .eq("id", data.run_id)
+            .single();
+          if (result.error || !result.data) return;
+          if (result.data.status === "running") return;
+          clearInterval(_activePollTimer);
+          _activePollTimer = null;
+          _activeRunId = null;
+          btn.disabled = false; btn.textContent = "Confirm Rollback";
+          if (thisRunId !== _activeRunId && _activeRunId !== null) return;
+
+          if (result.data.status === "complete" && result.data.rollback_pr_url) {
+            document.getElementById("rollback-detail-body").innerHTML += '<p>Rollback PR created: <a href="' + result.data.rollback_pr_url + '" target="_blank">' + result.data.rollback_pr_url + '</a></p>';
+            document.getElementById("rollback-confirm").hidden = true;
+            var rowEl = document.querySelector('.btn-preview[data-pr="' + _currentPrNumber + '"]');
+            if (rowEl) { var container = rowEl.closest(".rollback-row"); if (container) container.remove(); }
+            _currentPrNumber = null;
+          } else {
+            var errRes = result.data.result;
+            if (typeof errRes === "string") { try { errRes = JSON.parse(errRes); } catch(e) { errRes = {}; } }
+            _showRollbackError((errRes && errRes.error) || "Unknown error");
+          }
+        } catch (err) {
+          clearInterval(_activePollTimer);
+          _activePollTimer = null;
+          _activeRunId = null;
+          btn.disabled = false; btn.textContent = "Confirm Rollback";
+        }
+      }, 2000);
+    } catch (err) {
+      _showRollbackError(err.message || "Network error");
+      btn.disabled = false; btn.textContent = "Confirm Rollback";
+    }
+  });
+
+  fetchEligiblePRs("scope-a").then(renderRollbackList).catch(function(err) {
+    document.getElementById("rollback-list-body").innerHTML = '<div class="error">Failed to load: ' + err.message + '</div>';
+  });
+});
+</script>
+</body>
+</html>

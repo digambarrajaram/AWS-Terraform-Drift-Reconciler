@@ -129,7 +129,7 @@ resource "aws_instance" "drift_web_server" {
   }
 
   tags = {
-    Name = "WebServer123456789"
+    Name = "WebServer"
   }
 }
 

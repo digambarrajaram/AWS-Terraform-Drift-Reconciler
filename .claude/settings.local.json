@@ -34,7 +34,25 @@
       "Bash(awk -F: '{print $2}')",
       "Bash(sed -i '39,56d' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)",
       "Bash(sed -i 's/from drift_history import _patch/from drift_history import _patch, _post/' /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_migrate.py)",
-      "Bash(node -e \"require\\('fs'\\).readFileSync\\('/mnt/d/aws-terraform-drift-reconciler/dashboard/dashboard.js','utf8'\\); console.log\\('JS syntax OK'\\)\")"
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('/mnt/d/aws-terraform-drift-reconciler/dashboard/dashboard.js','utf8'\\); console.log\\('JS syntax OK'\\)\")",
+      "Bash(/usr/bin/python3 /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/drift_trends.py --account scope-a --days 90)",
+      "Bash(npx supabase *)",
+      "Bash(supabase --version)",
+      "Bash(pkill -f \"serve.py\")",
+      "Bash(/usr/bin/python3 dashboard/serve.py --port 8080)",
+      "Bash(jobs -l)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:8080/trends)",
+      "Bash(curl -s http://localhost:8080/trends)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:8080/trends.js)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:8080/trends.html)",
+      "Bash(nohup /usr/bin/python3 dashboard/serve.py --port 8080)",
+      "Bash(echo \"pid=$!\")",
+      "Bash(curl -s -o /dev/null -w \"trends.js: HTTP %{http_code}\\\\n\" http://localhost:8080/trends.js)",
+      "Bash(curl -s -o /dev/null -w \"styles.css: HTTP %{http_code}\\\\n\" http://localhost:8080/styles.css)",
+      "Bash(curl -s http://localhost:8080/)",
+      "Bash(curl -s http://localhost:8080/explorer)",
+      "Bash(curl -s http://localhost:8080/scan)",
+      "Bash(curl -s http://localhost:8080/rollback)"
     ]
   }
 }

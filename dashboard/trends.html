@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Trends</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Trends</h1>
+    <nav class="scope-tabs">
+      <button class="scope-tab active" data-scope="scope-a">scope-a</button>
+      <button class="scope-tab" data-scope="scope-b">scope-b</button>
+    </nav>
+    <nav class="site-nav">
+      <a href="/">Dashboard</a>
+      <a href="/explorer">Explorer</a>
+      <a href="/scan">Scan</a>
+      <a href="/rollback">Rollback</a>
+      <a href="/trends" class="active">Trends</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="filter-bar">
+      <label class="filter-group">
+        Lookback
+        <select id="trends-days">
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90" selected>Last 90 days</option>
+          <option value="365">Last 365 days</option>
+          <option value="0">All time</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="dashboard-grid" style="max-width:100%; margin-bottom:24px;">
+      <div class="card" id="total-drifts-card">
+        <h2>Total Drifts</h2>
+        <div class="card-body" aria-live="polite"></div>
+      </div>
+      <div class="card" id="unique-resources-card">
+        <h2>Unique Resources</h2>
+        <div class="card-body" aria-live="polite"></div>
+      </div>
+      <div class="card" id="resolved-card">
+        <h2>Resolved</h2>
+        <div class="card-body" aria-live="polite"></div>
+      </div>
+      <div class="card" id="unresolved-card">
+        <h2>Unresolved</h2>
+        <div class="card-body" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div class="trends-grid">
+      <div class="card" id="most-drifted-card">
+        <h2>Most Drifted Resources</h2>
+        <div class="card-body">
+          <canvas id="most-drifted-chart"></canvas>
+        </div>
+      </div>
+
+      <div class="card" id="mttr-card">
+        <h2>Mean Time to Remediate</h2>
+        <div class="card-body">
+          <canvas id="mttr-chart"></canvas>
+        </div>
+      </div>
+
+      <div class="card" id="rollback-card">
+        <h2>Rollback Frequency</h2>
+        <div class="card-body" id="rollback-frequency-card"></div>
+      </div>
+
+      <div class="card" id="drift-volume-card">
+        <h2>Drift Volume Over Time</h2>
+        <div class="card-body">
+          <canvas id="drift-volume-chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="trends.js"></script>
+</body>
+</html>

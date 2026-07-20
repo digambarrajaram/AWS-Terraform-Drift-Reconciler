@@ -3,7 +3,21 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   background: #0d1117; color: #e6edf3; padding: 24px;
 }
-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+
+/* ── Site-wide navigation ── */
+.site-nav {
+  width: 100%; display: flex; gap: 20px;
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid #30363d;
+}
+.site-nav a {
+  color: #8b949e; text-decoration: none; font-size: 13px;
+  padding-bottom: 4px; border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.site-nav a:hover { color: #e6edf3; }
+.site-nav a.active { color: #58a6ff; border-bottom-color: #58a6ff; }
 h1 { font-size: 20px; color: #58a6ff; }
 h2 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
 
@@ -24,7 +38,11 @@ h2 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing:
 .card {
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;
   padding: 20px; min-height: 100px;
-  transition: border-color 0.3s, box-shadow 0.3s;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.card:hover {
+  background: #1a1f28;
+  border-color: #3a4350;
 }
 
 .scope-tab:focus-visible,
@@ -235,4 +253,48 @@ html body main table#findings-table tbody#findings-body tr td a {
 @media (max-width: 640px) {
   .dashboard-grid { grid-template-columns: 1fr; }
   header { flex-direction: column; align-items: flex-start; gap: 12px; }
+}
+
+/* ── Trends ── */
+.trends-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.trends-grid .card { min-height: 280px; }
+
+.trends-grid .card-body {
+  position: relative;
+  min-height: 200px;
+  height: clamp(200px, 30vw, 300px);
+}
+
+.trends-grid .card-body .empty,
+.trends-grid .card-body .error {
+  height: auto;
+}
+
+/* Rollback stat card doesn't need chart height. */
+#rollback-frequency-card {
+  height: auto;
+  min-height: 0;
+}
+
+/* Stat card (rollback frequency) — match dashboard metric cards. */
+.stat-value {
+  font-size: 28px; font-weight: 600; margin-bottom: 4px;
+}
+.stat-label {
+  font-size: 13px; color: #8b949e;
+}
+
+@media (max-width: 900px) {
+  .trends-grid { grid-template-columns: 1fr; }
+  .trends-grid .card-body { height: clamp(200px, 50vw, 280px); }
+}
+
+@media (max-width: 640px) {
+  .trends-grid .card { min-height: 240px; }
+  .trends-grid .card-body { height: clamp(180px, 45vw, 240px); }
 }

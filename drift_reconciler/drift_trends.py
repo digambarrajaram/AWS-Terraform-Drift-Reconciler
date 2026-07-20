@@ -1,7 +1,9 @@
 """
 Generate a drift-trends markdown report from Supabase (PostgreSQL via REST API).
 
-Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment.
+Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY) in the
+environment.  Aggregations are pushed to server-side RPC functions; the Python
+layer only formats the results.
 
 Usage:
     python drift_reconciler/drift_trends.py --account scope-a
@@ -9,9 +11,9 @@ Usage:
 """
 
 import argparse
+import json
 import os
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -29,8 +31,7 @@ _HEADERS = {
 
 
 def _get(path: str) -> list[dict[str, Any]]:
-    """GET rows from Supabase with the given query-string *path*.
-    Returns an empty list when credentials are missing or the request fails."""
+    """GET rows from the drift_events table.  Returns [] on failure."""
     if not _URL or not _KEY:
         print("  [trends] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
         return []
@@ -49,62 +50,64 @@ def _get(path: str) -> list[dict[str, Any]]:
         return []
 
 
+def _rpc(fn: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Call a Supabase RPC function.  Returns [] on failure."""
+    if not _URL or not _KEY:
+        print("  [trends] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
+        return []
+    try:
+        resp = requests.post(
+            f"{_URL}/rest/v1/rpc/{fn}",
+            headers={**_HEADERS, "Content-Type": "application/json"},
+            json=params,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json() if resp.text else []
+        print(f"  [trends] RPC {fn} failed ({resp.status_code}): {resp.text[:200]}")
+        return []
+    except requests.RequestException as exc:
+        print(f"  [trends] RPC {fn} request failed: {exc}")
+        return []
+
+
 def _now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def generate_report(account: str, days: int = 90) -> str:
     """Return a markdown report for *account* covering the last *days*."""
-    # Build a date filter for the lookback window, applied to every query.
+    rpc_params = {"p_account": account, "p_days": days}
+
+    # Date filter for raw _get queries (rollbacks, unresolved, totals).
     date_filter = ""
     if days > 0:
+        from datetime import timedelta
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
         date_filter = f"&created_at=gte.{since}"
-
     acct_filter = f"account=eq.{account}"
 
-    # ── Most-drifted resources ──
-    most_drifted_raw = _get(
-        f"select=resource_id&{acct_filter}{date_filter}"
-    )
-    from collections import Counter as _Counter
-    most_drifted = [{"resource_id": rid, "count": cnt}
-                    for rid, cnt in _Counter(r["resource_id"] for r in most_drifted_raw).most_common(15)]
+    # ── Most-drifted resources (RPC) ──
+    most_drifted = _rpc("get_most_drifted", rpc_params)
 
-    # ── MTTR by severity (fix/batch only, resolved only) ──
-    mttr_raw = _get(
-        f"select=severity,created_at,resolved_at&{acct_filter}{date_filter}"
-        f"&status=eq.resolved&pr_type=in.(fix,batch)"
-    )
+    # ── MTTR by severity (RPC) ──
+    mttr_rows = _rpc("get_mttr_by_severity", rpc_params)
     mttr: dict[str, dict[str, Any]] = {}
-    if mttr_raw:
-        from collections import defaultdict
-        from statistics import mean
-
-        buckets: dict[str, list[float]] = defaultdict(list)
-        for row in mttr_raw:
+    if mttr_rows:
+        for row in mttr_rows:
             sev = row.get("severity", "LOW")
-            ts_open = row.get("created_at", "")
-            ts_done = row.get("resolved_at") or ts_open
-            try:
-                t0 = datetime.fromisoformat(ts_open.replace("Z", "+00:00"))
-                t1 = datetime.fromisoformat(ts_done.replace("Z", "+00:00"))
-                hours = (t1 - t0).total_seconds() / 3600
-                buckets[sev].append(max(0, hours))
-            except (ValueError, AttributeError):
-                continue
-        mttr = {
-            sev: {"avg_hours": round(mean(h), 1), "count": len(h)}
-            for sev, h in sorted(buckets.items())
-        }
+            mttr[sev] = {"avg_hours": row.get("avg_hours", 0), "count": row.get("count", 0)}
 
-    # ── Rollbacks ──
+    # ── Drift volume over time (RPC) ──
+    volume_rows = _rpc("get_drift_volume_daily", rpc_params)
+
+    # ── Rollbacks (raw query — no RPC yet) ──
     rollbacks = _get(f"select=pr_number&{acct_filter}{date_filter}&pr_type=eq.rollback")
 
-    # ── Unresolved ──
+    # ── Unresolved (raw query — no RPC yet) ──
     unresolved = _get(f"select=*&{acct_filter}{date_filter}&status=eq.open")
 
-    # ── Total counts ──
+    # ── Total counts (raw query) ──
     total_raw = _get(f"select=resource_id&{acct_filter}{date_filter}")
     total = len(total_raw)
     unique = len(set(r.get("resource_id", "") for r in total_raw))
@@ -123,7 +126,7 @@ def generate_report(account: str, days: int = 90) -> str:
         lines.append("|---|---|")
         for row in most_drifted:
             rid = row.get("resource_id", "?")
-            cnt = row.get("count", 0)
+            cnt = row.get("drift_count", 0)
             lines.append(f"| `{rid}` | {cnt} |")
         lines.append("")
 
@@ -131,8 +134,19 @@ def generate_report(account: str, days: int = 90) -> str:
         lines.append("## Mean Time to Remediate\n")
         lines.append("| Severity | Avg Hours | Count |")
         lines.append("|---|---|---|")
-        for sev, data in mttr.items():
+        for sev in sorted(mttr):
+            data = mttr[sev]
             lines.append(f"| {sev} | {data['avg_hours']} | {data['count']} |")
+        lines.append("")
+
+    if volume_rows:
+        lines.append("## Drift Volume (Daily)\n")
+        lines.append("| Date | Events |")
+        lines.append("|---|---|")
+        for row in volume_rows:
+            day = str(row.get("day", "?"))[:10]
+            cnt = row.get("count", 0)
+            lines.append(f"| {day} | {cnt} |")
         lines.append("")
 
     if rollbacks:

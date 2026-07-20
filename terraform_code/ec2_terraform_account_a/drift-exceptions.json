@@ -15,5 +15,10 @@
     "auto": true
   },
   "exceptions": [
+    {
+      "resource_address": "aws_instance.test",
+      "reason": "Testing fix",
+      "expires": "2099-12-31"
+    }
   ]
 }

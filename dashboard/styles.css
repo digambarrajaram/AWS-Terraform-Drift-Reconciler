@@ -109,6 +109,18 @@ button:focus-visible {
 }
 #load-more:hover { background: #30363d; }
 
+.pagination {
+  display: flex; justify-content: center; align-items: center; gap: 16px;
+  margin-top: 16px; padding: 8px 0;
+}
+.pagination button {
+  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.pagination button:disabled { color: #484f58; cursor: not-allowed; }
+.pagination button:hover:not(:disabled) { background: #30363d; }
+#page-info { color: #8b949e; font-size: 13px; }
+
 .detail-row td { padding: 0 12px 14px 12px; }
 .detail-summary { color: #c9d1d9; margin-bottom: 8px; white-space: pre-wrap; }
 .detail-diff { color: #8b949e; font-family: monospace; font-size: 12px; line-height: 1.6; }
@@ -132,6 +144,10 @@ html body main table#findings-table tbody#findings-body tr td a {
 .badge-status-open       { color: #3fb950; }
 .badge-status-resolved   { color: #8b949e; }
 .badge-status-suppressed { color: #d29922; }
+.badge-status-fail       { color: #f85149; }
+.badge-type-fix          { color: #8b949e; }
+.badge-type-batch        { color: #a371f7; }
+.badge-type-rollback     { color: #d29922; }
 
 /* ── Scan form + stages ── */
 .scan-form {

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — PR Queue</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+  <script src="pr-queue.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — PR Queue</h1>
+  </header>
+
+  <main>
+    <div class="filter-bar">
+      <label class="filter-group">
+        PR Type
+        <select id="filter-pr-type">
+          <option value="">All</option>
+          <option value="fix">fix</option>
+          <option value="batch">batch</option>
+          <option value="rollback">rollback</option>
+        </select>
+      </label>
+
+      <div class="filter-group">
+        <span>Status</span>
+        <div class="status-pills">
+          <button class="pill active" id="status-open" data-status="open">open</button>
+          <button class="pill" id="status-resolved" data-status="resolved">resolved</button>
+          <button class="pill" id="status-suppressed" data-status="suppressed">suppressed</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="error-banner" hidden></div>
+
+    <table class="explorer" id="pr-table">
+      <thead>
+        <tr>
+          <th>PR</th>
+          <th>Type</th>
+          <th>Severity</th>
+          <th>Status</th>
+          <th>Cost Impact</th>
+          <th>Trivy</th>
+          <th>Freshness Gate</th>
+        </tr>
+      </thead>
+      <tbody id="pr-body"></tbody>
+    </table>
+
+    <nav class="pagination" id="pagination">
+      <button type="button" id="btn-prev" disabled>&larr; Previous</button>
+      <span id="page-info"></span>
+      <button type="button" id="btn-next" disabled>Next &rarr;</button>
+    </nav>
+  </main>
+</body>
+</html>

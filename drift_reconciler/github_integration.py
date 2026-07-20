@@ -70,7 +70,9 @@ def create_drift_pr(
         account_label: str = "default",
         changes: dict | None = None,
         is_rollback: bool = False,
-        cost_impact: dict | None = None):
+        cost_impact: dict | None = None,
+        trivy_passed: bool | None = None,
+        trivy_summary: dict | None = None):
     token = os.getenv("GITHUB_TOKEN")
     repo_name = os.getenv("GITHUB_REPO")
     auth = Auth.Token(token)
@@ -154,6 +156,8 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             changes_jsonb=changes,
             file_path=file_path,
             cost_impact=cost_impact,
+            trivy_passed=trivy_passed,
+            trivy_summary=trivy_summary,
         )
     except Exception as exc:
         print(f"  ⚠ Failed to append drift history: {exc}")
@@ -225,7 +229,52 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         account_label=account_label,
         changes=finding.get("changes") if finding.get("file_path") else None,
         cost_impact=finding.get("cost_impact"),
+        trivy_passed=finding.get("trivy_passed"),
+        trivy_summary=_build_trivy_summary(finding),
     )
+
+
+def _build_trivy_summary(finding: dict) -> dict | None:
+    """Build a trivy_summary dict from the in-memory finding fields,
+    or None if no Trivy data was attached to this finding."""
+    if "trivy_passed" not in finding and "trivy_error" not in finding:
+        return None
+    return {
+        "trivy_error": finding.get("trivy_error"),
+        "trivy_security_fixes": finding.get("trivy_security_fixes"),
+        "trivy_pre_existing_count": finding.get("trivy_pre_existing_count"),
+        "trivy_newly_introduced_count": finding.get("trivy_newly_introduced_count"),
+    }
+
+
+def _build_batch_trivy_summary(actionable: list[dict]) -> dict | None:
+    """Merge trivy summaries from all findings in a batch, or None."""
+    total_fixes = 0
+    total_pre = 0
+    total_new = 0
+    any_error = False
+    any_data = False
+    for f in actionable:
+        if f.get("trivy_error"):
+            any_error = True
+            any_data = True
+        if f.get("trivy_security_fixes"):
+            total_fixes += f["trivy_security_fixes"]
+            any_data = True
+        if f.get("trivy_pre_existing_count"):
+            total_pre += f["trivy_pre_existing_count"]
+            any_data = True
+        if f.get("trivy_newly_introduced_count"):
+            total_new += f["trivy_newly_introduced_count"]
+            any_data = True
+    if not any_data:
+        return None
+    return {
+        "trivy_error": any_error,
+        "trivy_security_fixes": total_fixes,
+        "trivy_pre_existing_count": total_pre,
+        "trivy_newly_introduced_count": total_new,
+    }
 
 
 def _apply_changes_batch(file_path: str, findings: list[dict]) -> str:
@@ -315,6 +364,8 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
         file_content=patched_content,
         risk_level=highest_risk,
         account_label=account_label,
+        trivy_passed=any(f.get("trivy_passed") for f in actionable),
+        trivy_summary=_build_batch_trivy_summary(actionable),
     )
     if pr is None:
         return None
@@ -333,6 +384,8 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
                 changes_jsonb=f.get("changes"),
                 file_path=to_repo_relative_path(file_path),
                 cost_impact=f.get("cost_impact"),
+                trivy_passed=f.get("trivy_passed"),
+                trivy_summary=_build_trivy_summary(f),
             )
         except Exception as exc:
             print(f"  ⚠ Failed to append drift history for {f['resource_id']}: {exc}")

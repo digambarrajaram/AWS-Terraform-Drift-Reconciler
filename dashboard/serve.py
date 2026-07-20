@@ -55,7 +55,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html"):
+        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html"):
             self._serve_injected()
         elif path.endswith((".js", ".css", ".png")):
             self._serve_static(path)
@@ -169,7 +169,9 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_injected_impl(self):
         path = self.path.split("?")[0]
-        if "explorer" in path:
+        if "pr-queue" in path:
+            fname = "pr-queue.html"
+        elif "explorer" in path:
             fname = "explorer.html"
         elif "scan" in path:
             fname = "scan.html"

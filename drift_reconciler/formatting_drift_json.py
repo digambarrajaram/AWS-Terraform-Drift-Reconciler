@@ -19,6 +19,8 @@ import glob, re
 import os
 from datetime import date
 
+import requests
+
 
 SECURITY_RESOURCE_TYPES = (
     "aws_security_group",
@@ -104,24 +106,32 @@ def get_prior_state_addresses(plan):
     return addresses
 
 
-def load_drift_exceptions(tf_dir: str) -> tuple[list[dict], list[dict]]:
-    """Read the exceptions registry from *tf_dir*.
+def load_drift_exceptions(scope: str) -> tuple[list[dict], list[dict]]:
+    """Load drift exception entries for *scope* from Supabase.
 
     Returns (active_exceptions, expired_exceptions).  Expired entries
     are returned separately so the caller can warn about them; they are
     NOT applied as suppressions.
     """
-    registry_path = os.path.join(tf_dir, "drift-exceptions.json")
-    if not os.path.isfile(registry_path):
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not key or not scope:
         return [], []
 
     try:
-        with open(registry_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
+        resp = requests.get(
+            f"{url}/rest/v1/drift_exception_registry"
+            f"?select=resource_address,drift_type,reason,approved_by,expires,auto"
+            f"&scope=eq.{scope}&exception_type=eq.drift&active=eq.true",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return [], []
+        entries = resp.json() if resp.text else []
+    except requests.RequestException:
         return [], []
 
-    entries = data.get("exceptions", [])
     if not isinstance(entries, list):
         return [], []
 
@@ -189,7 +199,7 @@ def apply_drift_exceptions(
     return suppressed, remaining
 
 
-def report_drift(plan, tf_dir: str = None) -> dict:
+def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
     prior_addresses = get_prior_state_addresses(plan)
     drift_entries = plan.get("resource_drift")
     used_fallback = drift_entries is None
@@ -298,7 +308,7 @@ def report_drift(plan, tf_dir: str = None) -> dict:
     # Apply drift-exceptions registry if a terraform directory was provided.
     suppressed, expired_exc = [], []
     if tf_dir:
-        active_exc, expired_exc = load_drift_exceptions(tf_dir)
+        active_exc, expired_exc = load_drift_exceptions(scope)
         if active_exc:
             suppressed, resources = apply_drift_exceptions(resources, active_exc)
 
@@ -405,10 +415,14 @@ def build_resource_file_index(tf_dir: str) -> dict:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python formatting_drift_json.py <plan.json>")
+        print("Usage: python formatting_drift_json.py <plan.json> [--account scope-a]")
         sys.exit(1)
 
     plan_file = sys.argv[1]
+    scope = None
+    if len(sys.argv) >= 4 and sys.argv[2] == "--account":
+        scope = sys.argv[3]
+
     plan_data = load_plan(plan_file)
-    result = report_drift(plan_data, tf_dir=os.path.dirname(plan_file))
+    result = report_drift(plan_data, tf_dir=os.path.dirname(plan_file), scope=scope)
     print(json.dumps(result))

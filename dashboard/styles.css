@@ -189,6 +189,7 @@ html body main table#findings-table tbody#findings-body tr td a {
 .stage.active  { color: #e6edf3; border-left-color: #1f6feb; }
 .stage.done    { color: #3fb950; border-left-color: #3fb950; }
 .stage.failed  { color: #f85149; border-left-color: #f85149; }
+.stage.skipped { color: #d29922; border-left-color: #d29922; text-decoration: line-through; }
 
 .stage-dot {
   width: 10px; height: 10px; border-radius: 50%;
@@ -197,6 +198,7 @@ html body main table#findings-table tbody#findings-body tr td a {
 .stage.active .stage-dot { background: #1f6feb; }
 .stage.done   .stage-dot { background: #3fb950; }
 .stage.failed .stage-dot { background: #f85149; }
+.stage.skipped .stage-dot { background: #d29922; }
 
 #scan-result {
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;
@@ -212,6 +214,7 @@ html body main table#findings-table tbody#findings-body tr td a {
   .stage.active  { border-top-color: #1f6feb; }
   .stage.done    { border-top-color: #3fb950; }
   .stage.failed  { border-top-color: #f85149; }
+  .stage.skipped { border-top-color: #d29922; text-decoration: line-through; }
 }
 
 /* ── Rollback ── */
@@ -297,4 +300,56 @@ html body main table#findings-table tbody#findings-body tr td a {
 @media (max-width: 640px) {
   .trends-grid .card { min-height: 240px; }
   .trends-grid .card-body { height: clamp(180px, 45vw, 240px); }
+}
+
+/* ── Exception forms ── */
+.exception-form {
+  margin-bottom: 16px; padding: 16px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+}
+.exception-form label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: #8b949e;
+}
+.exception-form label input {
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+  border-radius: 6px; padding: 6px 10px; font-size: 13px;
+}
+.exception-form .checkbox-label {
+  flex-direction: row; align-items: center; gap: 8px;
+}
+.exception-form .checkbox-label input[type="checkbox"] {
+  width: auto;
+}
+.exception-form .form-actions {
+  grid-column: 1 / -1; display: flex; gap: 8px; align-items: center;
+}
+.form-actions .btn-primary {
+  background: #238636; border: 1px solid #238636; color: #fff;
+  padding: 6px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.form-actions .btn-primary:disabled {
+  background: #21262d; border-color: #30363d; color: #484f58; cursor: not-allowed;
+}
+.form-actions .btn-cancel {
+  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.form-result { grid-column: 1 / -1; }
+
+.btn-expire {
+  background: transparent; border: 1px solid #30363d; color: #d29922;
+  padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+}
+.btn-expire:hover { background: #d299221a; border-color: #d29922; }
+
+.btn-delete {
+  background: transparent; border: 1px solid #30363d; color: #f85149;
+  padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+}
+.btn-delete:hover { background: #f851491a; border-color: #f85149; }
+
+@media (max-width: 640px) {
+  .exception-form { grid-template-columns: 1fr; }
 }

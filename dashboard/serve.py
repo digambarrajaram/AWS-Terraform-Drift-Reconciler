@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import requests
 import subprocess
@@ -45,6 +46,43 @@ def _tf_dir_for(scope: str) -> str:
         "scope-b": "terraform_code/ec2_terraform_account_b",
     }
     return tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
+
+
+def _validate_exception_entry_local(exception_type: str, entry: dict) -> tuple[bool, str | None]:
+    """Same contract as ``validate_exception_entry`` in github_integration,
+    replicated here so serve.py can validate without importing PyGithub."""
+    from datetime import datetime
+
+    if exception_type == "drift":
+        addr = (entry.get("resource_address") or "").strip()
+        if not addr:
+            return False, "resource_address is required and must be a non-empty string."
+        reason = (entry.get("reason") or "").strip()
+        if not reason:
+            return False, "reason is required and must be a non-empty string."
+        expires = (entry.get("expires") or "").strip()
+        if expires:
+            try:
+                exp_date = datetime.strptime(expires, "%Y-%m-%d").date()
+                if exp_date <= datetime.now().date():
+                    return False, f"expires ({expires}) is in the past."
+            except ValueError:
+                return False, f"expires ({expires}) is not a valid ISO date (YYYY-MM-DD)."
+        return True, None
+
+    if exception_type == "unmanaged":
+        rt = (entry.get("resource_type") or "").strip()
+        if not rt:
+            return False, "resource_type is required and must be a non-empty string."
+        pattern = (entry.get("resource_id_pattern") or "").strip()
+        if not pattern:
+            return False, "resource_id_pattern is required and must be a non-empty string."
+        reason = (entry.get("reason") or "").strip()
+        if not reason:
+            return False, "reason is required and must be a non-empty string."
+        return True, None
+
+    return False, f"Unknown exception_type: {exception_type}"
 
 
 def _spawn_agent(scope: str, extra_args: list[str]) -> None:
@@ -81,8 +119,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html"):
+        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html", "/exceptions", "/exceptions.html"):
             self._serve_injected()
+        elif path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+        elif path.startswith("/api/exceptions"):
+            self._serve_api_exceptions()
         elif path.endswith((".js", ".css", ".png")):
             self._serve_static(path)
         else:
@@ -266,6 +309,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(resp_body)))
             self.end_headers()
             self.wfile.write(resp_body)
+        elif path == "/api/exceptions":
+            self._handle_api_exceptions_post()
         else:
             self.send_error(404)
 
@@ -278,6 +323,153 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_api_exceptions(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        scope_raw = params.get("scope", [None])[0]
+        if not scope_raw or scope_raw not in _VALID_SCOPES:
+            self._json_error(400, "Invalid or missing scope. Must be scope-a or scope-b.")
+            return
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        base = f"{url}/rest/v1/drift_exception_registry"
+
+        def _fetch(exception_type):
+            try:
+                resp = requests.get(
+                    f"{base}?select=*&scope=eq.{scope_raw}&exception_type=eq.{exception_type}&active=eq.true&order=created_at.desc",
+                    headers=headers, timeout=10,
+                )
+                if resp.status_code == 200:
+                    return resp.json() if resp.text else []
+                return []
+            except requests.RequestException:
+                return []
+
+        payload = {
+            "drift_exceptions": _fetch("drift"),
+            "unmanaged_exceptions": _fetch("unmanaged"),
+        }
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_api_exceptions_post(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json_error(400, "Invalid or empty JSON body")
+            return
+
+        scope = body.get("scope", "")
+        if scope not in _VALID_SCOPES:
+            self._json_error(400, f"Invalid scope: {scope}. Must be scope-a or scope-b.")
+            return
+
+        exception_type = body.get("exception_type", "")
+        if exception_type not in ("drift", "unmanaged"):
+            self._json_error(400, "exception_type must be 'drift' or 'unmanaged'.")
+            return
+
+        action = body.get("action", "")
+        if action not in ("add", "expire", "delete"):
+            self._json_error(400, "action must be 'add', 'expire', or 'delete'.")
+            return
+
+        entry = body.get("entry")
+        if not isinstance(entry, dict):
+            self._json_error(400, "entry must be a JSON object.")
+            return
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=representation"}
+        table_url = f"{url}/rest/v1/drift_exception_registry"
+
+        if action == "add":
+            ok, err = _validate_exception_entry_local(exception_type, entry)
+            if not ok:
+                self._json_error(400, err)
+                return
+
+            row = {"scope": scope, "exception_type": exception_type, "reason": entry.get("reason", "").strip()}
+            if exception_type == "drift":
+                row["resource_address"] = (entry.get("resource_address") or "").strip()
+                row["drift_type"] = (entry.get("drift_type") or "*").strip()
+                row["auto"] = bool(entry.get("auto"))
+                expires = (entry.get("expires") or "").strip()
+                if expires:
+                    row["expires"] = expires
+            else:
+                row["resource_type"] = (entry.get("resource_type") or "").strip()
+                row["resource_id_pattern"] = (entry.get("resource_id_pattern") or "").strip()
+                cost = entry.get("max_monthly_cost_usd")
+                if cost is not None and cost != "":
+                    row["max_monthly_cost_usd"] = float(cost)
+            if entry.get("approved_by"):
+                row["approved_by"] = entry["approved_by"].strip()
+
+            try:
+                resp = requests.post(table_url, headers=headers, json=row, timeout=10)
+                if resp.status_code in (200, 201):
+                    created = resp.json()
+                    row_id = created[0]["id"] if isinstance(created, list) else created["id"]
+                    data = json.dumps({"id": row_id}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self._json_error(502, f"Supabase insert failed ({resp.status_code}): {resp.text[:200]}")
+            except requests.RequestException as e:
+                self._json_error(502, f"Supabase unreachable: {e}")
+
+        elif action == "expire":
+            self._do_exception_update(scope, exception_type, entry, headers, table_url, {"expires": (entry.get("expires") or "").strip()})
+
+        elif action == "delete":
+            self._do_exception_update(scope, exception_type, entry, headers, table_url, {"active": False})
+
+    def _do_exception_update(self, scope, exception_type, entry, headers, table_url, updates):
+        filter_parts = [f"scope=eq.{scope}", f"exception_type=eq.{exception_type}", "active=eq.true"]
+        if exception_type == "drift":
+            addr = (entry.get("resource_address") or "").strip()
+            if not addr:
+                self._json_error(400, "resource_address is required.")
+                return
+            filter_parts.append(f"resource_address=eq.{addr}")
+        else:
+            rt = (entry.get("resource_type") or "").strip()
+            pat = (entry.get("resource_id_pattern") or "").strip()
+            if not rt or not pat:
+                self._json_error(400, "resource_type and resource_id_pattern are required.")
+                return
+            filter_parts.append(f"resource_type=eq.{rt}")
+            filter_parts.append(f"resource_id_pattern=eq.{pat}")
+
+        filter_str = "&".join(filter_parts)
+        try:
+            resp = requests.patch(f"{table_url}?{filter_str}", headers=headers, json=updates, timeout=10)
+            if resp.status_code in (200, 204):
+                data = json.dumps({"status": "ok"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._json_error(404, "No matching active exception entry found.")
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
 
     def end_headers(self):
         ext = os.path.splitext(self.path.split("?")[0])[1]
@@ -323,6 +515,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             fname = "scan.html"
         elif "trends" in path:
             fname = "trends.html"
+        elif "exceptions" in path:
+            fname = "exceptions.html"
         else:
             fname = "index.html"
         html = (_DASHBOARD_DIR / fname).read_text(encoding="utf-8")

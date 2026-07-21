@@ -52,7 +52,21 @@
       "Bash(curl -s http://localhost:8080/)",
       "Bash(curl -s http://localhost:8080/explorer)",
       "Bash(curl -s http://localhost:8080/scan)",
-      "Bash(curl -s http://localhost:8080/rollback)"
+      "Bash(curl -s http://localhost:8080/rollback)",
+      "Bash(curl -s \"http://localhost:8080/api/exceptions?scope=scope-a\")",
+      "Bash(curl -s \"http://localhost:8080/api/exceptions\")",
+      "Bash(curl -s \"http://localhost:8080/api/exceptions?scope=invalid\")",
+      "Bash(curl *)",
+      "Bash(fuser 8080/tcp)",
+      "Bash(timeout 3 /usr/bin/python3 dashboard/serve.py --port 9090)",
+      "Bash(kill 7929)",
+      "Bash(fuser -k 8080/tcp)",
+      "Bash(/mnt/d/aws-terraform-drift-reconciler/drift/bin/python *)",
+      "Bash(/usr/bin/python3 -c ' *)",
+      "Bash(/usr/bin/python3 *)",
+      "Bash(echo \"started $!\")",
+      "Bash(grep -n \"try:\\\\|except Exception\\\\|raise RuntimeError\\\\|raise$\\\\|sys.exit\\\\|if _run_id\\\\|update_scan_run\\\\|get_terraform_drift_data\\\\|_run_id = args\" /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/agent.py)",
+      "Bash(/mnt/d/aws-terraform-drift-reconciler/drift/bin/python3 --version)"
     ]
   }
 }

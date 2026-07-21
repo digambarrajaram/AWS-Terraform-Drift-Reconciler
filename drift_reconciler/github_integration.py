@@ -10,7 +10,7 @@ import re
 import shutil
 import tempfile
 
-import drift_history
+import drift_reconciler.drift_history as drift_history
 
 from env_loader import load_env
 load_env()
@@ -577,3 +577,134 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
             return f.read()
     finally:
         os.remove(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Exception registry PRs
+# ---------------------------------------------------------------------------
+
+_TF_DIR_MAP = {
+    "scope-a": "terraform_code/ec2_terraform_account_a",
+    "scope-b": "terraform_code/ec2_terraform_account_b",
+}
+
+
+def _tf_dir_for_exceptions(scope: str) -> str:
+    return _TF_DIR_MAP.get(scope, f"terraform_code/ec2_terraform_{scope}")
+
+
+def open_exception_pr(
+    scope: str,
+    file_name: str,
+    updated_exceptions_list: list[dict],
+    change_description: str,
+) -> str:
+    """Commit an updated exception registry and open a PR from a new branch.
+
+    *scope* — ``"scope-a"`` or ``"scope-b"``.
+    *file_name* — ``"drift-exceptions.json"`` or ``"unmanaged-exceptions.json"``.
+    *updated_exceptions_list* — the replacement value for the ``"exceptions"`` key.
+    *change_description* — human-readable summary used in the PR title and body.
+
+    Returns the PR's ``html_url``.
+    """
+    token = os.getenv("GITHUB_TOKEN")
+    repo_name = os.getenv("GITHUB_REPO")
+    auth = Auth.Token(token)
+    g = Github(auth=auth)
+    repo = g.get_repo(repo_name)
+
+    base_branch = os.getenv("GITHUB_BASE_BRANCH", "main")
+    repo_path = f"{_tf_dir_for_exceptions(scope)}/{file_name}"
+
+    # Read the current file from main to get its SHA.
+    contents = repo.get_contents(repo_path, ref=base_branch)
+    current = json.loads(contents.decoded_content.decode("utf-8"))
+
+    # Preserve metadata keys (_description, _example, etc.) and replace just
+    # the exceptions list.
+    new_content = {k: v for k, v in current.items() if k.startswith("_")}
+    new_content["exceptions"] = updated_exceptions_list
+    new_raw = json.dumps(new_content, indent=2, ensure_ascii=False) + "\n"
+
+    # Branch off main.
+    ts = int(datetime.utcnow().timestamp())
+    safe_scope = _safe_label(scope)
+    head_branch = f"exception-update/{safe_scope}/{ts}"
+
+    base_ref = repo.get_git_ref(f"heads/{base_branch}")
+    repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_ref.object.sha)
+
+    # Commit the updated file to the new branch.
+    repo.update_file(
+        path=repo_path,
+        message=f"Update {file_name} exceptions for {scope}",
+        content=new_raw,
+        sha=contents.sha,
+        branch=head_branch,
+    )
+
+    # Build PR body with the description and formatted entry list.
+    body_lines = [
+        change_description,
+        "",
+        "```json",
+        json.dumps(updated_exceptions_list, indent=2, ensure_ascii=False),
+        "```",
+    ]
+
+    pr = repo.create_pull(
+        title=f"[Exception] {change_description}",
+        body="\n".join(body_lines),
+        head=head_branch,
+        base=base_branch,
+    )
+
+    try:
+        pr.add_to_labels("drift-reconciler", "exception")
+    except GithubException:
+        pass
+
+    print(f"Exception PR created: {pr.html_url}")
+    return pr.html_url
+
+
+def validate_exception_entry(exception_type: str, entry: dict) -> tuple[bool, str | None]:
+    """Return ``(True, None)`` if *entry* is valid for *exception_type*,
+    or ``(False, "<reason>")`` with a specific error message."""
+
+    if exception_type == "drift":
+        # resource_address and reason are required non-empty strings.
+        addr = (entry.get("resource_address") or "").strip()
+        if not addr:
+            return False, "resource_address is required and must be a non-empty string."
+        reason = (entry.get("reason") or "").strip()
+        if not reason:
+            return False, "reason is required and must be a non-empty string."
+
+        # Optional expiry — must be valid ISO date and not in the past.
+        expires = (entry.get("expires") or "").strip()
+        if expires:
+            try:
+                exp_date = datetime.strptime(expires, "%Y-%m-%d").date()
+                if exp_date <= datetime.now().date():
+                    return False, f"expires ({expires}) is in the past."
+            except ValueError:
+                return False, f"expires ({expires}) is not a valid ISO date (YYYY-MM-DD)."
+
+        # auto: true is allowed — reason still required (already checked above).
+        return True, None
+
+    if exception_type == "unmanaged":
+        rt = (entry.get("resource_type") or "").strip()
+        if not rt:
+            return False, "resource_type is required and must be a non-empty string."
+        pattern = (entry.get("resource_id_pattern") or "").strip()
+        if not pattern:
+            return False, "resource_id_pattern is required and must be a non-empty string."
+        reason = (entry.get("reason") or "").strip()
+        if not reason:
+            return False, "reason is required and must be a non-empty string."
+        return True, None
+
+    return False, f"Unknown exception_type: {exception_type}"

@@ -18,6 +18,7 @@
       <a href="/scan" class="active">Scan</a>
       <a href="/rollback">Rollback</a>
       <a href="/trends">Trends</a>
+      <a href="/exceptions">Exceptions</a>
     </nav>
   </header>
 
@@ -100,15 +101,22 @@ function updateTracker(row) {
   const current = row.current_stage;
   const status = row.status;
 
+  var rawSummary = row.result_summary;
+  var summary = rawSummary;
+  if (typeof summary === "string") { try { summary = JSON.parse(summary); } catch(e) { summary = {}; } }
+  var skippedStages = summary.skipped_stages || [];
+
   document.querySelectorAll(".stage").forEach(el => {
     const stage = el.dataset.stage;
     const idx = _STAGE_ORDER.indexOf(stage);
     const curIdx = _STAGE_ORDER.indexOf(current);
 
-    el.classList.remove("active", "done", "failed");
+    el.classList.remove("active", "done", "failed", "skipped");
 
     if (status === "failed" && idx === curIdx) {
       el.classList.add("failed");
+    } else if (status === "complete" && skippedStages.indexOf(stage) !== -1) {
+      el.classList.add("skipped");
     } else if (status === "complete") {
       el.classList.add("done");
     } else if (idx < curIdx) {
@@ -121,15 +129,15 @@ function updateTracker(row) {
   const resultEl = document.getElementById("scan-result");
   const bodyEl = document.getElementById("scan-result-body");
 
-  var rawSummary = row.result_summary;
-  var summary = rawSummary;
-  if (typeof summary === "string") { try { summary = JSON.parse(summary); } catch(e) { summary = {}; } }
   var prLinks = row.pr_links || [];
   if (typeof prLinks === "string") { try { prLinks = JSON.parse(prLinks); } catch(e) { prLinks = []; } }
 
   if (status === "complete") {
     resultEl.hidden = false;
     let html = "";
+    if (summary.notice) {
+      html += '<p style="color:#d29922;font-size:14px;margin-bottom:6px">' + summary.notice + '</p>';
+    }
     if (summary.report_path) {
       html += '<p>Report: <code>' + summary.report_path + '</code></p>';
     }
@@ -142,18 +150,58 @@ function updateTracker(row) {
     bodyEl.innerHTML = html;
   } else if (status === "failed") {
     resultEl.hidden = false;
-    bodyEl.innerHTML = '<div class="error">Scan failed: ' + (summary.error || "unknown error") + '</div>';
+    if (summary.summary) {
+      // New structured format
+      var html = '<p style="color:#e6edf3;font-size:14px;margin-bottom:6px">' + summary.summary + '</p>';
+      if (summary.suggestion) {
+        html += '<p style="color:#8b949e;font-size:13px;margin-bottom:10px">Suggested next step: ' + summary.suggestion + '</p>';
+      }
+      if (summary.detail) {
+        html += '<details style="font-size:12px;color:#8b949e">' +
+                '<summary style="cursor:pointer;margin-bottom:8px">Show technical details</summary>' +
+                '<pre style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;overflow-x:auto;white-space:pre-wrap;font-size:11px;color:#c9d1d9">' +
+                summary.detail + '</pre></details>';
+      }
+      bodyEl.innerHTML = html;
+    } else {
+      // Legacy flat error format
+      bodyEl.innerHTML = '<p style="color:#e6edf3;font-size:14px;margin-bottom:6px">Scan failed. See details below.</p>' +
+        '<details style="font-size:12px;color:#8b949e">' +
+        '<summary style="cursor:pointer;margin-bottom:8px">Show technical details</summary>' +
+        '<pre style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;overflow-x:auto;white-space:pre-wrap;font-size:11px;color:#c9d1d9">' +
+        (summary.error || "unknown error") + '</pre></details>';
+    }
   }
 }
 
 function startPolling(runId) {
   var fallbackTimer = null;
   var stopped = false;
+  var pollStart = Date.now();
+  var TIMEOUT_MS = 300000; // 5 minutes
+
+  function _checkTimeout(currentStatus) {
+    if (currentStatus && currentStatus !== "running") return false;
+    if (Date.now() - pollStart > TIMEOUT_MS) {
+      _stop();
+      var btn = document.getElementById("scan-submit");
+      btn.disabled = false;
+      btn.textContent = "Run Scan";
+      var el = document.getElementById("scan-result");
+      el.hidden = false;
+      document.getElementById("scan-result-body").innerHTML =
+        '<div class="error">This scan is taking longer than expected. ' +
+        'Check server logs — the backend may have failed without reporting status.</div>';
+      return true;
+    }
+    return false;
+  }
 
   function _fallbackPoll() {
     clearTimeout(fallbackTimer);
     fallbackTimer = setTimeout(async function() {
       if (stopped) return;
+      if (_checkTimeout()) return;
       try {
         var result = await _supabase()
           .from("scan_runs")
@@ -177,6 +225,7 @@ function startPolling(runId) {
       { event: "UPDATE", schema: "public", table: "scan_runs", filter: "id=eq." + runId },
       function(payload) {
         if (stopped) return;
+        if (_checkTimeout(payload.new.status)) return;
         updateTracker(payload.new);
         _fallbackPoll();
         if (payload.new.status === "complete" || payload.new.status === "failed") {
@@ -192,6 +241,32 @@ function startPolling(runId) {
         _fallbackPoll();
       }
     });
+}
+
+async function _resumeRunningScan() {
+  var selectedScope = document.getElementById("scan-scope").value;
+  // Check both scopes for any running scan, preferring the selected one.
+  var scopes = selectedScope ? [selectedScope] : ["scope-a", "scope-b"];
+  for (var i = 0; i < scopes.length; i++) {
+    try {
+      var result = await _supabase()
+        .from("scan_runs")
+        .select("id,status,current_stage,result_summary,pr_links")
+        .eq("scope", scopes[i])
+        .eq("status", "running")
+        .order("started_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (result.data) {
+        document.getElementById("scan-scope").value = scopes[i];
+        document.getElementById("scan-submit").disabled = true;
+        document.getElementById("scan-submit").textContent = "Running...";
+        _resetStages();
+        startPolling(result.data.id);
+        return;
+      }
+    } catch (err) { /* continue to next scope */ }
+  }
 }
 
 document.addEventListener("DOMContentLoaded", function() {
@@ -237,6 +312,8 @@ document.addEventListener("DOMContentLoaded", function() {
       btn.textContent = "Run Scan";
     }
   });
+
+  _resumeRunningScan();
 });
 </script>
 </body>

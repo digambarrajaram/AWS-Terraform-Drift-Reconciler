@@ -54,6 +54,47 @@ def _get_llm():
         )
     return _llm
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from *text*."""
+    return _ANSI_RE.sub("", text)
+
+
+def humanize_terraform_error(raw_error: str) -> dict:
+    """Return ``{summary, detail, suggestion}`` for a terraform error."""
+    text = raw_error.lower() if raw_error else ""
+
+    patterns = [
+        (("nosuchbucket", "does not exist"), {
+            "summary": "The Terraform state backend for this scope isn't set up yet.",
+            "suggestion": "Confirm the S3 state bucket exists for this account/region before scanning.",
+        }),
+        (("invalidclienttokenid", "expiredtoken", "unrecognizedclientexception"), {
+            "summary": "AWS credentials for this scope are invalid or expired.",
+            "suggestion": "Check the IAM credentials/role configured for this scope.",
+        }),
+        (("accessdenied", "access denied"), {
+            "summary": "The configured AWS credentials don't have permission to read this scope's infrastructure.",
+            "suggestion": "Check IAM permissions for the scan role.",
+        }),
+        (("connection refused", "timeout", "could not connect"), {
+            "summary": "Couldn't reach AWS or the Terraform backend — possible network issue.",
+            "suggestion": "Check network connectivity and try again.",
+        }),
+    ]
+
+    for keywords, info in patterns:
+        if any(kw in text for kw in keywords):
+            return {"summary": info["summary"], "detail": raw_error, "suggestion": info["suggestion"]}
+
+    return {
+        "summary": "The Terraform plan failed with an unrecognised error.",
+        "detail": raw_error,
+        "suggestion": "See technical details below.",
+    }
+
+
 # ==========================================
 # 1. RUN TERRAFORM & DRIFT SCRIPTS
 # ==========================================
@@ -67,11 +108,13 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     print(f"Step 1: Running 'terraform plan' inside: {tf_dir}...")
     try:
         subprocess.run(
-            ["terraform", "plan", "-out=tfplan"],
+            ["terraform", "plan", "-no-color", "-out=tfplan"],
             cwd=tf_dir,
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.CalledProcessError as e:
         return f"Terraform Plan Failed:\n{e.stderr}"
@@ -79,11 +122,13 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     print("Step 2: Exporting plan to JSON using Native Python...")
     try:
         show_result = subprocess.run(
-            ["terraform", "show", "-json", "tfplan"],
+            ["terraform", "show", "-no-color", "-json", "tfplan"],
             cwd=tf_dir,
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
 
         plan_json_path = os.path.join(tf_dir, "plan.json")
@@ -102,6 +147,7 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
         "python",
         drift_script_path,
         target_plan_json,
+        "--account", _account_label,
     ]
     try:
         result = subprocess.run(
@@ -109,6 +155,8 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return result.stdout
     except subprocess.CalledProcessError as e:
@@ -124,6 +172,7 @@ class State(TypedDict):
     trivy_scanned: bool
     scan_unmanaged: bool
     run_id: str | None
+    terraform_failed: bool
 
 
 def map_risk(security_impact) -> str:
@@ -466,7 +515,7 @@ def unmanaged_scan_node(state: State):
         return {"messages": []}
 
     managed = unmanaged_scanner.load_managed_resources(_tf_dir)
-    findings = unmanaged_scanner.diff_unmanaged(live, managed, region=_region, tf_dir=_tf_dir)
+    findings = unmanaged_scanner.diff_unmanaged(live, managed, region=_region, tf_dir=_tf_dir, scope=_account_label)
 
     if not findings:
         print("  (every live resource is tracked in state)")
@@ -637,22 +686,26 @@ def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str]) -> tuple
     where outcome is ``"present"``, ``"no_diff"``, or ``"not_found"``."""
     try:
         plan_result = subprocess.run(
-            ["terraform", "plan", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
+            ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
             cwd=tf_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
         if plan_result.returncode != 0:
-            raise RuntimeError(f"terraform plan failed: {plan_result.stderr[:300]}")
+            raise RuntimeError(f"terraform plan failed: {_strip_ansi(plan_result.stderr)[:300]}")
     except subprocess.TimeoutExpired:
         raise RuntimeError("terraform plan timed out after 120s — check AWS credentials and state lock")
 
     show_result = subprocess.run(
-        ["terraform", "show", "-json", "tfplan"],
+        ["terraform", "show", "-no-color", "-json", "tfplan"],
         cwd=tf_dir,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     try:
         plan_json = json.loads(show_result.stdout)
@@ -1018,76 +1071,84 @@ if __name__ == "__main__":
         _run_rollback_preview(tf_dir, args.rollback_pr, args.account_label, args.run_id)
         sys.exit(0)
 
-    # Gather the data using our folder-aware pipeline
-    drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
-
-    if "Failed" in drift_report or "Error" in drift_report:
-        print("\nPipeline stopped due to errors:")
-        print(drift_report)
-        sys.exit(1)
-
-    _print_drift_exceptions(drift_report)
-
-    print("\nData fetched successfully. Sending to Amazon Nova...")
-    system_prompt = (
-        f"## Context\n"
-        f"Account: {_account_label}  |  Region: {_region}\n\n"
-        "## Input Format\n"
-        "The input follows this exact JSON structure (provided as raw string):\n"
-        "{\n"
-        "  \"report_type\": \"drift\"|\"no_drift\"|\"pending_changes\",\n"
-        "  \"resources\": [\n"
-        "    {\n"
-        "      \"address\": \"resource_type.resource_name\",\n"
-        "      \"changes\": {\n"
-        "        \"field_name\": {\"before\": \"value\", \"after\": \"value\"},\n"
-        "        ...\n"
-        "      },\n"
-        "      \"status\": null|\"deleted_externally\",\n"
-        "      \"sensitive\": true|false,\n"
-        "      \"security_impact\": null|\"low\"|\"medium\"|\"high\"\n"
-        "    },\n"
-        "    ...\n"
-        "  ],\n"
-        "  \"pending_operations\": [\n"
-        "    {\"action\": \"create\"|\"delete\", \"address\": \"resource_type.resource_name\"},\n"
-        "    ...\n"
-        "  ]\n"
-        "}\n\n"
-
-        "## Analysis Rules\n"
-        "1. Treat ONLY resources in the 'resources' array with 'changes' as actual drift\n"
-        "2. 'pending_operations' are informational - never propose changes for these\n"
-        "3. For each drifted field, show:\n"
-        "   - Change reason (if evident from field patterns)\n"
-        "   - Exact HCL modification needed to reconcile\n"
-        "   - Security impact level from the report\n"
-        "4. Highlight HIGH impact changes with: ⚠️ [SECURITY REVIEW REQUIRED]\n"
-        "5. Assume live AWS state is authoritative unless change appears clearly erroneous\n"
-        "6. SPECIAL CASE — status == 'deleted_externally': the resource block was REMOVED from\n"
-        "   live AWS but still exists in Terraform code/state. Because live AWS state is\n"
-        "   authoritative (rule 5), the correct reconciliation is to REMOVE this resource's\n"
-        "   block from the .tf file — NOT to re-add or restore it. Phrase the fix as\n"
-        "   'Remove resource.<address> from Terraform configuration to match live AWS state'\n"
-        "   and never suggest re-adding, restoring, or recreating a deleted_externally resource.\n"
-        "7. For findings that include a ``cost_impact`` field, include the estimated\n"
-        "   monthly cost in your analysis and flag any resource costing more than\n"
-        "   $50/mo with ⚠️ COST WARNING.\n\n"
-    )
-
-    user_query = f"Here is the processed drift report data:\n\n{drift_report}\n\nProvide a plan to resolve this drift."
-
-    initial_state = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query}
-        ],
-        "trivy_scanned": False,
-        "scan_unmanaged": args.scan_unmanaged,
-        "run_id": args.run_id,
-    }
-
     try:
+        # Gather the data using our folder-aware pipeline
+        drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
+
+        _terraform_failed = False
+
+        if "Failed" in drift_report or "Error" in drift_report:
+            if args.scan_unmanaged:
+                print(f"\n⚠  Terraform plan failed — proceeding with unmanaged scan only.")
+                print(_strip_ansi(drift_report))
+                drift_report = json.dumps({"report_type": "no_drift", "resources": []})
+                _terraform_failed = True
+            else:
+                raise RuntimeError(f"Terraform pipeline failed:\n{_strip_ansi(drift_report)}")
+
+        _print_drift_exceptions(drift_report)
+
+        if not _terraform_failed:
+            print("\nData fetched successfully. Sending to Amazon Nova...")
+        system_prompt = (
+            f"## Context\n"
+            f"Account: {_account_label}  |  Region: {_region}\n\n"
+            "## Input Format\n"
+            "The input follows this exact JSON structure (provided as raw string):\n"
+            "{\n"
+            "  \"report_type\": \"drift\"|\"no_drift\"|\"pending_changes\",\n"
+            "  \"resources\": [\n"
+            "    {\n"
+            "      \"address\": \"resource_type.resource_name\",\n"
+            "      \"changes\": {\n"
+            "        \"field_name\": {\"before\": \"value\", \"after\": \"value\"},\n"
+            "        ...\n"
+            "      },\n"
+            "      \"status\": null|\"deleted_externally\",\n"
+            "      \"sensitive\": true|false,\n"
+            "      \"security_impact\": null|\"low\"|\"medium\"|\"high\"\n"
+            "    },\n"
+            "    ...\n"
+            "  ],\n"
+            "  \"pending_operations\": [\n"
+            "    {\"action\": \"create\"|\"delete\", \"address\": \"resource_type.resource_name\"},\n"
+            "    ...\n"
+            "  ]\n"
+            "}\n\n"
+
+            "## Analysis Rules\n"
+            "1. Treat ONLY resources in the 'resources' array with 'changes' as actual drift\n"
+            "2. 'pending_operations' are informational - never propose changes for these\n"
+            "3. For each drifted field, show:\n"
+            "   - Change reason (if evident from field patterns)\n"
+            "   - Exact HCL modification needed to reconcile\n"
+            "   - Security impact level from the report\n"
+            "4. Highlight HIGH impact changes with: ⚠️ [SECURITY REVIEW REQUIRED]\n"
+            "5. Assume live AWS state is authoritative unless change appears clearly erroneous\n"
+            "6. SPECIAL CASE — status == 'deleted_externally': the resource block was REMOVED from\n"
+            "   live AWS but still exists in Terraform code/state. Because live AWS state is\n"
+            "   authoritative (rule 5), the correct reconciliation is to REMOVE this resource's\n"
+            "   block from the .tf file — NOT to re-add or restore it. Phrase the fix as\n"
+            "   'Remove resource.<address> from Terraform configuration to match live AWS state'\n"
+            "   and never suggest re-adding, restoring, or recreating a deleted_externally resource.\n"
+            "7. For findings that include a ``cost_impact`` field, include the estimated\n"
+            "   monthly cost in your analysis and flag any resource costing more than\n"
+            "   $50/mo with ⚠️ COST WARNING.\n\n"
+        )
+
+        user_query = f"Here is the processed drift report data:\n\n{drift_report}\n\nProvide a plan to resolve this drift."
+
+        initial_state = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ],
+            "trivy_scanned": False,
+            "scan_unmanaged": args.scan_unmanaged,
+            "run_id": args.run_id,
+            "terraform_failed": _terraform_failed,
+        }
+
         agent_output = ""
         for event in graph.stream(initial_state):
             for node, data in event.items():
@@ -1100,33 +1161,41 @@ if __name__ == "__main__":
         # Print out to the terminal as usual
         print(f"\n[Agent Response]:\n{agent_output}")
 
-        # Automatically export the solution to a Markdown file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
-        report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
-        report_path = os.path.join(tf_dir, report_filename)
-
-        try:
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write(f"# Terraform Drift Reconciliation Report\n")
-                f.write(f"**Account:** {_account_label}  \n")
-                f.write(f"**Region:** {_region}  \n")
-                f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
-                f.write(agent_output)
-            print(f"\n[Success] Report successfully written to: {report_path}")
-        except Exception as e:
-            print(f"\n[Warning] Failed to write report file: {str(e)}")
-
         # Mark scan as complete.
         if _run_id:
             from scan_runs import update_scan_run
             from datetime import datetime as dt, timezone
+            summary = {}
+
+            if not _terraform_failed:
+                # Write a report only when terraform actually ran.
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
+                report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
+                report_path = os.path.join(tf_dir, report_filename)
+                try:
+                    with open(report_path, "w", encoding="utf-8") as f:
+                        f.write(f"# Terraform Drift Reconciliation Report\n")
+                        f.write(f"**Account:** {_account_label}  \n")
+                        f.write(f"**Region:** {_region}  \n")
+                        f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                        f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
+                        f.write(agent_output)
+                    print(f"\n[Success] Report successfully written to: {report_path}")
+                    summary["report_path"] = report_path
+                except Exception as e:
+                    print(f"\n[Warning] Failed to write report file: {str(e)}")
+                    summary["report_path"] = f"(write failed: {e})"
+            else:
+                print("\n[Notice] Terraform plan skipped — unmanaged-only scan, no markdown report generated.")
+                summary["notice"] = "Terraform state backend unavailable — only unmanaged resources were scanned. Configuration drift was not checked."
+                summary["skipped_stages"] = ["reconcile_agent", "trivy_gate"]
+
             update_scan_run(
                 _run_id,
                 status="complete",
                 completed_at=dt.now(timezone.utc).isoformat(),
-                result_summary={"report_path": report_path},
+                result_summary=summary,
             )
     except Exception as e:
         if _run_id:
@@ -1137,7 +1206,7 @@ if __name__ == "__main__":
                     _run_id,
                     status="failed",
                     completed_at=dt.now(timezone.utc).isoformat(),
-                    result_summary={"error": str(e)},
+                    result_summary=humanize_terraform_error(str(e)),
                 )
             except Exception as se:
                 print(f"  [scan_runs] Failed to mark scan as failed: {se}")

@@ -13,6 +13,8 @@ import subprocess
 import sys
 from typing import Any
 
+import requests
+
 import boto3
 
 
@@ -107,10 +109,12 @@ def load_managed_resources(tf_dir: str) -> list[dict[str, Any]]:
     Runs ``terraform show -json`` which works for both local and remote
     (S3) backends — no need to parse backend.tf manually."""
     result = subprocess.run(
-        ["terraform", "show", "-json"],
+        ["terraform", "show", "-no-color", "-json"],
         cwd=tf_dir,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         print(f"  ⚠ terraform show -json failed: {result.stderr[:400]}")
@@ -135,21 +139,28 @@ def load_managed_resources(tf_dir: str) -> list[dict[str, Any]]:
 # Diff engine
 # ---------------------------------------------------------------------------
 
-def _load_exceptions(tf_dir: str) -> list[dict[str, Any]]:
-    """Load the unmanaged-exceptions.json registry from *tf_dir*.
+def _load_exceptions(scope: str) -> list[dict[str, Any]]:
+    """Load unmanaged exception entries for *scope* from Supabase.
 
-    Returns an empty list when the file is missing or unreadable
+    Returns an empty list when the table is empty or unreachable
     (the scan proceeds without suppression)."""
-    path = os.path.join(tf_dir, "unmanaged-exceptions.json")
-    if not os.path.isfile(path):
-        return []
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"  ⚠ Could not parse {path}: {exc}")
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            return []
+        resp = requests.get(
+            f"{url}/rest/v1/drift_exception_registry"
+            f"?select=resource_type,resource_id_pattern,reason,approved_by,max_monthly_cost_usd"
+            f"&scope=eq.{scope}&exception_type=eq.unmanaged&active=eq.true",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json() if resp.text else []
         return []
-    return data.get("exceptions", [])
+    except requests.RequestException:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +330,13 @@ def diff_unmanaged(
     managed_resources: list[dict[str, Any]],
     region: str,
     tf_dir: str | None = None,
+    scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Subtract *managed_resources* from *live_resources* and classify
     the remainder.
 
-    When *tf_dir* is provided, ``unmanaged-exceptions.json`` in that
-    directory is consulted to suppress known / accepted resources.
+    When *scope* is provided, unmanaged exceptions for that scope are
+    loaded from Supabase to suppress known / accepted resources.
 
     Returns a list of findings in the same shape the existing drift
     pipeline expects (``resource_id``, ``risk_level``, ``drift_summary``,
@@ -339,7 +351,7 @@ def diff_unmanaged(
             managed_arns.add(r["arn"])
         managed_keys.add((r["type"], r["name"]))
 
-    exceptions = _load_exceptions(tf_dir) if tf_dir else []
+    exceptions = _load_exceptions(scope) if scope else []
 
     findings: list[dict[str, Any]] = []
     for live in live_resources:

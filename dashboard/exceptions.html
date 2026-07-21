@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Exceptions</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Exceptions</h1>
+    <nav class="scope-tabs">
+      <button class="scope-tab active" data-scope="scope-a">scope-a</button>
+      <button class="scope-tab" data-scope="scope-b">scope-b</button>
+    </nav>
+    <nav class="site-nav">
+      <a href="/">Dashboard</a>
+      <a href="/explorer">Explorer</a>
+      <a href="/scan">Scan</a>
+      <a href="/rollback">Rollback</a>
+      <a href="/trends">Trends</a>
+      <a href="/exceptions" class="active">Exceptions</a>
+    </nav>
+  </header>
+
+  <main>
+    <section>
+      <h2>Drift Exceptions</h2>
+      <p class="empty" style="margin-bottom:16px">Suppress drift findings on specific resources by address. An exception with <code>auto: true</code> applies without human review; otherwise it requires manual acknowledgement.</p>
+      <form id="drift-form" class="exception-form">
+        <label>Resource Address <input type="text" name="resource_address" placeholder="aws_instance.example" required></label>
+        <label>Drift Type <input type="text" name="drift_type" placeholder="ingress, *, or field name" required></label>
+        <label>Reason <input type="text" name="reason" placeholder="Why this drift is accepted" required></label>
+        <label>Approved By <input type="text" name="approved_by" placeholder="your-name"></label>
+        <label>Expires (YYYY-MM-DD) <input type="date" name="expires"></label>
+        <label class="checkbox-label"><input type="checkbox" name="auto"> Auto-suppress (no human review)</label>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Submit</button>
+          <button type="button" class="btn-cancel" data-for="drift-form">Cancel</button>
+        </div>
+      </form>
+      <table class="explorer" id="drift-exceptions-table">
+        <thead>
+          <tr>
+            <th>Resource Address</th>
+            <th>Drift Type</th>
+            <th>Reason</th>
+            <th>Approved By</th>
+            <th>Expires</th>
+            <th>Auto</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="drift-exceptions-body"></tbody>
+      </table>
+    </section>
+
+    <section style="margin-top:32px">
+      <h2>Unmanaged Exceptions</h2>
+      <p class="empty" style="margin-bottom:16px">Suppress unmanaged-resource findings by resource type and ID pattern. Optionally cap by monthly cost — only resources below the threshold are suppressed.</p>
+      <form id="unmanaged-form" class="exception-form">
+        <label>Resource Type <input type="text" name="resource_type" placeholder="aws_security_group" required></label>
+        <label>Resource ID Pattern <input type="text" name="resource_id_pattern" placeholder="launch-wizard" required></label>
+        <label>Reason <input type="text" name="reason" placeholder="Why this resource is accepted outside Terraform" required></label>
+        <label>Approved By <input type="text" name="approved_by" placeholder="your-name"></label>
+        <label>Max Monthly Cost (USD) <input type="number" name="max_monthly_cost_usd" placeholder="5.00" step="0.01" min="0"></label>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Submit</button>
+          <button type="button" class="btn-cancel" data-for="unmanaged-form">Cancel</button>
+        </div>
+      </form>
+      <table class="explorer" id="unmanaged-exceptions-table">
+        <thead>
+          <tr>
+            <th>Resource Type</th>
+            <th>ID Pattern</th>
+            <th>Reason</th>
+            <th>Approved By</th>
+            <th>Max Cost (USD)</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="unmanaged-exceptions-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="exceptions.js"></script>
+</body>
+</html>

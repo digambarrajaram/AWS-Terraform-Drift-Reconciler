@@ -420,15 +420,47 @@ def trivy_gate(state: State):
     return {"trivy_scanned": True, "drift_findings": findings}
 
 
+def _load_routing_rules() -> dict[str, str]:
+    """Return ``{severity: channel}`` from Supabase, with scope-specific
+    rules overriding global defaults.  Falls back to hardcoded defaults
+    if Supabase is unreachable or the table is empty."""
+    import os as _os
+    import requests as _requests
+    try:
+        url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            raise RuntimeError("no Supabase creds")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        # Fetch all rules at once — ~6 rows max, no pagination needed.
+        resp = _requests.get(
+            f"{url}/rest/v1/severity_routing_rules?select=severity,channel,scope",
+            headers=headers, timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+        rows = resp.json() if resp.text else []
+        if not rows:
+            raise RuntimeError("empty table")
+
+        # Global rules first (scope is null), then scope-specific overrides.
+        rules: dict[str, str] = {}
+        for r in rows:
+            if r.get("scope") is None:
+                rules[r["severity"]] = r["channel"]
+        for r in rows:
+            if r.get("scope") == _account_label:
+                rules[r["severity"]] = r["channel"]
+        return rules
+    except Exception:
+        # Hardcoded fallback — never silently drop alerts.
+        return {"HIGH": "pagerduty", "MEDIUM": "slack", "LOW": "slack"}
+
+
 def drift_alert(state: State):
     report_stage(state.get("run_id"), "drift_alert")
-    """Route findings by severity.
-
-    HIGH          → PagerDuty page (on-call gets paged immediately).
-    MEDIUM / LOW  → Slack channel post (no page, informational only).
-
-    This project uses a HIGH | MEDIUM | LOW risk model.  There is no
-    CRITICAL tier — the word appears nowhere in the codebase."""
+    """Route findings by severity using Supabase routing rules, falling
+    back to hardcoded HIGH→PagerDuty / else→Slack if unreachable."""
     if not state.get("drift_detected"):
         return {"messages": []}
 
@@ -437,11 +469,13 @@ def drift_alert(state: State):
     if not active:
         return {"messages": []}
 
-    high_findings = [f for f in active if f.get("risk_level") == "HIGH"]
-    low_med_findings = [f for f in active if f.get("risk_level") != "HIGH"]
+    rules = _load_routing_rules()
 
-    # HIGH → page the on-call.
-    for finding in high_findings:
+    pd_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "pagerduty"]
+    slack_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "slack"]
+
+    # PagerDuty → one page per finding.
+    for finding in pd_findings:
         if finding.get("status") in ("unmanaged", "unmanaged_tagged"):
             event_type = "Unmanaged resource"
         else:
@@ -458,9 +492,9 @@ def drift_alert(state: State):
             account_label=_account_label,
         )
 
-    # MEDIUM / LOW → Slack channel post (batched, no page).
-    if low_med_findings:
-        slack.notify_all(low_med_findings, _account_label)
+    # Slack → batched.
+    if slack_findings:
+        slack.notify_all(slack_findings, _account_label)
 
     return {"messages": []}
 def drift_pr_from_finding(state: State):

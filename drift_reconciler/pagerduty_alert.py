@@ -8,7 +8,17 @@ def trigger_pagerduty_alert(summary: str, severity: str = "error", source: str =
     automatically scoped so identical resource addresses in different
     accounts never collide (dedup) and operators can tell at a glance
     which account is affected (summary)."""
-    routing_key = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip()
+    routing_key = ""
+    try:
+        from notification_config import get_notification_secrets
+        secrets = get_notification_secrets()
+        key = (secrets.get("pagerduty_routing_key") or "").strip()
+        if key:
+            routing_key = key
+    except Exception:
+        pass
+    if not routing_key:
+        routing_key = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip()
     if not routing_key:
         print("[ERROR] PAGERDUTY_ROUTING_KEY is empty!")
         return {}

@@ -54,7 +54,17 @@ def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
             {"type": "section", "fields": fields},
         ]
 
-        webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+        webhook_url = ""
+        try:
+            from notification_config import get_notification_secrets
+            secrets = get_notification_secrets()
+            url = (secrets.get("slack_webhook_url") or "").strip()
+            if url:
+                webhook_url = url
+        except Exception:
+            pass
+        if not webhook_url:
+            webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         if not webhook_url:
             print("[slack] SLACK_WEBHOOK_URL is empty — skipping batch")
             return sent

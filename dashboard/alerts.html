@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Alerts</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Alerts</h1>
+    <nav class="site-nav">
+      <a href="/">Dashboard</a>
+      <a href="/explorer">Explorer</a>
+      <a href="/scan">Scan</a>
+      <a href="/rollback">Rollback</a>
+      <a href="/trends">Trends</a>
+      <a href="/exceptions">Exceptions</a>
+      <a href="/alerts" class="active">Alerts</a>
+    </nav>
+  </header>
+
+  <main>
+    <!-- PagerDuty -->
+    <section style="margin-bottom:32px">
+      <h2>PagerDuty</h2>
+      <div class="card">
+        <div class="card-body">
+          <p>Status: <span id="pd-status">—</span></p>
+          <p>Routing key: <code id="pd-masked">—</code></p>
+          <form id="pd-form" class="inline-form">
+            <label>Routing key <input type="password" name="value" placeholder="Enter PagerDuty routing key" required></label>
+            <button type="submit" class="btn-primary" id="pd-save-btn">Save</button>
+            <span class="form-result" id="pd-result"></span>
+          </form>
+          <button type="button" class="btn-preview" id="pd-test-btn" style="margin-top:8px">Send test alert</button>
+          <span id="pd-test-result"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slack -->
+    <section style="margin-bottom:32px">
+      <h2>Slack</h2>
+      <div class="card">
+        <div class="card-body">
+          <p>Status: <span id="slack-status">—</span></p>
+          <p>Webhook URL: <code id="slack-masked">—</code></p>
+          <form id="slack-form" class="inline-form">
+            <label>Webhook URL <input type="password" name="value" placeholder="https://hooks.slack.com/services/..." required></label>
+            <button type="submit" class="btn-primary" id="slack-save-btn">Save</button>
+            <span class="form-result" id="slack-result"></span>
+          </form>
+          <button type="button" class="btn-preview" id="slack-test-btn" style="margin-top:8px">Send test alert</button>
+          <span id="slack-test-result"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Severity Routing -->
+    <section>
+      <h2>Severity Routing</h2>
+      <table class="explorer" id="routing-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Channel</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="routing-body">
+          <tr data-severity="HIGH">
+            <td>HIGH</td>
+            <td><select class="routing-select"><option value="pagerduty">PagerDuty</option><option value="slack">Slack</option></select></td>
+            <td><button class="btn-preview routing-save">Save</button></td>
+          </tr>
+          <tr data-severity="MEDIUM">
+            <td>MEDIUM</td>
+            <td><select class="routing-select"><option value="pagerduty">PagerDuty</option><option value="slack" selected>Slack</option></select></td>
+            <td><button class="btn-preview routing-save">Save</button></td>
+          </tr>
+          <tr data-severity="LOW">
+            <td>LOW</td>
+            <td><select class="routing-select"><option value="pagerduty">PagerDuty</option><option value="slack" selected>Slack</option></select></td>
+            <td><button class="btn-preview routing-save">Save</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <div id="routing-result" style="margin-top:8px"></div>
+    </section>
+  </main>
+
+  <script src="alerts.js"></script>
+</body>
+</html>

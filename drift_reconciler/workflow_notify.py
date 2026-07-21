@@ -40,7 +40,17 @@ def main() -> int:
     icon = ICONS.get(outcome, ":grey_question:")
     message = MESSAGES.get(outcome, f"Unknown outcome: {outcome}")
 
-    webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    webhook_url = ""
+    try:
+        from notification_config import get_notification_secrets
+        secrets = get_notification_secrets()
+        url = (secrets.get("slack_webhook_url") or "").strip()
+        if url:
+            webhook_url = url
+    except Exception:
+        pass
+    if not webhook_url:
+        webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
     if not webhook_url:
         print("[workflow-notify] SLACK_WEBHOOK_URL is empty — skipping")
         return 0

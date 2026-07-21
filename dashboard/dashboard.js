@@ -249,18 +249,16 @@ function _setScope(scope) {
 
 function _readScopeFromURL() {
   const p = new URLSearchParams(window.location.search);
-  const scope = p.get("scope");
-  return scope === "scope-b" ? "scope-b" : "scope-a";
+  return p.get("scope") || "";
 }
 
 // Bootstrap
 document.addEventListener("DOMContentLoaded", () => {
-  document.querySelectorAll(".scope-tab").forEach(tab => {
-    tab.addEventListener("click", () => _setScope(tab.dataset.scope));
+  var urlScope = _readScopeFromURL();
+  window.EnvSelector.renderEnvTabs(".scope-tabs", _setScope, urlScope).then(function () {
+    var scope = urlScope || window.EnvSelector.getDefaultEnvironment(/* from cache */);
+    if (scope) _setScope(scope);
   });
-
-  const scope = _readScopeFromURL();
-  _setScope(scope);
 
   // Fallback poll — keeps cards fresh if realtime disconnects.
   _pollTimer = setInterval(() => refreshAll(scope), 60_000);

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="supabase-url" content="__SUPABASE_URL__">
+  <meta name="supabase-anon-key" content="__SUPABASE_ANON_KEY__">
+  <title>Drift Reconciler — Environments</title>
+  <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Drift Reconciler — Environments</h1>
+    <nav class="site-nav">
+      <a href="/">Dashboard</a>
+      <a href="/explorer">Explorer</a>
+      <a href="/scan">Scan</a>
+      <a href="/rollback">Rollback</a>
+      <a href="/trends">Trends</a>
+      <a href="/exceptions">Exceptions</a>
+      <a href="/alerts">Alerts</a>
+      <a href="/environments" class="active">Environments</a>
+    </nav>
+  </header>
+
+  <main>
+    <section>
+      <h2>Add Environment</h2>
+      <p class="empty" style="margin-bottom:16px">Register infrastructure that already exists — IAM roles, GitHub Secrets/Variables, and Terraform directories must be created beforehand. This page only records the wiring metadata.</p>
+      <form id="add-form" class="exception-form">
+        <label>Name <input type="text" name="name" placeholder="Production A" required></label>
+        <label>Slug <input type="text" name="slug" placeholder="scope-a" required pattern="[a-z0-9][a-z0-9-]*"></label>
+        <label>AWS Account ID <input type="text" name="aws_account_id" placeholder="123456789012" required></label>
+        <label>AWS Profile <input type="text" name="aws_profile" placeholder="account-a"></label>
+        <label>Region <input type="text" name="region" placeholder="us-east-1" required></label>
+        <label>TF State Bucket <input type="text" name="tf_state_bucket" placeholder="scope-a-tf-state-123" required></label>
+        <label>TF Lock Table <input type="text" name="tf_lock_table" placeholder="terraform-locks"></label>
+        <label>
+          TF Directory Path
+          <input type="text" name="tf_directory_path" placeholder="terraform_code/ec2_terraform_account_a" required>
+          <span class="empty">Must exist in the repo.</span>
+        </label>
+        <label>
+          Scan Role Variable
+          <input type="text" name="scan_role_variable" placeholder="SCOPE_A_SCAN_ROLE_ARN">
+          <span class="empty">GitHub Actions Variable — must exist already.</span>
+        </label>
+        <label>
+          Apply Role Secret
+          <input type="text" name="apply_role_secret_name" placeholder="SCOPE_A_APPLY_ROLE_ARN">
+          <span class="empty">GitHub Secret — must exist already.</span>
+        </label>
+        <label>
+          Apply Environment
+          <input type="text" name="apply_environment_name" placeholder="scope-a-apply">
+          <span class="empty">GitHub Environment — must exist with required reviewers set.</span>
+        </label>
+        <hr style="grid-column:1/-1; border-color:#30363d; margin:4px 0">
+        <label>
+          Git Repo URL
+          <input type="text" name="repo_url" placeholder="https://github.com/org/repo.git">
+          <span class="empty">Leave blank to use local tf_directory_path instead.</span>
+        </label>
+        <label>
+          Git Branch
+          <input type="text" name="repo_branch" placeholder="main">
+        </label>
+        <label>
+          Git Auth
+          <select name="git_auth_type" id="git-auth-type-add">
+            <option value="">none</option>
+            <option value="token">token</option>
+          </select>
+        </label>
+        <label id="github-token-add-group" style="display:none">
+          GitHub Token
+          <input type="password" name="github_token" placeholder="ghp_...">
+          <span class="empty">Stored in environment_secrets — never visible after save.</span>
+        </label>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Add Environment</button>
+          <span class="form-result" id="add-result"></span>
+        </div>
+      </form>
+    </section>
+
+    <section style="margin-top:32px">
+      <h2>Registered Environments</h2>
+      <table class="explorer" id="env-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Slug</th>
+            <th>Region</th>
+            <th>Account</th>
+            <th>Active</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="env-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="env-selector.js"></script>
+  <script src="environments.js"></script>
+</body>
+</html>

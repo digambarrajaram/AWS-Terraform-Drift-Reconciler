@@ -201,7 +201,7 @@ function _onRowClick(event) {
 
 const filters = {
   severity: "",
-  account: "scope-a",
+  account: "",
   status: ["open"],
   pr_type: "",
   search: "",
@@ -217,7 +217,7 @@ async function _onFilterChange() {
   const url = new URL(window.location);
   if (filters.severity) url.searchParams.set("severity", filters.severity);
   else url.searchParams.delete("severity");
-  if (filters.account && filters.account !== "scope-a") url.searchParams.set("account", filters.account);
+  if (filters.account) url.searchParams.set("account", filters.account);
   else url.searchParams.delete("account");
   if (filters.status.length === 1) url.searchParams.set("status", filters.status[0]);
   else if (filters.status.length > 1) url.searchParams.set("status", filters.status.join(","));
@@ -315,6 +315,15 @@ document.addEventListener("DOMContentLoaded", () => {
     renderTable(rows, { append: true, hasMore });
   });
 
-  // Initial fetch.
-  _onFilterChange();
+  // Use EnvSelector for scope tabs — replace hardcoded scope defaults.
+  var urlScope = new URLSearchParams(window.location.search).get("account");
+  window.EnvSelector.renderEnvTabs(".scope-tabs", function (slug) {
+    filters.account = slug;
+    _onFilterChange();
+  }, urlScope).then(function () {
+    if (!filters.account) {
+      filters.account = urlScope || window.EnvSelector.getDefaultEnvironment();
+    }
+    _onFilterChange();
+  });
 });

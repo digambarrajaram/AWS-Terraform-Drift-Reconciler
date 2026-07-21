@@ -8,6 +8,7 @@
   <title>Drift Reconciler — Run Scan</title>
   <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="env-selector.js" defer></script>
 </head>
 <body>
   <header>
@@ -20,17 +21,16 @@
       <a href="/trends">Trends</a>
       <a href="/exceptions">Exceptions</a>
       <a href="/alerts">Alerts</a>
+      <a href="/environments">Environments</a>
     </nav>
   </header>
 
   <main>
     <form id="scan-form" class="scan-form">
       <label class="filter-group">
-        Scope
+        Environment
         <select id="scan-scope" required>
-          <option value="">Select scope...</option>
-          <option value="scope-a">scope-a</option>
-          <option value="scope-b">scope-b</option>
+          <option value="">Select environment...</option>
         </select>
       </label>
 
@@ -246,8 +246,10 @@ function startPolling(runId) {
 
 async function _resumeRunningScan() {
   var selectedScope = document.getElementById("scan-scope").value;
-  // Check both scopes for any running scan, preferring the selected one.
-  var scopes = selectedScope ? [selectedScope] : ["scope-a", "scope-b"];
+  // Check all active environments for any running scan.
+  var envs = window.EnvSelector ? await window.EnvSelector.fetchEnvironments().catch(function() { return []; }) : [];
+  var slugs = envs.map(function(e) { return e.slug; });
+  var scopes = selectedScope ? [selectedScope] : slugs;
   for (var i = 0; i < scopes.length; i++) {
     try {
       var result = await _supabase()
@@ -313,6 +315,17 @@ document.addEventListener("DOMContentLoaded", function() {
       btn.textContent = "Run Scan";
     }
   });
+
+  // Populate scope dropdown from environments.
+  window.EnvSelector.fetchEnvironments().then(function(envs) {
+    var sel = document.getElementById("scan-scope");
+    envs.forEach(function(env) {
+      var opt = document.createElement("option");
+      opt.value = env.slug;
+      opt.textContent = env.name + " (" + env.region + ")";
+      sel.appendChild(opt);
+    });
+  }).catch(function() {});
 
   _resumeRunningScan();
 });

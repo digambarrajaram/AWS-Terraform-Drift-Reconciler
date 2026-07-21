@@ -19,6 +19,7 @@ from langchain_aws import ChatBedrockConverse
 from langgraph.graph import StateGraph, START, END
 import pagerduty_alert as pga
 import slack_notify as slack
+from drift_reconciler.environment_credentials import get_aws_session
 import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
@@ -81,6 +82,10 @@ def humanize_terraform_error(raw_error: str) -> dict:
         (("connection refused", "timeout", "could not connect"), {
             "summary": "Couldn't reach AWS or the Terraform backend — possible network issue.",
             "suggestion": "Check network connectivity and try again.",
+        }),
+        (("profilenotfound", "profile", "could not be found"), {
+            "summary": "The AWS profile configured for this environment doesn't exist on this machine.",
+            "suggestion": "Create the AWS named profile in ~/.aws/config, or update the environment's profile via the Environments page.",
         }),
     ]
 
@@ -543,7 +548,28 @@ def unmanaged_scan_node(state: State):
         return {"messages": []}
 
     print("\n--- Unmanaged resource scan ---")
-    live = unmanaged_scanner.scan_unmanaged_resources(_region)
+    try:
+        # Resolve environment row and build AWS session.
+        import os as _os
+        import requests as _requests
+        env_dict = {}
+        url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if url and key:
+            resp = _requests.get(
+                f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                env_dict = resp.json()[0]
+        if not env_dict:
+            raise RuntimeError(f"No environment found for slug '{_account_label}' — check the environments table.")
+        session = get_aws_session(env_dict)
+        live = unmanaged_scanner.scan_unmanaged_resources(session, _region)
+    except Exception as e:
+        raise
+
     if not live:
         print("  (no live resources found)")
         return {"messages": []}
@@ -1002,8 +1028,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tf-dir",
-        default=os.getcwd(),
-        help="Path to the terraform directory to scan for drift",
+        default=None,
+        help="Path to the terraform directory to scan for drift (default: resolved from environment)",
     )
     parser.add_argument(
         "--region",
@@ -1081,12 +1107,6 @@ if __name__ == "__main__":
         print(f"\n[Success] Trends report written to: {output_path}")
         sys.exit(0)
 
-    tf_dir = os.path.abspath(args.tf_dir)
-    if not os.path.isdir(tf_dir):
-        print(f"Error: directory not found — {tf_dir}")
-        sys.exit(1)
-    _tf_dir = tf_dir
-
     if args.rollback:
         if not args.rollback_pr:
             print("Error: --rollback-pr is required with --rollback")
@@ -1106,6 +1126,36 @@ if __name__ == "__main__":
         sys.exit(0)
 
     try:
+        # Resolve tf_dir: explicit override, or derived from environment.
+        if args.tf_dir is not None:
+            tf_dir = os.path.abspath(args.tf_dir)
+        else:
+            import os as _os
+            import requests as _requests
+            url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+            key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+            env_dict = {}
+            if url and key:
+                resp = _requests.get(
+                    f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
+                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                    timeout=10,
+                )
+                if resp.status_code == 200 and resp.json():
+                    env_dict = resp.json()[0]
+            if not env_dict:
+                raise RuntimeError(
+                    f"No environment found for slug '{_account_label}' — "
+                    f"cannot resolve terraform directory."
+                )
+            from drift_reconciler.environment_credentials import resolve_tf_dir
+            tf_dir = resolve_tf_dir(env_dict)
+
+        if not os.path.isdir(tf_dir):
+            raise RuntimeError(f"Terraform directory not found: {tf_dir}")
+
+        _tf_dir = tf_dir
+
         # Gather the data using our folder-aware pipeline
         drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
 

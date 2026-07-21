@@ -171,7 +171,7 @@ function renderDiff(diff) {
 }
 
 let _currentPrNumber = null;
-let _currentScope = "scope-a";
+let _currentScope = "";
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("rollback-confirm").addEventListener("click", async () => {
@@ -243,7 +243,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
   try {
-    const rows = await fetchEligiblePRs("scope-a");
+    const rows = await fetchEligiblePRs(window.EnvSelector ? window.EnvSelector.getDefaultEnvironment() : "scope-a");
     renderRollbackList(rows);
   } catch (err) {
     document.getElementById("rollback-list-body").innerHTML =

@@ -1,4 +1,4 @@
-var _currentScope = "scope-a";
+var _currentScope = "";
 
 async function fetchExceptions(scope) {
   var resp = await fetch("/api/exceptions?scope=" + encodeURIComponent(scope));
@@ -232,18 +232,13 @@ function _setupForm(formId, exceptionType) {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
-  document.querySelectorAll(".scope-tab").forEach(function(tab) {
-    tab.addEventListener("click", function() {
-      var scope = tab.dataset.scope;
-      if (scope === _currentScope) return;
-      document.querySelectorAll(".scope-tab").forEach(function(t) { t.classList.remove("active"); });
-      tab.classList.add("active");
-      refreshExceptions(scope);
-    });
-  });
-
   _setupForm("drift-form", "drift");
   _setupForm("unmanaged-form", "unmanaged");
 
-  refreshExceptions(_currentScope);
+  window.EnvSelector.renderEnvTabs(".scope-tabs", function(scope) {
+    refreshExceptions(scope);
+  }).then(function() {
+    var scope = window.EnvSelector.getDefaultEnvironment();
+    if (scope) refreshExceptions(scope);
+  });
 });

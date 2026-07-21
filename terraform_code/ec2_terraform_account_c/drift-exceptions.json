@@ -1,0 +1,19 @@
+{
+  "_description": "Resource addresses whose drift is accepted and should not trigger alerts or PRs. resource_address can be an exact match or a prefix (e.g. 'aws_security_group.' matches all SGs). drift_type can be a field name, 'ingress', 'egress', 'deleted_externally', or '*' for all drift on this resource. expires is optional — omit for permanent exceptions. Set 'auto': true for exceptions that apply without human review (e.g. ASG-managed drift) — defaults to false (requires manual acknowledgement).",
+  "_example": {
+    "resource_address": "aws_security_group.drift_web_ssh_sg",
+    "drift_type": "ingress",
+    "reason": "Security group rules managed via AWS Firewall Manager",
+    "approved_by": "security-team",
+    "approved_date": "2026-07-14",
+    "expires": "2027-01-14"
+  },
+  "_example_auto": {
+    "resource_address": "aws_autoscaling_group.web_asg",
+    "drift_type": "desired_capacity",
+    "reason": "ASG desired capacity changes are expected during scaling",
+    "auto": true
+  },
+  "exceptions": [
+  ]
+}

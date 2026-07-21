@@ -698,6 +698,7 @@ _SCANNERS = {
 # ---------------------------------------------------------------------------
 
 def scan_unmanaged_resources(
+    session,
     region: str,
     resource_types: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -705,6 +706,8 @@ def scan_unmanaged_resources(
 
     Parameters
     ----------
+    session:
+        A pre-built boto3 Session (the caller resolves credentials).
     region:
         AWS region to scan (e.g. ``us-east-1``).
     resource_types:
@@ -716,7 +719,6 @@ def scan_unmanaged_resources(
     A flat list of discovered resources.  Each dict has at minimum
     ``type``, ``id``, ``arn``, ``tags``, and ``is_default``.
     """
-    session = boto3.Session(region_name=region)
     types = resource_types or list(_SCANNERS)
 
     all_resources: list[dict[str, Any]] = []
@@ -746,6 +748,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
     parser.add_argument(
+        "--profile",
+        default=None,
+        help="AWS named profile (default: default credential chain)",
+    )
+    parser.add_argument(
         "--tf-dir",
         default=None,
         help="Terraform directory whose state to compare against (enables diff)",
@@ -758,7 +765,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    live = scan_unmanaged_resources(args.region, args.types)
+    session = boto3.Session(profile_name=args.profile, region_name=args.region)
+    live = scan_unmanaged_resources(session, args.region, args.types)
     print(f"\nLive resources found: {len(live)}")
 
     if args.tf_dir:

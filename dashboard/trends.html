@@ -9,14 +9,12 @@
   <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
+  <script src="env-selector.js" defer></script>
 </head>
 <body>
   <header>
     <h1>Drift Reconciler — Trends</h1>
-    <nav class="scope-tabs">
-      <button class="scope-tab active" data-scope="scope-a">scope-a</button>
-      <button class="scope-tab" data-scope="scope-b">scope-b</button>
-    </nav>
+    <nav class="scope-tabs"></nav>
     <nav class="site-nav">
       <a href="/">Dashboard</a>
       <a href="/explorer">Explorer</a>
@@ -25,6 +23,7 @@
       <a href="/trends" class="active">Trends</a>
       <a href="/exceptions">Exceptions</a>
       <a href="/alerts">Alerts</a>
+      <a href="/environments">Environments</a>
     </nav>
   </header>
 

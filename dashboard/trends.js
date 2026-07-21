@@ -403,7 +403,7 @@ function _renderKpi(cardId, value, label, needsAttention) {
   body.innerHTML = '<div class="metric-large">' + value + '</div><div class="metric-sub">' + label + '</div>';
 }
 
-var _currentScope = "scope-a";
+var _currentScope = "";
 var _currentDays = 90;
 var _refreshToken = 0;
 
@@ -458,8 +458,7 @@ function _showCardError(cardId, msg) {
 
 function _syncURL(scope, days) {
   var url = new URL(window.location);
-  if (scope && scope !== "scope-a") url.searchParams.set("scope", scope);
-  else url.searchParams.delete("scope");
+  url.searchParams.set("scope", scope);
   if (days !== 90) url.searchParams.set("days", String(days));
   else url.searchParams.delete("days");
   window.history.replaceState(null, "", url);
@@ -467,7 +466,7 @@ function _syncURL(scope, days) {
 
 function _readURL() {
   var p = new URLSearchParams(window.location.search);
-  var scope = p.get("scope") || "scope-a";
+  var scope = p.get("scope") || "";
   var days = parseInt(p.get("days"), 10) || 90;
   return { scope: scope, days: days };
 }
@@ -482,20 +481,8 @@ function _syncControls() {
 
 document.addEventListener("DOMContentLoaded", function() {
   var initial = _readURL();
-  _currentScope = initial.scope;
+  var urlScope = initial.scope;
   _currentDays = initial.days;
-  _syncControls();
-
-  // Scope tabs
-  document.querySelectorAll(".scope-tab").forEach(function(tab) {
-    tab.addEventListener("click", function() {
-      var scope = tab.dataset.scope;
-      if (scope === _currentScope) return;
-      document.querySelectorAll(".scope-tab").forEach(function(t) { t.classList.remove("active"); });
-      tab.classList.add("active");
-      refreshAll(scope, _currentDays);
-    });
-  });
 
   // Date-range dropdown
   var daysSel = document.getElementById("trends-days");
@@ -506,5 +493,10 @@ document.addEventListener("DOMContentLoaded", function() {
     });
   }
 
-  refreshAll(_currentScope, _currentDays);
+  window.EnvSelector.renderEnvTabs(".scope-tabs", function(scope) {
+    refreshAll(scope, _currentDays);
+  }, urlScope).then(function() {
+    var scope = urlScope || window.EnvSelector.getDefaultEnvironment();
+    if (scope) refreshAll(scope, _currentDays);
+  });
 });

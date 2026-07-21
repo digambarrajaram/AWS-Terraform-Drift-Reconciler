@@ -8,6 +8,7 @@
   <title>Drift Reconciler — Rollback</title>
   <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="env-selector.js" defer></script>
 </head>
 <body>
   <header>
@@ -20,6 +21,7 @@
       <a href="/trends">Trends</a>
       <a href="/exceptions">Exceptions</a>
       <a href="/alerts">Alerts</a>
+      <a href="/environments">Environments</a>
     </nav>
     <p class="empty" style="margin-bottom:16px">Reverts a specific drift-fix PR&rsquo;s field changes back to their pre-fix values. If live infrastructure has changed since the fix was applied, the fix may no longer be reversible &mdash; Preview will show &ldquo;no differences found&rdquo; in that case, which means nothing needs to change, not that something is broken.</p>
   </header>
@@ -127,7 +129,7 @@ function renderRollbackList(rows) {
 }
 
 var _currentPrNumber = null;
-var _currentScope = "scope-a";
+var _currentScope = "";
 var _activePollTimer = null;
 var _activeRunId = null;
 
@@ -317,7 +319,9 @@ document.addEventListener("DOMContentLoaded", function() {
     }
   });
 
-  fetchEligiblePRs("scope-a").then(renderRollbackList).catch(function(err) {
+  var defaultScope = window.EnvSelector ? window.EnvSelector.getDefaultEnvironment() : "scope-a";
+  _currentScope = defaultScope || _currentScope;
+  fetchEligiblePRs(_currentScope).then(renderRollbackList).catch(function(err) {
     document.getElementById("rollback-list-body").innerHTML = '<div class="error">Failed to load: ' + err.message + '</div>';
   });
 });

@@ -10,6 +10,7 @@ import argparse
 import http.server
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -23,7 +24,58 @@ _sys.path.insert(0, str(_REPO_ROOT))
 from drift_reconciler.scan_runs import create_scan_run, update_scan_run
 from drift_reconciler.rollback_runs import create_rollback_run
 _DASHBOARD_DIR = _REPO_ROOT / "dashboard"
-_VALID_SCOPES = {"scope-a", "scope-b"}
+
+# ── Environment cache (30s TTL) ──────────────────────────────────────
+_ENV_CACHE: dict = {}
+_ENV_CACHE_TS = 0.0
+
+
+def _get_active_environments() -> list[dict]:
+    """Return all active environments from Supabase, cached for 30s."""
+    global _ENV_CACHE, _ENV_CACHE_TS
+    import time as _time
+    now = _time.monotonic()
+    if _ENV_CACHE and (now - _ENV_CACHE_TS) < 30:
+        return list(_ENV_CACHE.values())  # list of row dicts
+
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if url and key:
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/environments?select=*&is_active=eq.true",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                _ENV_CACHE = {r["slug"]: r for r in resp.json()}
+                _ENV_CACHE_TS = now
+                return list(_ENV_CACHE.values())
+        except requests.RequestException:
+            if _ENV_CACHE:
+                return list(_ENV_CACHE.values())  # serve stale cache
+    # Fallback: serve stale cache (or empty if never populated)
+    return list(_ENV_CACHE.values()) if _ENV_CACHE else []
+
+
+def _get_valid_scopes() -> set[str]:
+    return {e["slug"] for e in _get_active_environments()}
+
+
+def _get_env_field(slug: str, field: str, default: str = "") -> str:
+    """Return *field* from the environment row for *slug*, or *default*."""
+    for e in _get_active_environments():
+        if e["slug"] == slug:
+            return e.get(field, default) or default
+    return default
+
+
+def _tf_dir_for(scope: str) -> str:
+    return _get_env_field(scope, "tf_directory_path") or f"terraform_code/ec2_terraform_{scope}"
+
+
+def _aws_profile_for(scope: str) -> str:
+    return _get_env_field(scope, "aws_profile") or ("account-a" if scope == "scope-a" else "account-b")
 
 
 def _supabase_headers():
@@ -38,14 +90,6 @@ def _supabase_headers():
 def _supabase_get(path, params=None):
     url = f"{os.environ.get('SUPABASE_URL', '').rstrip('/')}/rest/v1/{path}"
     return requests.get(url, headers=_supabase_headers(), params=params, timeout=10)
-
-
-def _tf_dir_for(scope: str) -> str:
-    tf_dirs = {
-        "scope-a": "terraform_code/ec2_terraform_account_a",
-        "scope-b": "terraform_code/ec2_terraform_account_b",
-    }
-    return tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
 
 
 def _validate_exception_entry_local(exception_type: str, entry: dict) -> tuple[bool, str | None]:
@@ -90,9 +134,7 @@ def _spawn_agent(scope: str, extra_args: list[str]) -> None:
     AWS profile and PYTHONPATH for *scope*."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-    # scope-a → account-a, scope-b → account-b
-    aws_profile = "account-a" if scope == "scope-a" else "account-b"
-    env["AWS_PROFILE"] = aws_profile
+    env["AWS_PROFILE"] = _aws_profile_for(scope)
     cmd = [
         _sys.executable,
         str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -119,11 +161,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html", "/exceptions", "/exceptions.html", "/alerts", "/alerts.html"):
+        if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html", "/exceptions", "/exceptions.html", "/alerts", "/alerts.html", "/environments", "/environments.html"):
             self._serve_injected()
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
+        elif path == "/api/environments":
+            self._serve_environments()
         elif path == "/api/notification-settings":
             self._serve_notification_settings()
         elif path.startswith("/api/exceptions"):
@@ -145,8 +189,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 return
 
             scope = body.get("scope", "")
-            if scope not in _VALID_SCOPES:
-                self._json_error(400, f"Invalid scope: {scope}. Must be scope-a or scope-b.")
+            if scope not in _get_valid_scopes():
+                self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
                 return
 
             # Check for an existing running scan in this scope.
@@ -171,14 +215,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
 
-            # Map scope to terraform directory (same as CI workflow).
-            tf_dirs = {
-                "scope-a": "terraform_code/ec2_terraform_account_a",
-                "scope-b": "terraform_code/ec2_terraform_account_b",
-            }
-            tf_dir = tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
-
             # Non-blocking subprocess — fire and respond 202 immediately.
+            tf_dir = _tf_dir_for(scope)
             cmd = [
                 _sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -190,9 +228,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 cmd.append("--scan-unmanaged")
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            # Keep .env AWS keys for Bedrock, but use scope-specific profile
-            # for terraform AWS resource operations.
-            env["AWS_PROFILE"] = "account-a" if scope == "scope-a" else "account-b"
+            env["AWS_PROFILE"] = _aws_profile_for(scope)
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -213,8 +249,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             pr_number = body.get("pr_number")
             scope = body.get("scope", "")
 
-            if not pr_number or scope not in _VALID_SCOPES:
-                self._json_error(400, "pr_number (integer) and scope (scope-a/scope-b) are required")
+            if not pr_number or scope not in _get_valid_scopes():
+                self._json_error(400, "pr_number (integer) and a valid scope are required")
                 return
 
             try:
@@ -223,12 +259,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self._json_error(502, f"Failed to create rollback run: {se}")
                 return
 
-            tf_dirs = {
-                "scope-a": "terraform_code/ec2_terraform_account_a",
-                "scope-b": "terraform_code/ec2_terraform_account_b",
-            }
-            tf_dir = tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
-
+            tf_dir = _tf_dir_for(scope)
             cmd = [
                 _sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -240,7 +271,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            env["AWS_PROFILE"] = "account-a" if scope == "scope-a" else "account-b"
+            env["AWS_PROFILE"] = _aws_profile_for(scope)
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -261,8 +292,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             pr_number = body.get("pr_number")
             scope = body.get("scope", "")
 
-            if not pr_number or scope not in _VALID_SCOPES:
-                self._json_error(400, "pr_number (integer) and scope (scope-a/scope-b) are required")
+            if not pr_number or scope not in _get_valid_scopes():
+                self._json_error(400, "pr_number (integer) and a valid scope are required")
                 return
 
             # Concurrency check — only one rollback for a given PR at a time.
@@ -285,12 +316,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self._json_error(502, f"Failed to create rollback run: {se}")
                 return
 
-            tf_dirs = {
-                "scope-a": "terraform_code/ec2_terraform_account_a",
-                "scope-b": "terraform_code/ec2_terraform_account_b",
-            }
-            tf_dir = tf_dirs.get(scope, f"terraform_code/ec2_terraform_{scope}")
-
+            tf_dir = _tf_dir_for(scope)
             cmd = [
                 _sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -302,7 +328,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            env["AWS_PROFILE"] = "account-a" if scope == "scope-a" else "account-b"
+            env["AWS_PROFILE"] = _aws_profile_for(scope)
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -317,10 +343,238 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._handle_routing_rules_post()
         elif path == "/api/notification-settings/test":
             self._handle_notification_test()
+        elif path == "/api/environments":
+            self._handle_environments_post()
         elif path == "/api/notification-settings":
             self._handle_notification_settings_post()
         else:
             self.send_error(404)
+
+    def do_PATCH(self):
+        path = self.path.split("?")[0]
+        if path.startswith("/api/environments/"):
+            env_id = path.split("/")[-1]
+            self._handle_environments_patch(env_id)
+        else:
+            self.send_error(404)
+
+    def do_DELETE(self):
+        path = self.path.split("?")[0]
+        if path.startswith("/api/environments/"):
+            env_id = path.split("/")[-1]
+            self._handle_environments_delete(env_id)
+        else:
+            self.send_error(404)
+
+    def _env_table(self):
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=representation"}
+        return f"{url}/rest/v1/environments", headers
+
+    def _upsert_env_secret(self, env_id, field, value):
+        """PATCH or POST to environment_secrets for *env_id*."""
+        secrets_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+        from datetime import datetime, timezone
+        payload = {field: value, "updated_at": datetime.now(timezone.utc).isoformat()}
+        # Try PATCH existing row first.
+        resp = requests.patch(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, json=payload, timeout=10)
+        if resp.status_code not in (200, 204):
+            # No row yet — INSERT.
+            payload["environment_id"] = env_id
+            requests.post(secrets_url, headers=headers, json=payload, timeout=10)
+
+    def _serve_environments(self):
+        table_url, headers = self._env_table()
+        try:
+            resp = requests.get(
+                f"{table_url}?select=*&order=created_at",
+                headers={k: v for k, v in headers.items() if k != "Prefer"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                envs = resp.json() if resp.text else []
+
+                # Fetch secrets to add masked token field.
+                secrets_lookup = {}
+                if envs:
+                    ids = ",".join(e["id"] for e in envs)
+                    s_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
+                    s_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+                    s_headers = {"apikey": s_key, "Authorization": f"Bearer {s_key}"}
+                    try:
+                        s_resp = requests.get(
+                            f"{s_url}?select=environment_id,github_token&environment_id=in.({ids})",
+                            headers=s_headers, timeout=10,
+                        )
+                        if s_resp.status_code == 200:
+                            for row in (s_resp.json() or []):
+                                secrets_lookup[row["environment_id"]] = row.get("github_token") or ""
+                    except requests.RequestException:
+                        pass
+
+                def _mask(val):
+                    if not val: return None
+                    s = str(val)
+                    if len(s) <= 4: return "••••"
+                    return "••••" + s[-4:]
+
+                for e in envs:
+                    tok = secrets_lookup.get(e["id"], "")
+                    e["github_token_configured"] = bool(tok)
+                    e["github_token_masked"] = _mask(tok)
+
+                data = json.dumps(envs).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._json_error(502, f"Supabase query failed ({resp.status_code})")
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
+
+    def _handle_environments_post(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json_error(400, "Invalid or empty JSON body")
+            return
+
+        slug = (body.get("slug") or "").strip()
+        if not slug or not re.match(r'^[a-z0-9][a-z0-9-]*$', slug):
+            self._json_error(400, "slug is required and must be URL-safe (lowercase alphanumeric and hyphens only).")
+            return
+
+        required = ["name", "aws_account_id", "region", "tf_state_bucket", "tf_directory_path"]
+        row = {"slug": slug}
+        for field in required:
+            val = (body.get(field) or "").strip()
+            if not val:
+                self._json_error(400, f"{field} is required.")
+                return
+            row[field] = val
+
+        # Optional fields
+        for opt in ["aws_profile", "tf_lock_table", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type"]:
+            if body.get(opt):
+                row[opt] = body[opt].strip()
+
+        table_url, headers = self._env_table()
+        try:
+            resp = requests.post(table_url, headers=headers, json=row, timeout=10)
+            if resp.status_code in (200, 201):
+                created = resp.json()
+                new_row = created[0] if isinstance(created, list) else created
+                env_id = new_row.get("id")
+                # Write github_token to environment_secrets if provided.
+                token_val = (body.get("_github_token") or "").strip()
+                if token_val and env_id:
+                    try:
+                        self._upsert_env_secret(env_id, "github_token", token_val)
+                    except Exception:
+                        pass  # non-fatal — the environments row was created successfully
+                data = json.dumps(new_row).encode("utf-8")
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            elif resp.status_code == 409:
+                # Slug exists — try reactivating a soft-deleted row.
+                reactivate = requests.patch(
+                    f"{table_url}?slug=eq.{slug}&is_active=eq.false",
+                    headers=headers,
+                    json={"is_active": True, "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()},
+                    timeout=10,
+                )
+                if reactivate.status_code in (200, 204):
+                    self.send_response(200)
+                    data = json.dumps({"slug": slug, "reactivated": True}).encode("utf-8")
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self._json_error(409, f"slug '{slug}' already exists.")
+            else:
+                self._json_error(502, f"Supabase insert failed ({resp.status_code}): {resp.text[:200]}")
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
+
+    def _handle_environments_patch(self, env_id):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json_error(400, "Invalid or empty JSON body")
+            return
+
+        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type"}
+        updates = {}
+        github_token_val = None
+        for k, v in body.items():
+            if k == "_github_token":
+                github_token_val = (str(v).strip() or None)
+            elif k in allowed:
+                updates[k] = v
+        if not updates and not github_token_val:
+            self._json_error(400, "No valid fields to update.")
+            return
+
+        from datetime import datetime, timezone
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        table_url, headers = self._env_table()
+        try:
+            resp = requests.patch(f"{table_url}?id=eq.{env_id}", headers=headers, json=updates, timeout=10)
+            if resp.status_code in (200, 204):
+                if github_token_val:
+                    try:
+                        self._upsert_env_secret(env_id, "github_token", github_token_val)
+                    except Exception:
+                        pass
+                if resp.status_code == 200 and resp.text:
+                    data = json.dumps(resp.json()).encode("utf-8")
+                else:
+                    data = json.dumps({"status": "ok"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._json_error(404, "Environment not found.")
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
+
+    def _handle_environments_delete(self, env_id):
+        table_url, headers = self._env_table()
+        from datetime import datetime, timezone
+        try:
+            resp = requests.patch(
+                f"{table_url}?id=eq.{env_id}",
+                headers=headers,
+                json={"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()},
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):
+                data = json.dumps({"status": "ok"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._json_error(404, "Environment not found.")
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
 
     def _handle_routing_rules_post(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -530,8 +784,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         scope_raw = params.get("scope", [None])[0]
-        if not scope_raw or scope_raw not in _VALID_SCOPES:
-            self._json_error(400, "Invalid or missing scope. Must be scope-a or scope-b.")
+        if not scope_raw or scope_raw not in _get_valid_scopes():
+            self._json_error(400, "Invalid or missing scope. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
             return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -572,8 +826,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         scope = body.get("scope", "")
-        if scope not in _VALID_SCOPES:
-            self._json_error(400, f"Invalid scope: {scope}. Must be scope-a or scope-b.")
+        if scope not in _get_valid_scopes():
+            self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
             return
 
         exception_type = body.get("exception_type", "")
@@ -721,6 +975,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             fname = "exceptions.html"
         elif "alerts" in path:
             fname = "alerts.html"
+        elif "environments" in path:
+            fname = "environments.html"
         else:
             fname = "index.html"
         html = (_DASHBOARD_DIR / fname).read_text(encoding="utf-8")

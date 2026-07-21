@@ -43,12 +43,24 @@ def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
             fields.append({"type": "mrkdwn", "text": f"• {line}"})
 
         region = os.environ.get("AWS_REGION", "unknown")
+
+        # Build header — distinguish unmanaged from drift.
+        unmanaged_count = sum(1 for f in batch if f.get("status") in ("unmanaged", "unmanaged_tagged"))
+        if unmanaged_count == len(batch):
+            kind = "unmanaged resource finding"
+        elif unmanaged_count == 0:
+            kind = "drift finding"
+        else:
+            kind = "finding"
+        plural = "s" if len(batch) != 1 else ""
+        header_text = f":red_circle: {len(batch)} {kind}{plural} — {account_label} ({region})"
+
         blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f":red_circle: {len(batch)} drift finding(s) — {account_label} ({region})",
+                    "text": header_text,
                 },
             },
             {"type": "section", "fields": fields},

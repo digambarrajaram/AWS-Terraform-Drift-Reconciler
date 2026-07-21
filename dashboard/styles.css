@@ -166,6 +166,7 @@ html body main table#findings-table tbody#findings-body tr td a {
 .badge-type-fix          { color: #8b949e; }
 .badge-type-batch        { color: #a371f7; }
 .badge-type-rollback     { color: #d29922; }
+.badge-type-unmanaged    { color: #58a6ff; }
 
 /* ── Scan form + stages ── */
 .scan-form {
@@ -188,6 +189,7 @@ html body main table#findings-table tbody#findings-body tr td a {
 }
 .stage.active  { color: #e6edf3; border-left-color: #1f6feb; }
 .stage.done    { color: #3fb950; border-left-color: #3fb950; }
+.stage.done-noop { color: #3fb950; border-left-color: #3fb950; }
 .stage.failed  { color: #f85149; border-left-color: #f85149; }
 .stage.skipped { color: #d29922; border-left-color: #d29922; text-decoration: line-through; }
 
@@ -197,6 +199,7 @@ html body main table#findings-table tbody#findings-body tr td a {
 }
 .stage.active .stage-dot { background: #1f6feb; }
 .stage.done   .stage-dot { background: #3fb950; }
+.stage.done-noop .stage-dot { background: transparent; border: 2px solid #3fb950; }
 .stage.failed .stage-dot { background: #f85149; }
 .stage.skipped .stage-dot { background: #d29922; }
 
@@ -213,6 +216,7 @@ html body main table#findings-table tbody#findings-body tr td a {
   .stage { border-left: none; border-top: 3px solid #21262d; padding: 10px 8px 0; min-width: 100px; text-align: center; }
   .stage.active  { border-top-color: #1f6feb; }
   .stage.done    { border-top-color: #3fb950; }
+  .stage.done-noop { border-top-color: #3fb950; }
   .stage.failed  { border-top-color: #f85149; }
   .stage.skipped { border-top-color: #d29922; text-decoration: line-through; }
 }

@@ -92,19 +92,21 @@ function _errorMsg(message) {
 
 function _resetStages() {
   document.querySelectorAll(".stage").forEach(s => {
-    s.classList.remove("active", "done", "failed");
+    s.classList.remove("active", "done", "done-noop", "failed", "skipped");
   });
 }
 
 const _STAGE_ORDER = ["unmanaged_scan", "reconcile_agent", "trivy_gate", "drift_alert", "drift_pr"];
 
 function updateTracker(row) {
+  if (!row) return;
   const current = row.current_stage;
   const status = row.status;
 
   var rawSummary = row.result_summary;
   var summary = rawSummary;
-  if (typeof summary === "string") { try { summary = JSON.parse(summary); } catch(e) { summary = {}; } }
+  if (!summary) summary = {};
+  else if (typeof summary === "string") { try { summary = JSON.parse(summary); } catch(e) { summary = {}; } }
   var skippedStages = summary.skipped_stages || [];
 
   document.querySelectorAll(".stage").forEach(el => {
@@ -112,7 +114,7 @@ function updateTracker(row) {
     const idx = _STAGE_ORDER.indexOf(stage);
     const curIdx = _STAGE_ORDER.indexOf(current);
 
-    el.classList.remove("active", "done", "failed", "skipped");
+    el.classList.remove("active", "done", "done-noop", "failed", "skipped");
 
     if (status === "failed" && idx === curIdx) {
       el.classList.add("failed");
@@ -127,6 +129,33 @@ function updateTracker(row) {
     }
   });
 
+  // Post-process: mark no-op stages (hollow dot) when they ran but
+  // produced nothing.
+  if (status === "complete") {
+    var drCount = (summary.drift && summary.drift.count) || 0;
+    var umCount = (summary.unmanaged && summary.unmanaged.count) || 0;
+    var allPrLinks = prLinks || [];
+
+    // reconcile_agent: no findings at all → no-op.
+    if (drCount === 0 && umCount === 0) {
+      var recStage = document.querySelector('.stage[data-stage="reconcile_agent"]');
+      if (recStage) { recStage.classList.remove("done"); recStage.classList.add("done-noop"); }
+    }
+
+    // drift_pr / stage-5: no PRs created → no-op.
+    if (allPrLinks.length === 0) {
+      var prStage = document.querySelector('.stage[data-stage="drift_pr"]');
+      if (prStage) { prStage.classList.remove("done"); prStage.classList.add("done-noop"); }
+    }
+
+    // drift_alert: no alerts actually sent → no-op.
+    var alertsSent = summary.alerts_sent;
+    if (alertsSent && !alertsSent.pagerduty && !alertsSent.slack) {
+      var alertStage = document.querySelector('.stage[data-stage="drift_alert"]');
+      if (alertStage) { alertStage.classList.remove("done"); alertStage.classList.add("done-noop"); }
+    }
+  }
+
   const resultEl = document.getElementById("scan-result");
   const bodyEl = document.getElementById("scan-result-body");
 
@@ -136,16 +165,83 @@ function updateTracker(row) {
   if (status === "complete") {
     resultEl.hidden = false;
     let html = "";
-    if (summary.notice) {
-      html += '<p style="color:#d29922;font-size:14px;margin-bottom:6px">' + summary.notice + '</p>';
+
+    // Stage-5 chips: Drift PR (N) / Unmanaged PR (N) from actual data.
+    var driftPrCount = (summary.drift && summary.drift.pr_links && summary.drift.pr_links.length) || 0;
+    var unmPrCount = (summary.unmanaged && summary.unmanaged.pr_links && summary.unmanaged.pr_links.length) || 0;
+    var stage5 = document.getElementById("stage-5");
+    if (stage5) {
+      // Clear everything after the stage-dot span.
+      while (stage5.childNodes.length > 1) stage5.removeChild(stage5.lastChild);
+      if (driftPrCount > 0 || unmPrCount > 0) {
+        var chips = '';
+        if (driftPrCount > 0) chips += '<span style="color:#3fb950;margin-right:8px">Drift PR (' + driftPrCount + ')</span>';
+        if (unmPrCount > 0) chips += '<span style="color:#58a6ff">Unmanaged PR (' + unmPrCount + ')</span>';
+        var chipSpan = document.createElement('span');
+        chipSpan.innerHTML = chips;
+        stage5.appendChild(chipSpan);
+      } else {
+        stage5.appendChild(document.createTextNode(' Drift PR'));
+      }
     }
+
+    // Mode banner.
+    var mode = summary.mode || (summary.drift ? (summary.drift.found ? "full" : "unmanaged_only") : (summary.unmanaged && summary.unmanaged.found ? "unmanaged_only" : "drift_only"));
+    if (mode === "full") {
+      html += '<p style="color:#3fb950;font-size:14px;margin-bottom:8px">✓ Full scan complete</p>';
+    } else if (mode === "unmanaged_only") {
+      html += '<p style="color:#d29922;font-size:14px;margin-bottom:8px">⚠ Terraform state unavailable — only unmanaged resources checked</p>';
+    } else if (mode === "drift_only") {
+      html += '<p style="color:#58a6ff;font-size:14px;margin-bottom:8px">Drift check complete — unmanaged scanning skipped</p>';
+    }
+
+    var hasDrift = summary.drift && summary.drift.found;
+    var hasUnmanaged = summary.unmanaged && summary.unmanaged.found;
+    // Legacy fallback.
+    if (!hasDrift && !hasUnmanaged && summary.unmanaged_resources && summary.unmanaged_resources.length > 0) {
+      hasUnmanaged = true;
+      summary.unmanaged = { found: true, count: summary.unmanaged_resources.length, findings: summary.unmanaged_resources, pr_links: [] };
+    }
+
+    if (hasDrift || hasUnmanaged) {
+      // Configuration Drift section.
+      if (hasDrift) {
+        html += '<p style="color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Configuration Drift (' + summary.drift.count + ')</p>';
+        html += '<ul style="margin-bottom:8px">';
+        summary.drift.findings.forEach(function(r) {
+          var sevClass = 'sev-' + (r.risk_level || 'LOW').toLowerCase();
+          html += '<li><span class="' + sevClass + '">' + (r.risk_level || 'LOW') + '</span> <code>' + (r.resource_id || '?') + '</code></li>';
+        });
+        html += '</ul>';
+        if (summary.drift.pr_links && summary.drift.pr_links.length > 0) {
+          html += '<ul style="margin-bottom:8px">' + summary.drift.pr_links.map(function(url) {
+            return '<li><a href="' + url + '" target="_blank">' + url + '</a></li>';
+          }).join("") + '</ul>';
+        }
+      }
+
+      // Unmanaged Resources section.
+      if (hasUnmanaged) {
+        html += '<p style="color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Unmanaged Resources Found (' + summary.unmanaged.count + ')</p>';
+        html += '<ul style="margin-bottom:4px">';
+        summary.unmanaged.findings.forEach(function(r) {
+          var sevClass = 'sev-' + (r.risk_level || 'LOW').toLowerCase();
+          html += '<li><span class="' + sevClass + '">' + (r.risk_level || 'LOW') + '</span> <code>' + (r.resource_id || '?') + '</code></li>';
+        });
+        html += '</ul>';
+        html += '<p style="color:#8b949e;font-size:11px;margin-bottom:8px">These PRs add tracking/import for these resources — they are NOT drift fixes</p>';
+        if (summary.unmanaged.pr_links && summary.unmanaged.pr_links.length > 0) {
+          html += '<ul style="margin-bottom:8px">' + summary.unmanaged.pr_links.map(function(url) {
+            return '<li><a href="' + url + '" target="_blank">' + url + '</a></li>';
+          }).join("") + '</ul>';
+        }
+      }
+    } else {
+      html += '<p style="color:#8b949e;font-size:14px">No drift and no unmanaged resources found.</p>';
+    }
+
     if (summary.report_path) {
-      html += '<p>Report: <code>' + summary.report_path + '</code></p>';
-    }
-    if (prLinks.length > 0) {
-      html += "<ul>" + prLinks.map(function(url) {
-        return '<li><a href="' + url + '" target="_blank">' + url + '</a></li>';
-      }).join("") + "</ul>";
+      html += '<p style="margin-top:12px">Report: <code>' + summary.report_path + '</code></p>';
     }
     if (!html) html = "<p>Scan completed successfully.</p>";
     bodyEl.innerHTML = html;
@@ -217,6 +313,7 @@ function startPolling(runId) {
   function _stop() {
     stopped = true;
     clearTimeout(fallbackTimer);
+    _supabase().removeChannel(channel);
   }
 
   var channel = _supabase()
@@ -227,7 +324,7 @@ function startPolling(runId) {
       function(payload) {
         if (stopped) return;
         if (_checkTimeout(payload.new.status)) return;
-        updateTracker(payload.new);
+        if (payload.new) updateTracker(payload.new);
         _fallbackPoll();
         if (payload.new.status === "complete" || payload.new.status === "failed") {
           _stop();

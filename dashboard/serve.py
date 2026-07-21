@@ -78,6 +78,16 @@ def _aws_profile_for(scope: str) -> str:
     return _get_env_field(scope, "aws_profile") or ("account-a" if scope == "scope-a" else "account-b")
 
 
+def _configure_aws_env(env: dict, scope: str) -> None:
+    """Set AWS_PROFILE in *env* only when the environment's auth_type
+    is 'profile' or unset (transitional fallback).  For 'role'/'keys',
+    the agent resolves credentials itself — a stale profile would break
+    boto3 session creation."""
+    auth_type = _get_env_field(scope, "auth_type") or ""
+    if not auth_type or auth_type == "profile":
+        env["AWS_PROFILE"] = _aws_profile_for(scope)
+
+
 def _supabase_headers():
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     return {
@@ -134,7 +144,7 @@ def _spawn_agent(scope: str, extra_args: list[str]) -> None:
     AWS profile and PYTHONPATH for *scope*."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-    env["AWS_PROFILE"] = _aws_profile_for(scope)
+    _configure_aws_env(env, scope)
     cmd = [
         _sys.executable,
         str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -228,7 +238,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 cmd.append("--scan-unmanaged")
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            env["AWS_PROFILE"] = _aws_profile_for(scope)
+            _configure_aws_env(env, scope)
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -271,7 +281,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            env["AWS_PROFILE"] = _aws_profile_for(scope)
+            _configure_aws_env(env, scope)
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -328,7 +338,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            env["AWS_PROFILE"] = _aws_profile_for(scope)
+            _configure_aws_env(env, scope)
             subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
@@ -372,19 +382,30 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=representation"}
         return f"{url}/rest/v1/environments", headers
 
-    def _upsert_env_secret(self, env_id, field, value):
-        """PATCH or POST to environment_secrets for *env_id*."""
+    def _upsert_env_secret(self, env_id, updates):
+        """PATCH or POST to environment_secrets for *env_id*.
+        *updates* is a dict of column→value pairs (e.g. ``{"github_token": "..."}``)."""
         secrets_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=representation"}
         from datetime import datetime, timezone
-        payload = {field: value, "updated_at": datetime.now(timezone.utc).isoformat()}
-        # Try PATCH existing row first.
+        payload = dict(updates)
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # PATCH existing row.  With return=representation, PostgREST
+        # returns [] when no rows match (HTTP 200) vs. [{...}] when a
+        # row was updated (HTTP 200).  Both are HTTP 200 — the body
+        # distinguishes them.
         resp = requests.patch(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, json=payload, timeout=10)
-        if resp.status_code not in (200, 204):
-            # No row yet — INSERT.
-            payload["environment_id"] = env_id
-            requests.post(secrets_url, headers=headers, json=payload, timeout=10)
+        patched_rows = resp.json() if resp.text and resp.status_code == 200 else None
+        if not patched_rows:
+            # No row yet — INSERT, then PATCH to set the values.
+            post_resp = requests.post(secrets_url, headers=headers, json={"environment_id": env_id}, timeout=10)
+            if post_resp.status_code in (200, 201):
+                requests.patch(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, json=payload, timeout=10)
+            else:
+                # INSERT failed — try PATCH with the full payload just in case.
+                payload["environment_id"] = env_id
+                requests.post(secrets_url, headers=headers, json=payload, timeout=10)
 
     def _serve_environments(self):
         table_url, headers = self._env_table()
@@ -406,12 +427,12 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     s_headers = {"apikey": s_key, "Authorization": f"Bearer {s_key}"}
                     try:
                         s_resp = requests.get(
-                            f"{s_url}?select=environment_id,github_token&environment_id=in.({ids})",
+                            f"{s_url}?select=environment_id,github_token,aws_access_key_id,aws_secret_access_key&environment_id=in.({ids})",
                             headers=s_headers, timeout=10,
                         )
                         if s_resp.status_code == 200:
                             for row in (s_resp.json() or []):
-                                secrets_lookup[row["environment_id"]] = row.get("github_token") or ""
+                                secrets_lookup[row["environment_id"]] = row
                     except requests.RequestException:
                         pass
 
@@ -422,9 +443,16 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     return "••••" + s[-4:]
 
                 for e in envs:
-                    tok = secrets_lookup.get(e["id"], "")
+                    sec = secrets_lookup.get(e["id"], {})
+                    tok = sec.get("github_token", "") if isinstance(sec, dict) else ""
+                    access_key = sec.get("aws_access_key_id", "") if isinstance(sec, dict) else ""
+                    secret_key = sec.get("aws_secret_access_key", "") if isinstance(sec, dict) else ""
                     e["github_token_configured"] = bool(tok)
                     e["github_token_masked"] = _mask(tok)
+                    e["aws_access_key_configured"] = bool(access_key)
+                    e["aws_access_key_masked"] = _mask(access_key)
+                    e["aws_secret_key_configured"] = bool(secret_key)
+                    e["aws_secret_key_masked"] = _mask(secret_key)
 
                 data = json.dumps(envs).encode("utf-8")
                 self.send_response(200)
@@ -461,9 +489,16 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             row[field] = val
 
         # Optional fields
-        for opt in ["aws_profile", "tf_lock_table", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type"]:
+        for opt in ["aws_profile", "tf_lock_table", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "aws_external_id"]:
             if body.get(opt):
                 row[opt] = body[opt].strip()
+
+        # Guard: auth_type='keys' requires keys.
+        if row.get("auth_type") == "keys":
+            keys_in_request = (body.get("_aws_access_key_id") or "").strip() and (body.get("_aws_secret_access_key") or "").strip()
+            if not keys_in_request:
+                self._json_error(400, "auth_type='keys' requires both aws_access_key_id and aws_secret_access_key.")
+                return
 
         table_url, headers = self._env_table()
         try:
@@ -472,13 +507,17 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 created = resp.json()
                 new_row = created[0] if isinstance(created, list) else created
                 env_id = new_row.get("id")
-                # Write github_token to environment_secrets if provided.
-                token_val = (body.get("_github_token") or "").strip()
-                if token_val and env_id:
+                # Write secrets to environment_secrets if provided.
+                secrets_to_write = {}
+                for k in ("_github_token", "_aws_access_key_id", "_aws_secret_access_key"):
+                    val = (body.get(k) or "").strip()
+                    if val:
+                        secrets_to_write[k.lstrip("_")] = val
+                if secrets_to_write and env_id:
                     try:
-                        self._upsert_env_secret(env_id, "github_token", token_val)
+                        self._upsert_env_secret(env_id, secrets_to_write)
                     except Exception:
-                        pass  # non-fatal — the environments row was created successfully
+                        pass  # non-fatal
                 data = json.dumps(new_row).encode("utf-8")
                 self.send_response(201)
                 self.send_header("Content-Type", "application/json")
@@ -516,17 +555,47 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._json_error(400, "Invalid or empty JSON body")
             return
 
-        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type"}
+        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "aws_external_id"}
         updates = {}
         github_token_val = None
+        aws_access_key_val = None
+        aws_secret_key_val = None
         for k, v in body.items():
             if k == "_github_token":
                 github_token_val = (str(v).strip() or None)
+            elif k == "_aws_access_key_id":
+                aws_access_key_val = (str(v).strip() or None)
+            elif k == "_aws_secret_access_key":
+                aws_secret_key_val = (str(v).strip() or None)
             elif k in allowed:
                 updates[k] = v
-        if not updates and not github_token_val:
+        if not updates and not github_token_val and not aws_access_key_val and not aws_secret_key_val:
             self._json_error(400, "No valid fields to update.")
             return
+
+        # Guard: switching to auth_type='keys' requires keys (either in this
+        # request or already stored).
+        if updates.get("auth_type") == "keys":
+            have_new_keys = aws_access_key_val and aws_secret_key_val
+            if not have_new_keys:
+                # Check if keys already exist in environment_secrets.
+                have_existing = False
+                try:
+                    s_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
+                    s_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+                    s_resp = requests.get(
+                        f"{s_url}?select=aws_access_key_id,aws_secret_access_key&environment_id=eq.{env_id}",
+                        headers={"apikey": s_key, "Authorization": f"Bearer {s_key}"},
+                        timeout=10,
+                    )
+                    if s_resp.status_code == 200 and s_resp.json():
+                        row = s_resp.json()[0]
+                        have_existing = bool((row.get("aws_access_key_id") or "").strip()) and bool((row.get("aws_secret_access_key") or "").strip())
+                except Exception:
+                    pass
+                if not have_existing:
+                    self._json_error(400, "auth_type='keys' requires both aws_access_key_id and aws_secret_access_key.")
+                    return
 
         from datetime import datetime, timezone
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -535,9 +604,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         try:
             resp = requests.patch(f"{table_url}?id=eq.{env_id}", headers=headers, json=updates, timeout=10)
             if resp.status_code in (200, 204):
-                if github_token_val:
+                secrets_to_write = {}
+                for k, var in [("github_token", github_token_val), ("aws_access_key_id", aws_access_key_val), ("aws_secret_access_key", aws_secret_key_val)]:
+                    if var:
+                        secrets_to_write[k] = var
+                if secrets_to_write:
                     try:
-                        self._upsert_env_secret(env_id, "github_token", github_token_val)
+                        self._upsert_env_secret(env_id, secrets_to_write)
                     except Exception:
                         pass
                 if resp.status_code == 200 and resp.text:

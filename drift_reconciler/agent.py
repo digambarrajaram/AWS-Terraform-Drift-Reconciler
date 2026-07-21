@@ -467,12 +467,12 @@ def drift_alert(state: State):
     """Route findings by severity using Supabase routing rules, falling
     back to hardcoded HIGH→PagerDuty / else→Slack if unreachable."""
     if not state.get("drift_detected"):
-        return {"messages": []}
+        return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
 
     active = [f for f in state["drift_findings"]
               if f.get("status") != "externally_managed"]
     if not active:
-        return {"messages": []}
+        return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
 
     rules = _load_routing_rules()
 
@@ -480,6 +480,7 @@ def drift_alert(state: State):
     slack_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "slack"]
 
     # PagerDuty → one page per finding.
+    pd_sent = 0
     for finding in pd_findings:
         if finding.get("status") in ("unmanaged", "unmanaged_tagged"):
             event_type = "Unmanaged resource"
@@ -489,19 +490,22 @@ def drift_alert(state: State):
         cost = finding.get("cost_impact")
         if cost:
             summary += f" (${cost['monthly_estimate_usd']:.2f}/mo)"
-        pga.trigger_pagerduty_alert(
+        result = pga.trigger_pagerduty_alert(
             summary=summary,
             severity="error",
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
             account_label=_account_label,
         )
+        if result:  # PagerDuty returns {} on failure, non-empty dict on dispatch
+            pd_sent += 1
 
     # Slack → batched.
+    slack_sent = 0
     if slack_findings:
-        slack.notify_all(slack_findings, _account_label)
+        slack_sent = slack.notify_all(slack_findings, _account_label)
 
-    return {"messages": []}
+    return {"messages": [], "alerts_sent": {"pagerduty": pd_sent, "slack": slack_sent}}
 def drift_pr_from_finding(state: State):
     report_stage(state.get("run_id"), "drift_pr")
     if not state.get("drift_detected"):
@@ -527,12 +531,15 @@ def drift_pr_from_finding(state: State):
         else:
             pr = gi.create_drift_pr_for_file(group, "code_to_reality", account_label=_account_label)
         if pr is not None:
-            pr_urls.append(pr.html_url)
+            # Findings with file_path are always drift fixes (unmanaged
+            # findings have file_path=None and land in report_only).
+            pr_urls.append({"url": pr.html_url, "type": "drift"})
 
     for finding in report_only:
         pr = gi.create_drift_pr_for_mode(finding, "code_to_reality", account_label=_account_label)
         if pr is not None:
-            pr_urls.append(pr.html_url)
+            is_unmanaged = finding.get("status") in ("unmanaged", "unmanaged_tagged")
+            pr_urls.append({"url": pr.html_url, "type": "unmanaged" if is_unmanaged else "drift"})
 
     return {"pr_urls": pr_urls}
 
@@ -1234,6 +1241,10 @@ if __name__ == "__main__":
         }
 
         agent_output = ""
+        _all_findings: list[dict] = []
+        _all_pr_urls: list[str] = []
+        _pd_alerts_sent = 0
+        _slack_messages_sent = 0
         for event in graph.stream(initial_state):
             for node, data in event.items():
                 if not data:
@@ -1241,6 +1252,17 @@ if __name__ == "__main__":
                 messages = data.get("messages") or []
                 if messages:
                     agent_output = messages[-1].content
+                findings = data.get("drift_findings") or []
+                if findings:
+                    _all_findings = findings
+                urls = data.get("pr_urls") or []
+                if urls:
+                    _all_pr_urls = urls
+                alerts = data.get("alerts_sent") or {}
+                if alerts.get("pagerduty"):
+                    _pd_alerts_sent = alerts["pagerduty"]
+                if alerts.get("slack"):
+                    _slack_messages_sent = alerts["slack"]
 
         # Print out to the terminal as usual
         print(f"\n[Agent Response]:\n{agent_output}")
@@ -1251,8 +1273,12 @@ if __name__ == "__main__":
             from datetime import datetime as dt, timezone
             summary = {}
 
+            # Split findings by origin.
+            drift_findings = [f for f in _all_findings if f.get("status") not in ("unmanaged", "unmanaged_tagged")]
+            unmanaged_findings = [f for f in _all_findings if f.get("status") in ("unmanaged", "unmanaged_tagged")]
+
             if not _terraform_failed:
-                # Write a report only when terraform actually ran.
+                summary["mode"] = "drift_only" if not unmanaged_findings else "full"
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
                 report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
@@ -1271,15 +1297,35 @@ if __name__ == "__main__":
                     print(f"\n[Warning] Failed to write report file: {str(e)}")
                     summary["report_path"] = f"(write failed: {e})"
             else:
-                print("\n[Notice] Terraform plan skipped — unmanaged-only scan, no markdown report generated.")
+                summary["mode"] = "unmanaged_only"
                 summary["notice"] = "Terraform state backend unavailable — only unmanaged resources were scanned. Configuration drift was not checked."
                 summary["skipped_stages"] = ["reconcile_agent", "trivy_gate"]
+
+            # Structured blocks per scan type.
+            drift_urls = [u["url"] for u in _all_pr_urls if u.get("type") == "drift"]
+            unmanaged_urls = [u["url"] for u in _all_pr_urls if u.get("type") == "unmanaged"]
+            drift_block = {
+                "found": len(drift_findings) > 0,
+                "count": len(drift_findings),
+                "findings": [{"resource_id": f.get("resource_id", "?"), "risk_level": f.get("risk_level", "LOW")} for f in drift_findings],
+                "pr_links": drift_urls,
+            }
+            unmanaged_block = {
+                "found": len(unmanaged_findings) > 0,
+                "count": len(unmanaged_findings),
+                "findings": [{"resource_id": f.get("resource_id", "?"), "risk_level": f.get("risk_level", "LOW")} for f in unmanaged_findings],
+                "pr_links": unmanaged_urls,
+            }
+            summary["drift"] = drift_block
+            summary["unmanaged"] = unmanaged_block
+            summary["alerts_sent"] = {"pagerduty": _pd_alerts_sent, "slack": _slack_messages_sent}
 
             update_scan_run(
                 _run_id,
                 status="complete",
                 completed_at=dt.now(timezone.utc).isoformat(),
                 result_summary=summary,
+                pr_links=[u["url"] for u in _all_pr_urls] if _all_pr_urls else None,
             )
     except Exception as e:
         if _run_id:

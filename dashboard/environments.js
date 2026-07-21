@@ -73,7 +73,7 @@ function _showEditForm(id, rows) {
   var env = rows.find(function(r) { return r.id === id; });
   if (!env) return;
 
-  var fields = ["name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type"];
+  var fields = ["name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "aws_external_id"];
   var msg = "Edit " + env.name + " (" + env.slug + ")\n\nEnter new values (leave blank to keep current):";
   var updates = {};
   var anyChange = false;
@@ -124,9 +124,15 @@ document.addEventListener("DOMContentLoaded", function() {
 
     var entry = {};
     var githubToken = null;
+    var awsAccessKey = null;
+    var awsSecretKey = null;
     form.querySelectorAll("input, select").forEach(function(inp) {
       if (inp.name === "github_token") {
         if (inp.value.trim() !== "") githubToken = inp.value.trim();
+      } else if (inp.name === "aws_access_key_id") {
+        if (inp.value.trim() !== "") awsAccessKey = inp.value.trim();
+      } else if (inp.name === "aws_secret_access_key") {
+        if (inp.value.trim() !== "") awsSecretKey = inp.value.trim();
       } else if (inp.value !== "") {
         entry[inp.name] = inp.value;
       }
@@ -136,6 +142,8 @@ document.addEventListener("DOMContentLoaded", function() {
     try {
       var payload = entry;
       if (githubToken) payload._github_token = githubToken;
+      if (awsAccessKey) payload._aws_access_key_id = awsAccessKey;
+      if (awsSecretKey) payload._aws_secret_access_key = awsSecretKey;
       var resp = await fetch("/api/environments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -163,6 +171,24 @@ document.addEventListener("DOMContentLoaded", function() {
     gitAuthSel.addEventListener("change", function() {
       var group = document.getElementById("github-token-add-group");
       if (group) group.style.display = this.value === "token" ? "" : "none";
+    });
+  }
+
+  // auth_type toggle: show/hide AWS credential fields.
+  var authSel = document.getElementById("auth-type-add");
+  if (authSel) {
+    authSel.addEventListener("change", function() {
+      var v = this.value;
+      var roleEls = ["aws-role-arn-add-group", "aws-external-id-add-group"];
+      var keyEls = ["aws-access-key-add-group", "aws-secret-key-add-group"];
+      roleEls.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = v === "role" ? "" : "none";
+      });
+      keyEls.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = v === "keys" ? "" : "none";
+      });
     });
   }
 });

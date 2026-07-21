@@ -78,6 +78,33 @@
           <input type="password" name="github_token" placeholder="ghp_...">
           <span class="empty">Stored in environment_secrets — never visible after save.</span>
         </label>
+        <hr style="grid-column:1/-1; border-color:#30363d; margin:4px 0">
+        <label>
+          Auth Type
+          <select name="auth_type" id="auth-type-add">
+            <option value="profile">profile (local ~/.aws/config)</option>
+            <option value="role">role (OIDC assume-role)</option>
+            <option value="keys">keys (static access key)</option>
+          </select>
+        </label>
+        <label id="aws-role-arn-add-group" style="display:none">
+          Role ARN
+          <input type="text" name="aws_role_arn" placeholder="arn:aws:iam::123456789012:role/drift-reconciler-scan-scope-a">
+        </label>
+        <label id="aws-external-id-add-group" style="display:none">
+          External ID (optional)
+          <input type="text" name="aws_external_id" placeholder="optional-external-id">
+        </label>
+        <label id="aws-access-key-add-group" style="display:none">
+          Access Key ID
+          <input type="password" name="aws_access_key_id" placeholder="AKIA...">
+          <span class="empty">Stored in environment_secrets.</span>
+        </label>
+        <label id="aws-secret-key-add-group" style="display:none">
+          Secret Access Key
+          <input type="password" name="aws_secret_access_key" placeholder="...">
+          <span class="empty">Stored in environment_secrets.</span>
+        </label>
         <div class="form-actions">
           <button type="submit" class="btn-primary">Add Environment</button>
           <span class="form-result" id="add-result"></span>

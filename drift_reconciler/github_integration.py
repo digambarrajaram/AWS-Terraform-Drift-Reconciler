@@ -70,6 +70,7 @@ def create_drift_pr(
         account_label: str = "default",
         changes: dict | None = None,
         is_rollback: bool = False,
+        unmanaged: bool = False,
         cost_impact: dict | None = None,
         trivy_passed: bool | None = None,
         trivy_summary: dict | None = None,
@@ -94,24 +95,33 @@ def create_drift_pr(
     base_ref = repo.get_git_ref(f"heads/{base_branch}")
     repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_ref.object.sha)
 
-    try:
-        existing = repo.get_contents(file_path, ref=head_branch)
-        repo.update_file(
-            path=file_path,
-            message=pr_title,
-            content=file_content,
-            sha=existing.sha,
-            branch=head_branch,
-        )
-    except UnknownObjectException:
+    if file_path.startswith("drift-reports/"):
+        # Always a new file — skip the get_contents round-trip.
         repo.create_file(
             path=file_path,
             message=pr_title,
             content=file_content,
             branch=head_branch,
         )
-    except GithubException as e:
-        raise
+    else:
+        try:
+            existing = repo.get_contents(file_path, ref=head_branch)
+            repo.update_file(
+                path=file_path,
+                message=pr_title,
+                content=file_content,
+                sha=existing.sha,
+                branch=head_branch,
+            )
+        except UnknownObjectException:
+            repo.create_file(
+                path=file_path,
+                message=pr_title,
+                content=file_content,
+                branch=head_branch,
+            )
+        except GithubException as e:
+            raise
 
     pr_body = f"""## Drift detected: `{resource_id}`
 
@@ -150,7 +160,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             account_label=account_label,
             region=os.environ.get("AWS_REGION", "unknown"),
             pr_number=pr.number,
-            pr_type="rollback" if is_rollback else "fix",
+            pr_type="rollback" if is_rollback else "unmanaged" if unmanaged else "fix",
             severity=risk_level,
             fields_changed=list(changes.keys()) if changes else [],
             drift_summary=drift_summary,
@@ -160,6 +170,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             trivy_passed=trivy_passed,
             trivy_summary=trivy_summary,
             rolled_back_from_pr=rolled_back_from_pr,
+            unmanaged=unmanaged,
         )
     except Exception as exc:
         print(f"  ⚠ Failed to append drift history: {exc}")
@@ -220,6 +231,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
             f"{runtime_line}\n"
         )
 
+    is_unmanaged = finding.get("status") in ("unmanaged", "unmanaged_tagged")
     return create_drift_pr(
         resource_id=resource_id,
         pr_title=pr_title,
@@ -233,6 +245,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         cost_impact=finding.get("cost_impact"),
         trivy_passed=finding.get("trivy_passed"),
         trivy_summary=_build_trivy_summary(finding),
+        unmanaged=is_unmanaged,
     )
 
 

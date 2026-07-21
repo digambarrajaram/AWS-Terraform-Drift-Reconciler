@@ -7,7 +7,7 @@
 
 -- 1. Non-secret auth columns on the existing environments table.
 alter table environments
-  add column if not exists auth_type         text check (auth_type in ('role', 'keys')),
+  add column if not exists auth_type         text check (auth_type in ('profile', 'role', 'keys')),
   add column if not exists aws_role_arn      text,   -- OIDC role ARN for 'role' auth
   add column if not exists aws_external_id   text;   -- optional external ID for role assumption
 

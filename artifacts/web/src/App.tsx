@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
 import AppShell from '@/components/layout/AppShell';
 import AuthPromptModal from '@/components/layout/AuthPromptModal';
+import { Toaster } from '@/components/ui/sonner';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { getToken } from '@/api/apiFetch';
 
@@ -51,6 +52,7 @@ export default function App() {
             </Route>
           </Routes>
           <AuthPromptModal />
+          <Toaster richColors position="top-right" />
         </AuthGuard>
       </BrowserRouter>
     </QueryClientProvider>

@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-import Layout from '@/components/layout/Layout';
+import AppShell from '@/components/layout/AppShell';
 import AuthPromptModal from '@/components/layout/AuthPromptModal';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { getToken } from '@/api/apiFetch';
@@ -38,7 +38,7 @@ export default function App() {
       <BrowserRouter basename={import.meta.env.BASE_URL}>
         <AuthGuard>
           <Routes>
-            <Route element={<Layout />}>
+            <Route element={<AppShell />}>
               <Route path="/" element={<Overview />} />
               <Route path="/scan" element={<Scan />} />
               <Route path="/pr-queue" element={<PrQueue />} />

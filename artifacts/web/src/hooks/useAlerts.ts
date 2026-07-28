@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { apiFetch } from '@/api/apiFetch';
+import { apiFetch, ApiError } from '@/api/apiFetch';
 import { useAppConfig } from '@/api/config';
 import { getSupabaseClient } from '@/api/supabaseClient';
 
@@ -13,6 +13,8 @@ export interface NotificationSettings {
   pagerduty_masked:     string | null;
   slack_configured:     boolean;
   slack_masked:         string | null;
+  /** False when the backend returned 404 (endpoint not yet wired up). */
+  backendAvailable:     boolean;
 }
 
 export interface RoutingRule {
@@ -24,10 +26,35 @@ export interface RoutingRule {
 
 // ── useNotificationSettings ────────────────────────────────────────────────
 
+const SETTINGS_DEFAULTS: NotificationSettings = {
+  pagerduty_configured: false,
+  pagerduty_masked:     null,
+  slack_configured:     false,
+  slack_masked:         null,
+  backendAvailable:     false,
+};
+
 export function useNotificationSettings() {
   return useQuery<NotificationSettings>({
     queryKey: ['notificationSettings'],
-    queryFn:  () => apiFetch<NotificationSettings>('/notification-settings'),
+    // Don't retry 404s — the endpoint simply isn't wired up yet.
+    retry: (failureCount, error) => {
+      if (error instanceof ApiError && error.status === 404) return false;
+      return failureCount < 2;
+    },
+    queryFn: async () => {
+      try {
+        const data = await apiFetch<Omit<NotificationSettings, 'backendAvailable'>>(
+          '/notification-settings',
+        );
+        return { ...data, backendAvailable: true };
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          return SETTINGS_DEFAULTS; // render cards in "not configured" state
+        }
+        throw err; // surface real errors (auth, 5xx, network) normally
+      }
+    },
   });
 }
 

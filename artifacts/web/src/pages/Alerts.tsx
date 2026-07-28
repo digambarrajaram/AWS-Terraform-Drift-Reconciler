@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { toast } from 'sonner';
 import {
   CheckCircle2, XCircle, Eye, EyeOff, Send, Save,
-  Bell, Globe, SlidersHorizontal, Loader2,
+  Bell, Globe, SlidersHorizontal, Loader2, AlertTriangle,
 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useScope } from '@/hooks/useScope';
@@ -52,13 +52,15 @@ function CredentialRow({
   configured,
   masked,
   scope,
+  backendAvailable,
 }: {
-  label:      string;
-  field:      string;
-  channel:    'pagerduty' | 'slack';
-  configured: boolean;
-  masked:     string | null;
-  scope:      string | null;
+  label:            string;
+  field:            string;
+  channel:          'pagerduty' | 'slack';
+  configured:       boolean;
+  masked:           string | null;
+  scope:            string | null;
+  backendAvailable: boolean;
 }) {
   const [value,    setValue]    = useState('');
   const [showVal,  setShowVal]  = useState(false);
@@ -110,7 +112,8 @@ function CredentialRow({
         <button
           type="button"
           onClick={handleTest}
-          disabled={!configured || testing}
+          disabled={!configured || testing || !backendAvailable}
+          title={!backendAvailable ? 'Backend not connected' : undefined}
           className="flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
         >
           {testing ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
@@ -139,11 +142,13 @@ function CredentialRow({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           autoComplete="off"
-          className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-w-0"
+          disabled={!backendAvailable}
+          className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-w-0 disabled:opacity-50"
         />
         <button
           type="submit"
-          disabled={!value.trim() || save.isPending}
+          disabled={!value.trim() || save.isPending || !backendAvailable}
+          title={!backendAvailable ? 'Backend not connected' : undefined}
           className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity whitespace-nowrap"
         >
           {save.isPending ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
@@ -288,10 +293,9 @@ function RoutingRulesSection({
             const globalKey = `${sev}-global`;
             const scopeKey  = `${sev}-${scope}`;
             return (
-              <>
+              <React.Fragment key={sev}>
                 {/* Global default row */}
                 <RoutingRuleRow
-                  key={globalKey}
                   severity={sev}
                   scopeLabel="Global"
                   scopeValue={null}
@@ -302,7 +306,6 @@ function RoutingRulesSection({
                 {/* Scope-specific override — only when a scope is selected */}
                 {scope && (
                   <RoutingRuleRow
-                    key={scopeKey}
                     severity={sev}
                     scopeLabel={scopeLabel}
                     scopeValue={scope}
@@ -311,7 +314,7 @@ function RoutingRulesSection({
                     saving={savingKey === scopeKey}
                   />
                 )}
-              </>
+              </React.Fragment>
             );
           })}
         </tbody>
@@ -352,11 +355,22 @@ export default function Alerts() {
             <Skeleton className="h-32 w-full rounded-xl" />
           </div>
         ) : settings.error ? (
-          <p className="text-xs text-destructive">
-            Failed to load settings: {(settings.error as Error).message}
-          </p>
+          <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
+            <AlertTriangle size={13} className="shrink-0" />
+            Failed to reach notification settings: {(settings.error as Error).message}
+          </div>
         ) : (
           <div className="space-y-3">
+            {!ns?.backendAvailable && (
+              <div className="flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
+                <AlertTriangle size={13} className="shrink-0" />
+                <span>
+                  <strong>Backend not connected</strong> — the notification-settings endpoint returned 404.
+                  Wire up <code className="font-mono">serve.py</code> to enable saving credentials and sending tests.
+                  The routing rules table (Supabase) still works independently.
+                </span>
+              </div>
+            )}
             <CredentialRow
               label="PagerDuty Routing Key"
               field="pagerduty_routing_key"
@@ -364,6 +378,7 @@ export default function Alerts() {
               configured={ns?.pagerduty_configured ?? false}
               masked={ns?.pagerduty_masked ?? null}
               scope={scope}
+              backendAvailable={ns?.backendAvailable ?? false}
             />
             <CredentialRow
               label="Slack Webhook URL"
@@ -372,6 +387,7 @@ export default function Alerts() {
               configured={ns?.slack_configured ?? false}
               masked={ns?.slack_masked ?? null}
               scope={scope}
+              backendAvailable={ns?.backendAvailable ?? false}
             />
           </div>
         )}

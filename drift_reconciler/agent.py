@@ -2,17 +2,23 @@ import argparse
 from datetime import datetime
 import logging
 import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# Windows terminals often default to cp1252 which can't encode emoji /
+# Unicode symbols used in progress output.  Reconfigure early so every
+# print() in this module survives regardless of terminal code page.
+if sys.stdout.encoding and sys.stdout.encoding.lower() in ('cp1252', 'cp1250', 'cp1251', 'cp1253', 'cp1254', 'cp1255', 'cp1256', 'cp1257', 'cp1258', 'cp437', 'cp850', 'cp852', 'cp866'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 # Suppress botocore credential-discovery noise ("Both api_key and AWS
 # credentials were provided …") that fires every time a Bedrock client
 # is instantiated — twice per run (main agent + Trivy gate).  This is
 # purely SDK chatter; actual auth errors still surface as exceptions.
 logging.getLogger("botocore").setLevel(logging.ERROR)
-import re
-import shutil
-import subprocess
-import sys
-import tempfile
 from typing import Annotated
 from typing_extensions import TypedDict
 from langchain_aws import ChatBedrockConverse
@@ -639,7 +645,7 @@ def _print_drift_exceptions(drift_report_str: str):
     expired = report.get("expired_exceptions") or []
 
     if expired:
-        print(f"\n  ⚠ {len(expired)} drift exception(s) have EXPIRED and are no longer suppressing drift:")
+        print(f"\n  !! {len(expired)} drift exception(s) have EXPIRED and are no longer suppressing drift:")
         for exc in expired:
             print(f"    - {exc.get('resource_address', '?')} "
                   f"(drift_type={exc.get('drift_type', '?')}, "
@@ -650,13 +656,13 @@ def _print_drift_exceptions(drift_report_str: str):
         auto_exc = [r for r in suppressed if r.get("_suppressed_by", {}).get("auto")]
         manual_exc = [r for r in suppressed if not r.get("_suppressed_by", {}).get("auto")]
         if auto_exc:
-            print(f"  🔇 {len(auto_exc)} drift finding(s) auto-suppressed by drift-exceptions.json:")
+            print(f"  [suppressed] {len(auto_exc)} drift finding(s) auto-suppressed by drift-exceptions.json:")
             for r in auto_exc:
                 exc = r.get("_suppressed_by", {})
                 print(f"    - {r.get('address', '?')}  →  {exc.get('reason', '?')[:100]}")
             print()
         if manual_exc:
-            print(f"  📋 {len(manual_exc)} drift finding(s) suppressed by drift-exceptions.json (manual ack):")
+            print(f"  [noted] {len(manual_exc)} drift finding(s) suppressed by drift-exceptions.json (manual ack):")
             for r in manual_exc:
                 exc = r.get("_suppressed_by", {})
                 print(f"    - {r.get('address', '?')}  →  {exc.get('reason', '?')[:100]}")
@@ -670,8 +676,8 @@ def _print_drift_exceptions(drift_report_str: str):
                       if r not in external and r not in auto]
 
         if auto:
-            print(f"  🔇 {len(auto)} resource(s) auto-suppressed "
-                  f"(expected drift — ASG-managed, AWS-managed tags, etc.):")
+            print(f"  [suppressed] {len(auto)} resource(s) auto-suppressed "
+                  f"(expected drift -- ASG-managed, AWS-managed tags, etc.):")
             for r in auto:
                 reasons = r.get("_auto_reasons", [])
                 print(f"      {r['address']}  ({'; '.join(reasons[:2])})")
@@ -693,8 +699,8 @@ def _print_drift_exceptions(drift_report_str: str):
             print()
 
         if external:
-            print(f"  ⚠ {len(external)} resource(s) have drift covered by lifecycle.ignore_changes "
-                  f"— managed outside Terraform, will not attempt reconciliation:")
+            print(f"  !! {len(external)} resource(s) have drift covered by lifecycle.ignore_changes "
+                  f"-- managed outside Terraform, will not attempt reconciliation:")
             for r in external:
                 ignored = r.get("_ignored_fields", [])
                 print(f"      {r['address']}  (ignored: {', '.join(ignored)})")
@@ -704,7 +710,7 @@ def _print_drift_exceptions(drift_report_str: str):
             has_security = any(r.get("security_impact") == "high" for r in actionable)
             has_deleted = any(r.get("status") == "deleted_externally" for r in actionable)
             if has_security or has_deleted:
-                print(f"  🔍 {len(actionable)} drift finding(s) may need human review:")
+                print(f"  [review] {len(actionable)} drift finding(s) may need human review:")
                 for r in actionable:
                     if r.get("security_impact") == "high" or r.get("status") == "deleted_externally":
                         fields = list(r.get("changes", {}).keys())
@@ -728,7 +734,7 @@ def _print_drift_exceptions(drift_report_str: str):
                     if auto: types.append(f"{len(auto)} auto-suppressed")
                     if external: types.append(f"{len(external)} lifecycle.ignore_changes")
                     if suppressed: types.append(f"{len(suppressed)} drift-exceptions")
-                    print(f"  📊 Suppression summary: {', '.join(types)} — "
+                    print(f"  [summary] Suppression summary: {', '.join(types)} -- "
                           f"{len(actionable)} actionable remaining")
                 print()
 

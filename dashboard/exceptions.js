@@ -1,7 +1,7 @@
 var _currentScope = "";
 
 async function fetchExceptions(scope) {
-  var resp = await fetch("/api/exceptions?scope=" + encodeURIComponent(scope));
+  var resp = await fetch("/api/exceptions?scope=" + encodeURIComponent(scope), { headers: _authHeaders() });
   if (!resp.ok) {
     var err = { error: "Unexpected error (" + resp.status + ")" };
     try { err = await resp.json(); } catch (e) {}
@@ -93,7 +93,7 @@ async function _expireEntry(schemaType, idents) {
   try {
     var resp = await fetch("/api/exceptions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
       body: JSON.stringify({
         scope: _currentScope,
         exception_type: schemaType,
@@ -121,7 +121,7 @@ async function _deleteEntry(schemaType, idents) {
   try {
     var resp = await fetch("/api/exceptions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
       body: JSON.stringify({
         scope: _currentScope,
         exception_type: schemaType,
@@ -203,7 +203,7 @@ function _setupForm(formId, exceptionType) {
     try {
       var resp = await fetch("/api/exceptions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({
           scope: _currentScope,
           exception_type: exceptionType,

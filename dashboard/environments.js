@@ -1,5 +1,5 @@
 async function fetchEnvironments() {
-  var resp = await fetch("/api/environments");
+  var resp = await fetch("/api/environments", { headers: _authHeaders() });
   if (!resp.ok) throw new Error("HTTP " + resp.status);
   return await resp.json();
 }
@@ -39,7 +39,7 @@ function renderEnvironmentsTable(rows) {
       try {
         var resp = await fetch("/api/environments/" + btn.dataset.id, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
           body: JSON.stringify({ is_active: true })
         });
         if (resp.ok) refreshAll();
@@ -54,7 +54,7 @@ function renderEnvironmentsTable(rows) {
       if (!window.confirm("Deactivate this environment? It will stop appearing in scope selectors.")) return;
       btn.disabled = true;
       try {
-        var resp = await fetch("/api/environments/" + btn.dataset.id, { method: "DELETE" });
+        var resp = await fetch("/api/environments/" + btn.dataset.id, { method: "DELETE", headers: _authHeaders() });
         if (resp.ok) refreshAll();
         else alert("Failed to deactivate.");
       } catch (e) { alert("Network error: " + e.message); }
@@ -92,7 +92,7 @@ function _showEditForm(id, rows) {
 
   fetch("/api/environments/" + id, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
     body: JSON.stringify(updates)
   }).then(function(resp) {
     if (resp.ok) refreshAll();
@@ -146,7 +146,7 @@ document.addEventListener("DOMContentLoaded", function() {
       if (awsSecretKey) payload._aws_secret_access_key = awsSecretKey;
       var resp = await fetch("/api/environments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify(payload)
       });
       var data = await resp.json().catch(function() { return {}; });

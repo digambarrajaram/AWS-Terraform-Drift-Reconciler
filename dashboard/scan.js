@@ -140,7 +140,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       const resp = await fetch("/api/scan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({ scope, unmanaged_flag: unmanaged }),
       });
 

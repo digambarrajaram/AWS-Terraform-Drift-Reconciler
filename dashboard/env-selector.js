@@ -17,7 +17,7 @@
 
   async function fetchEnvironments() {
     if (_cache) return _cache;
-    var resp = await fetch("/api/environments");
+    var resp = await fetch("/api/environments", { headers: _authHeaders() });
     if (!resp.ok) throw new Error("Failed to fetch environments: " + resp.status);
     _cache = await resp.json();
     return _cache;

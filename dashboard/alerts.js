@@ -38,7 +38,7 @@ function renderRoutingTable(rows) {
 
 async function fetchStatus() {
   try {
-    var resp = await fetch("/api/notification-settings");
+    var resp = await fetch("/api/notification-settings", { headers: _authHeaders() });
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     var data = await resp.json();
 
@@ -77,7 +77,7 @@ function _setupSecretForm(formId, field, resultId) {
     try {
       var resp = await fetch("/api/notification-settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({ field: field, value: value })
       });
       var data = await resp.json().catch(function() { return {}; });
@@ -106,7 +106,7 @@ function _setupTestButton(btnId, channel, resultId) {
     try {
       var resp = await fetch("/api/notification-settings/test", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({ channel: channel })
       });
       var data = await resp.json().catch(function() { return {}; });
@@ -137,7 +137,7 @@ function _setupRoutingRows() {
       try {
         var resp = await fetch("/api/routing-rules", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
           body: JSON.stringify({ severity: severity, channel: channel })
         });
         var data = await resp.json().catch(function() { return {}; });

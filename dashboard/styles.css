@@ -221,6 +221,22 @@ html body main table#findings-table tbody#findings-body tr td a {
   .stage.skipped { border-top-color: #d29922; text-decoration: line-through; }
 }
 
+/* ── Live log terminal ── */
+.scan-terminal {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 24px;
+  max-height: 420px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+}
+
 /* ── Rollback ── */
 .rollback-row {
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;

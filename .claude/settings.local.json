@@ -66,7 +66,8 @@
       "Bash(/usr/bin/python3 *)",
       "Bash(echo \"started $!\")",
       "Bash(grep -n \"try:\\\\|except Exception\\\\|raise RuntimeError\\\\|raise$\\\\|sys.exit\\\\|if _run_id\\\\|update_scan_run\\\\|get_terraform_drift_data\\\\|_run_id = args\" /mnt/d/aws-terraform-drift-reconciler/drift_reconciler/agent.py)",
-      "Bash(/mnt/d/aws-terraform-drift-reconciler/drift/bin/python3 --version)"
+      "Bash(/mnt/d/aws-terraform-drift-reconciler/drift/bin/python3 --version)",
+      "Bash(pip list *)"
     ]
   }
 }

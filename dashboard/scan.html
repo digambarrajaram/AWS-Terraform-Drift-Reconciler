@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="env-selector.js" defer></script>
+  <script src="auth.js"></script>
 </head>
 <body>
   <header>
@@ -65,6 +66,8 @@
       </div>
     </div>
 
+    <div id="scan-terminal" class="scan-terminal" hidden></div>
+
     <div id="scan-result" hidden>
       <h2>Results</h2>
       <div id="scan-result-body"></div>
@@ -97,6 +100,7 @@ function _resetStages() {
 }
 
 const _STAGE_ORDER = ["unmanaged_scan", "reconcile_agent", "trivy_gate", "drift_alert", "drift_pr"];
+var _ANSI_RE = /\x1b\[[0-9;]*m/g;
 
 function updateTracker(row) {
   if (!row) return;
@@ -277,6 +281,91 @@ function startPolling(runId) {
   var pollStart = Date.now();
   var TIMEOUT_MS = 300000; // 5 minutes
 
+  // ── Live log streaming (2 s interval, independent of stage tracker) ──
+  var lineOffset = 0;
+  var logTimer = null;
+  var logComplete = false;
+  var fetchInFlight = false;
+  var terminal = document.getElementById("scan-terminal");
+  terminal.hidden = false;
+  terminal.textContent = "";
+  terminal.dataset.runId = runId;
+
+  function _scrollToBottom(force) {
+    if (force || terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50) {
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+  }
+
+  var _jumpBtn = null;
+  function _showJumpButton() {
+    if (_jumpBtn) return;
+    _jumpBtn = document.createElement("button");
+    _jumpBtn.textContent = "Jump to bottom";
+    _jumpBtn.style.cssText =
+      "position:sticky;bottom:8px;left:50%;transform:translateX(-50%);" +
+      "background:#21262d;border:1px solid #30363d;color:#c9d1d9;" +
+      "padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;z-index:1";
+    _jumpBtn.addEventListener("click", function() {
+      _scrollToBottom(true);
+      if (_jumpBtn) { _jumpBtn.remove(); _jumpBtn = null; }
+    });
+    terminal.appendChild(_jumpBtn);
+  }
+
+  terminal.addEventListener("scroll", function() {
+    var atBottom = terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50;
+    if (atBottom && _jumpBtn) { _jumpBtn.remove(); _jumpBtn = null; }
+  });
+
+  function _fetchLogs() {
+    if (fetchInFlight) return;
+    fetchInFlight = true;
+    fetch("/api/scan/" + runId + "/logs?offset=" + lineOffset, {
+      headers: _authHeaders()
+    }).then(function(resp) {
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return resp.json();
+    }).then(function(data) {
+      fetchInFlight = false;
+      // Bail if a newer scan has claimed the terminal (cross-contamination
+      // guard).  We deliberately do NOT check stopped here — that would
+      // defeat the drain call in _stop().
+      if (terminal.dataset.runId !== runId) return;
+      if (!data || !data.lines) {
+        // Complete with nothing new — stop draining.
+        if (data && data.complete) {
+          logComplete = true;
+          if (logTimer) { clearInterval(logTimer); logTimer = null; }
+        }
+        return;
+      }
+      var wasAtBottom = terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50;
+      for (var i = 0; i < data.lines.length; i++) {
+        var line = data.lines[i];
+        terminal.textContent += line.text.replace(_ANSI_RE, "") + "\n";
+        lineOffset = line.n + 1;
+      }
+      if (wasAtBottom) {
+        terminal.scrollTop = terminal.scrollHeight;
+      } else if (data.lines.length > 0) {
+        _showJumpButton();
+      }
+      if (data.complete) {
+        logComplete = true;
+        clearInterval(logTimer);
+        logTimer = null;
+        // Drain any remaining lines — only when we just received new data.
+        _fetchLogs();
+      }
+    }).catch(function() {
+      fetchInFlight = false;
+    });
+  }
+
+  logTimer = setInterval(_fetchLogs, 2000);
+  _fetchLogs();  // immediate first fetch
+
   function _checkTimeout(currentStatus) {
     if (currentStatus && currentStatus !== "running") return false;
     if (Date.now() - pollStart > TIMEOUT_MS) {
@@ -313,6 +402,9 @@ function startPolling(runId) {
   function _stop() {
     stopped = true;
     clearTimeout(fallbackTimer);
+    if (logTimer) { clearInterval(logTimer); logTimer = null; }
+    // One final drain in case the interval hadn't fired recently.
+    if (!logComplete) _fetchLogs();
     _supabase().removeChannel(channel);
   }
 
@@ -389,7 +481,7 @@ document.addEventListener("DOMContentLoaded", function() {
     try {
       var resp = await fetch("/api/scan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({ scope: scope, unmanaged_flag: unmanaged }),
       });
 

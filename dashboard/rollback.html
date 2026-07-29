@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="styles.css" media="print" onload="this.media='all'">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="env-selector.js" defer></script>
+  <script src="auth.js"></script>
 </head>
 <body>
   <header>
@@ -146,7 +147,7 @@ async function startPreview(prNumber, scope) {
   try {
     var resp = await fetch("/api/rollback/preview", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
       body: JSON.stringify({ pr_number: prNumber, scope: scope }),
     });
     var data = await resp.json().catch(function() { return {}; });
@@ -251,7 +252,7 @@ document.addEventListener("DOMContentLoaded", function() {
     try {
       var resp = await fetch("/api/rollback/execute", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({ pr_number: _currentPrNumber, scope: _currentScope }),
       });
       var data = await resp.json().catch(function() { return {}; });

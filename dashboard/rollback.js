@@ -81,7 +81,7 @@ async function startPreview(prNumber, scope) {
   try {
     const resp = await fetch("/api/rollback/preview", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
       body: JSON.stringify({ pr_number: prNumber, scope }),
     });
     const data = await resp.json().catch(() => ({}));
@@ -183,7 +183,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const resp = await fetch("/api/rollback/execute", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({}, _authHeaders(), { "Content-Type": "application/json" }),
         body: JSON.stringify({ pr_number: _currentPrNumber, scope: _currentScope }),
       });
       const data = await resp.json().catch(() => ({}));

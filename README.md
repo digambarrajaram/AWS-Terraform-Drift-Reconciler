@@ -35,7 +35,8 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Multi-account / multi-region matrix | ✅ |
 | GitHub OIDC-based AWS auth (scan role + apply role) | ✅ |
 | PR creation with patched `.tf` file | ✅ |
-| PR accept/reject workflow with `terraform apply` | ✅ |
+| Unmanaged-resource PR type (`pr_type="unmanaged"`) tracked separately | ✅ |
+| PR queue with type filter (fix/batch/rollback/unmanaged) + colored badges | ✅ |
 | Scope-tagged PR branches, titles, and dedup keys | ✅ |
 | `lifecycle.ignore_changes` / externally-managed resource handling | ✅ |
 | Drift exceptions stored in Supabase (no more local JSON files) | ✅ |
@@ -91,6 +92,7 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Routing rules stored in Supabase, configurable per scope | ✅ |
 | PagerDuty/Slack credentials stored in Supabase (masked, service-role only) | ✅ |
 | Test-alert button from dashboard | ✅ |
+| Per-scan alert tracking (PagerDuty dispatch count, Slack message count) | ✅ |
 | All notification modules CI-safe (stdlib + `requests`, no dotenv dependency) | ✅ |
 
 ### Noise suppression
@@ -159,6 +161,9 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Feature | Status |
 |---|---|
 | Live scan trigger with stage tracking (polling + Realtime) | ✅ |
+| Stage indicators with no-op detection (hollow dots for idle nodes) | ✅ |
+| Per-stage outcome chips (Drift PR N / Unmanaged PR N) | ✅ |
+| Alerts-sent tracking (PagerDuty + Slack counts, no-op detection) | ✅ |
 | Drift findings explorer with filters, search, pagination | ✅ |
 | Rollback UI with preview diff + confirmation polling | ✅ |
 | Trends page with 4 Chart.js visualizations + KPI summary cards | ✅ |
@@ -167,6 +172,7 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Environments management (CRUD, git source, AWS credentials via UI) | ✅ |
 | Responsive dark-theme design with shared site navigation | ✅ |
 | 5-minute scan polling timeout with user-facing message | ✅ |
+| Structured scan results (mode banner, drift/unmanaged blocks, per-type PR links) | ✅ |
 | Structured error display (summary, suggestion, expandable details) | ✅ |
 | Shared environment selector component (`env-selector.js`) | ✅ |
 
@@ -193,6 +199,7 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | UTF-8 encoding on all subprocess calls (no mangled box-drawing characters) | ✅ |
 | `-no-color` on all terraform commands + ANSI-strip defense-in-depth | ✅ |
 | Stale-request guard in `refreshAll` (prevents rapid-tab-switch rendering races) | ✅ |
+| Null-safe `updateTracker` with Realtime channel unsubscribe on stop | ✅ |
 | Canvas lifecycle fix (recreate on empty → data transitions) | ✅ |
 
 ---

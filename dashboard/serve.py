@@ -7,16 +7,20 @@ Usage:
 """
 
 import argparse
+import hmac
 import http.server
 import json
 import os
 import re
+import subprocess
 import sys
+import threading
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import requests
-import subprocess
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 import sys as _sys
@@ -24,6 +28,12 @@ _sys.path.insert(0, str(_REPO_ROOT))
 from drift_reconciler.scan_runs import create_scan_run, update_scan_run
 from drift_reconciler.rollback_runs import create_rollback_run
 _DASHBOARD_DIR = _REPO_ROOT / "dashboard"
+
+# ── Live log capture ─────────────────────────────────────────────────
+_LOG_DIR = Path("/tmp/drift-logs")
+_LOG_BUFFERS: dict[str, deque] = {}
+_LOG_LOCK = threading.Lock()
+_LOG_MAXLINES = 2000
 
 # ── Environment cache (30s TTL) ──────────────────────────────────────
 _ENV_CACHE: dict = {}
@@ -154,6 +164,127 @@ def _spawn_agent(scope: str, extra_args: list[str]) -> None:
     subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
 
+def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str) -> subprocess.Popen:
+    """Spawn *cmd* as a fire-and-forget subprocess with stdout captured.
+
+    Inserts ``-u`` after the interpreter so piped stdout is unbuffered
+    (without it the terminal pane shows nothing until the process is
+    nearly done).  Every line is timestamped and written to an in-memory
+    ring buffer keyed by *run_id* and to ``/tmp/drift-logs/{run_id}.log``.
+    """
+    # ponytail: the ring buffer holds 2000 lines per run — fine for the
+    # single-digit concurrent runs this server sees.  If we ever fan out
+    # to dozens of parallel scans, add a TTL-based cleanup in a periodic
+    # thread or a __del__ hook on the Popen wrapper.
+    cmd = list(cmd)
+    cmd.insert(1, "-u")  # force unbuffered stdout
+
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _LOG_DIR / f"{run_id}.log"
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    with _LOG_LOCK:
+        _LOG_BUFFERS[run_id] = deque(maxlen=_LOG_MAXLINES)
+
+    def _stream() -> None:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                for line in proc.stdout:
+                    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    entry = f"[{ts}] {line.rstrip()}"
+                    with _LOG_LOCK:
+                        buf = _LOG_BUFFERS.get(run_id)
+                        if buf is not None:
+                            buf.append(entry)
+                    f.write(entry + "\n")
+                    f.flush()
+        except Exception:
+            pass
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_stream, daemon=True, name=f"log-{run_id[:8]}").start()
+    return proc
+
+
+def _cleanup_old_logs() -> None:
+    """Delete log files older than 24 h and evict ring buffers for terminal
+    runs whose database rows are more than 24 h old.  Called once at startup."""
+    import time as _time
+    cutoff = _time.time() - 86400
+
+    # ── File cleanup ──
+    if _LOG_DIR.is_dir():
+        deleted = 0
+        for f in _LOG_DIR.glob("*.log"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    deleted += 1
+            except OSError:
+                pass
+        if deleted:
+            print(f"[startup] Removed {deleted} old log file(s) from {_LOG_DIR}")
+
+    # ── Ring buffer eviction ──
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not key:
+        return
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    with _LOG_LOCK:
+        run_ids = list(_LOG_BUFFERS.keys())
+    if not run_ids:
+        return
+
+    evicted = 0
+    for rid in run_ids:
+        terminal = False
+        try:
+            for table in ("scan_runs", "rollback_runs"):
+                resp = requests.get(
+                    f"{url}/rest/v1/{table}?select=status,started_at&id=eq.{rid}",
+                    headers=headers, timeout=5,
+                )
+                if resp.status_code == 200 and resp.json():
+                    row = resp.json()[0]
+                    status = row.get("status", "")
+                    if status in ("complete", "failed"):
+                        started = row.get("started_at") or ""
+                        if started:
+                            try:
+                                from datetime import datetime as _dt
+                                ts = _dt.fromisoformat(started.replace("Z", "+00:00"))
+                                if _time.time() - ts.timestamp() > 86400:
+                                    terminal = True
+                            except (ValueError, TypeError):
+                                pass
+                    break
+        except Exception:
+            continue
+
+        if terminal:
+            with _LOG_LOCK:
+                _LOG_BUFFERS.pop(rid, None)
+            evicted += 1
+
+    if evicted:
+        print(f"[startup] Evicted {evicted} stale ring buffer(s)")
+
+
 def _load_env() -> None:
     env_path = _REPO_ROOT / ".env"
     if not env_path.is_file():
@@ -169,8 +300,41 @@ def _load_env() -> None:
 class _Handler(http.server.SimpleHTTPRequestHandler):
     _CACHEABLE = {".js", ".css", ".png", ".svg", ".woff2"}
 
+    # ── Auth ─────────────────────────────────────────────────────────
+    def _check_auth(self) -> bool:
+        """Return True if the request is authorised.
+
+        When ``API_ACCESS_TOKEN`` is not configured in the environment
+        every request passes (a warning is logged once at startup).
+        When it *is* configured the ``X-Api-Access-Token`` request
+        header must match, using a constant-time comparison."""
+        token = os.environ.get("API_ACCESS_TOKEN", "").strip()
+        if not token:
+            return True  # auth disabled — startup warning already printed
+        request_token = (self.headers.get("X-Api-Access-Token") or "").strip()
+        if not request_token:
+            return False
+        return hmac.compare_digest(token, request_token)
+
+    def _unauthorized(self) -> None:
+        body = json.dumps(
+            {"error": "Missing or invalid X-Api-Access-Token header"}
+        ).encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = self.path.split("?")[0]
+
+        # Auth-gate API data endpoints — everything under /api/ returns
+        # infrastructure details, masked secrets, or exception entries.
+        if path.startswith("/api/") and not self._check_auth():
+            self._unauthorized()
+            return
+
         if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html", "/exceptions", "/exceptions.html", "/alerts", "/alerts.html", "/environments", "/environments.html"):
             self._serve_injected()
         elif path == "/favicon.ico":
@@ -182,6 +346,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._serve_notification_settings()
         elif path.startswith("/api/exceptions"):
             self._serve_api_exceptions()
+        elif path.startswith("/api/scan/") and path.endswith("/logs"):
+            self._serve_run_logs()
         elif path.endswith((".js", ".css", ".png")):
             self._serve_static(path)
         else:
@@ -189,6 +355,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+
+        if not self._check_auth():
+            self._unauthorized()
+            return
+
         if path == "/api/scan":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length > 0 else b""
@@ -239,7 +410,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT))
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -282,7 +453,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT))
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -339,7 +510,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT))
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -362,6 +533,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_PATCH(self):
         path = self.path.split("?")[0]
+
+        if not self._check_auth():
+            self._unauthorized()
+            return
+
         if path.startswith("/api/environments/"):
             env_id = path.split("/")[-1]
             self._handle_environments_patch(env_id)
@@ -370,6 +546,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = self.path.split("?")[0]
+
+        if not self._check_auth():
+            self._unauthorized()
+            return
+
         if path.startswith("/api/environments/"):
             env_id = path.split("/")[-1]
             self._handle_environments_delete(env_id)
@@ -1025,6 +1206,91 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    # ── Live log streaming ──────────────────────────────────────────
+    def _serve_run_logs(self):
+        """GET /api/scan/{run_id}/logs?offset={n}
+
+        Returns newline-delimited log lines from *offset* onward as a
+        JSON array of ``{n, ts, text}`` objects plus a ``complete`` flag
+        sourced from the database (not inferred from emptiness)."""
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+
+        # Extract run_id from /api/scan/{run_id}/logs
+        parts = parsed.path.rstrip("/").split("/")
+        if len(parts) < 4:
+            self._json_error(400, "Missing run_id in path")
+            return
+        run_id = parts[-2]  # /api/scan/{run_id}/logs → index -2
+
+        try:
+            offset = max(0, int(params.get("offset", ["0"])[0]))
+        except (ValueError, IndexError):
+            offset = 0
+
+        # ── Read lines from log file (primary) or ring buffer (fallback) ──
+        log_path = _LOG_DIR / f"{run_id}.log"
+        all_lines: list[str] = []
+        try:
+            if log_path.is_file():
+                with open(log_path, encoding="utf-8") as f:
+                    all_lines = f.read().splitlines()
+        except (OSError, UnicodeDecodeError):
+            pass
+
+        # Fallback to in-memory ring buffer when file is missing or unreadable.
+        if not all_lines:
+            with _LOG_LOCK:
+                buf = _LOG_BUFFERS.get(run_id)
+                if buf is not None:
+                    all_lines = list(buf)
+
+        # ── Slice from offset; parse ts + text ──
+        result_lines = []
+        for i in range(offset, len(all_lines)):
+            raw = all_lines[i]
+            ts = ""
+            text = raw
+            if raw.startswith("[") and "] " in raw:
+                bracket_end = raw.index("] ")
+                ts = raw[1:bracket_end]
+                text = raw[bracket_end + 2:]
+            result_lines.append({"n": i, "ts": ts, "text": text})
+
+        # ── Determine completeness from the database ──
+        complete = False
+        try:
+            url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+            key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+            if url_base and key:
+                headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+                for table in ("scan_runs", "rollback_runs"):
+                    try:
+                        resp = requests.get(
+                            f"{url_base}/rest/v1/{table}?select=status&id=eq.{run_id}",
+                            headers=headers, timeout=5,
+                        )
+                        if resp.status_code == 200 and resp.json():
+                            row = resp.json()[0]
+                            complete = row["status"] in ("complete", "failed")
+                            break
+                    except requests.RequestException:
+                        continue
+        except Exception:
+            # If Supabase is unreachable, treat as incomplete — the
+            # caller will keep polling.
+            pass
+
+        payload = json.dumps(
+            {"lines": result_lines, "complete": complete},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _serve_injected(self):
         try:
             self._serve_injected_impl()
@@ -1071,6 +1337,18 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
 def main() -> int:
     _load_env()
+
+    # ── Auth gate ──────────────────────────────────────────────────
+    _api_token = os.environ.get("API_ACCESS_TOKEN", "").strip()
+    if not _api_token:
+        print("=" * 68)
+        print("WARNING: API_ACCESS_TOKEN is not set.")
+        print("The dashboard is running with NO authentication —")
+        print("anyone who can reach this port can trigger scans,")
+        print("execute rollbacks, and modify environments.")
+        print(f"Set API_ACCESS_TOKEN in .env and restart.")
+        print("=" * 68)
+
     parser = argparse.ArgumentParser(description="Serve the drift dashboard")
     parser.add_argument("--port", type=int, default=8080, help="Listen port")
     args = parser.parse_args()
@@ -1093,6 +1371,8 @@ def main() -> int:
         print(f"Cleared {len(r.json() or [])} stale running scan(s)")
     except Exception:
         pass
+
+    _cleanup_old_logs()
 
     print(f"Dashboard → http://localhost:{args.port}")
     httpd = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), _Handler)

@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
   ScanSearch,
@@ -25,6 +25,28 @@ const NAV_ITEMS = [
   { label: 'Explorer',     to: '/explorer',     icon: Compass         },
 ];
 
+/**
+ * A NavLink that preserves the current search string (?scope=...) when
+ * navigating between pages. Without this, clicking any nav item strips
+ * the scope param and every page re-defaults to the first environment.
+ */
+function ScopeNavLink({
+  to,
+  end,
+  children,
+}: {
+  to: string;
+  end?: boolean;
+  children: (props: { isActive: boolean }) => React.ReactNode;
+}) {
+  const { search } = useLocation();
+  return (
+    <NavLink to={{ pathname: to, search }} end={end}>
+      {children}
+    </NavLink>
+  );
+}
+
 export default function AppShell() {
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
@@ -42,21 +64,21 @@ export default function AppShell() {
           <ul className="space-y-0.5 px-2">
             {NAV_ITEMS.map(({ label, to, icon: Icon }) => (
               <li key={to}>
-                <NavLink
-                  to={to}
-                  end={to === '/'}
-                  className={({ isActive }) =>
-                    [
-                      'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
-                      isActive
-                        ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
-                        : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
-                    ].join(' ')
-                  }
-                >
-                  <Icon size={15} className="shrink-0" />
-                  {label}
-                </NavLink>
+                <ScopeNavLink to={to} end={to === '/'}>
+                  {({ isActive }) => (
+                    <span
+                      className={[
+                        'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
+                        isActive
+                          ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                          : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                      ].join(' ')}
+                    >
+                      <Icon size={15} className="shrink-0" />
+                      {label}
+                    </span>
+                  )}
+                </ScopeNavLink>
               </li>
             ))}
           </ul>
@@ -64,9 +86,9 @@ export default function AppShell() {
       </aside>
 
       {/* ── Main column ── */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex flex-1 flex-col overflow-hidden min-w-0">
         {/* Header */}
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4 gap-4">
           <ScopeSelector />
           <ThemeToggle />
         </header>

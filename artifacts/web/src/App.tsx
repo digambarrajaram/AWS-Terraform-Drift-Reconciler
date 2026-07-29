@@ -2,11 +2,13 @@ import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import AppShell from '@/components/layout/AppShell';
 import AuthPromptModal from '@/components/layout/AuthPromptModal';
 import { Toaster } from '@/components/ui/sonner';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { getToken } from '@/api/apiFetch';
+import { ApiError } from '@/api/apiFetch';
 
 import Overview from '@/pages/Overview';
 import Scan from '@/pages/Scan';
@@ -17,8 +19,32 @@ import Exceptions from '@/pages/Exceptions';
 import Alerts from '@/pages/Alerts';
 import Environments from '@/pages/Environments';
 import Explorer from '@/pages/Explorer';
+import NotFound from '@/pages/NotFound';
 
-const queryClient = new QueryClient();
+// ── QueryClient ─────────────────────────────────────────────────────────────
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // Don't retry: auth errors, client errors, or endpoint-not-found.
+      // Retry up to 2× for transient 5xx / network failures.
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError) {
+          if ([401, 403, 404, 409].includes(error.status)) return false;
+          if (error.status >= 500) return failureCount < 2;
+          return false;
+        }
+        return failureCount < 2;
+      },
+    },
+    mutations: {
+      // Mutations are never retried automatically.
+      retry: false,
+    },
+  },
+});
+
+// ── AuthGuard ───────────────────────────────────────────────────────────────
 
 /** Checks for a stored token on mount; if absent, prompts immediately. */
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -33,28 +59,34 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// ── App ─────────────────────────────────────────────────────────────────────
+
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter basename={import.meta.env.BASE_URL}>
-        <AuthGuard>
-          <Routes>
-            <Route element={<AppShell />}>
-              <Route path="/" element={<Overview />} />
-              <Route path="/scan" element={<Scan />} />
-              <Route path="/pr-queue" element={<PrQueue />} />
-              <Route path="/rollback" element={<Rollback />} />
-              <Route path="/trends" element={<Trends />} />
-              <Route path="/exceptions" element={<Exceptions />} />
-              <Route path="/alerts" element={<Alerts />} />
-              <Route path="/environments" element={<Environments />} />
-              <Route path="/explorer" element={<Explorer />} />
-            </Route>
-          </Routes>
-          <AuthPromptModal />
-          <Toaster richColors position="top-right" />
-        </AuthGuard>
-      </BrowserRouter>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter basename={import.meta.env.BASE_URL}>
+          <AuthGuard>
+            <Routes>
+              <Route element={<AppShell />}>
+                <Route path="/"            element={<Overview />} />
+                <Route path="/scan"        element={<Scan />} />
+                <Route path="/pr-queue"    element={<PrQueue />} />
+                <Route path="/rollback"    element={<Rollback />} />
+                <Route path="/trends"      element={<Trends />} />
+                <Route path="/exceptions"  element={<Exceptions />} />
+                <Route path="/alerts"      element={<Alerts />} />
+                <Route path="/environments" element={<Environments />} />
+                <Route path="/explorer"    element={<Explorer />} />
+                {/* 404 — must be last inside AppShell so the shell still renders */}
+                <Route path="*"            element={<NotFound />} />
+              </Route>
+            </Routes>
+            <AuthPromptModal />
+            <Toaster richColors position="top-right" />
+          </AuthGuard>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }

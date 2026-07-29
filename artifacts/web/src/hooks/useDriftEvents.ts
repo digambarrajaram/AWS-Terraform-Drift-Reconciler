@@ -11,6 +11,9 @@ export interface DriftFilters {
   severityFilter: string; // 'HIGH' | 'MEDIUM' | 'LOW' | 'all'
   typeFilter:     string; // 'fix' | 'batch' | 'rollback' | 'unmanaged' | 'manual' | 'all'
   search:         string; // resource_id ilike
+  // Optional date range — used by Explorer; PrQueue leaves these undefined
+  dateFrom?: string;      // ISO date string, inclusive
+  dateTo?:   string;      // ISO date string, inclusive (end of day applied server-side)
 }
 
 export interface DriftSort {
@@ -48,6 +51,8 @@ export function useDriftEvents(
       if (filters.severityFilter !== 'all') q = q.eq('severity', filters.severityFilter);
       if (filters.typeFilter     !== 'all') q = q.eq('pr_type',  filters.typeFilter);
       if (filters.search)                   q = q.ilike('resource_id', `%${filters.search}%`);
+      if (filters.dateFrom)                 q = q.gte('created_at', filters.dateFrom);
+      if (filters.dateTo)                   q = q.lte('created_at', `${filters.dateTo}T23:59:59`);
 
       // NOTE: severity sort is alphabetical (H < L < M asc). A future
       // improvement is a custom severity_order column.

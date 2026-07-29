@@ -1,0 +1,31 @@
+Backend context: full CRUD.
+- GET /api/environments → all environments (active + inactive), secrets returned
+  masked/boolean only: github_token_configured, github_token_masked,
+  aws_access_key_configured, aws_access_key_masked, aws_secret_key_configured,
+  aws_secret_key_masked.
+- POST /api/environments — required: slug (must match ^[a-z0-9][a-z0-9-]*$), name,
+  aws_account_id, region, tf_state_bucket, tf_directory_path. Optional: aws_profile,
+  tf_lock_table, scan_role_variable, apply_role_secret_name, apply_environment_name,
+  repo_url, repo_branch, git_auth_type ('none'|'token'), auth_type
+  ('profile'|'role'|'keys'), aws_role_arn, aws_external_id, plus secret fields
+  prefixed with underscore: _github_token, _aws_access_key_id, _aws_secret_access_key
+  (never returned unmasked afterward). If auth_type='keys', both _aws_access_key_id
+  and _aws_secret_access_key are required. 409 if slug exists and isn't a
+  soft-deleted row available to reactivate.
+- PATCH /api/environments/{id} — same optional fields, same secret-field convention.
+  If switching auth_type to 'keys', keys must be provided or already stored.
+- DELETE /api/environments/{id} — soft-delete (sets is_active=false), not a hard delete.
+
+Build the Environments page:
+- Table of all environments (including inactive, visually greyed out) — name,
+  slug, aws_account_id, region, auth_type, is_active
+- "Add Environment" form covering all fields above; auth_type conditionally
+  reveals: profile → aws_profile field; role → aws_role_arn + aws_external_id;
+  keys → aws_access_key_id + aws_secret_access_key inputs (masked once saved,
+  with a "replace" affordance)
+- Edit form (same conditional fields), pre-filled from the GET response,
+  secret inputs shown as masked placeholders that are left untouched unless
+  the user types a new value
+- Client-side slug validation matching ^[a-z0-9][a-z0-9-]*$
+- Delete via ConfirmDialog (explain it's a soft-delete / can be reactivated
+  later by reusing the same slug)

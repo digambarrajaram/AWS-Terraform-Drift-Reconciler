@@ -1,6 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '@/api/apiFetch';
 import type { Environment } from '@/types';
+
+// ── Query ──────────────────────────────────────────────────────────────────
 
 async function fetchEnvironments(): Promise<Environment[]> {
   return apiFetch<Environment[]>('/environments');
@@ -13,8 +15,44 @@ export function useEnvironments() {
     staleTime: 30_000,
   });
 
-  const allEnvironments = query.data ?? [];
+  const allEnvironments    = query.data ?? [];
   const activeEnvironments = allEnvironments.filter((e) => e.is_active);
 
   return { ...query, allEnvironments, activeEnvironments };
+}
+
+// ── Mutations ──────────────────────────────────────────────────────────────
+
+type EnvPayload = Partial<Omit<Environment, 'id' | 'is_active'>> & {
+  slug?:                    string;
+  _github_token?:           string;
+  _aws_access_key_id?:      string;
+  _aws_secret_access_key?:  string;
+};
+
+export function useCreateEnvironment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: EnvPayload) =>
+      apiFetch<Environment>('/environments', { method: 'POST', body: JSON.stringify(payload) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['environments'] }),
+  });
+}
+
+export function useUpdateEnvironment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...payload }: EnvPayload & { id: number }) =>
+      apiFetch<Environment>(`/environments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['environments'] }),
+  });
+}
+
+export function useDeleteEnvironment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<void>(`/environments/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['environments'] }),
+  });
 }

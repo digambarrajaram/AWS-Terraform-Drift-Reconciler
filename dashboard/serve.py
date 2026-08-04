@@ -27,6 +27,7 @@ import sys as _sys
 _sys.path.insert(0, str(_REPO_ROOT))
 from drift_reconciler.scan_runs import create_scan_run, update_scan_run
 from drift_reconciler.rollback_runs import create_rollback_run
+from drift_reconciler.utils import mask_secret as _mask
 _DASHBOARD_DIR = _REPO_ROOT / "dashboard"
 
 # ── Live log capture ─────────────────────────────────────────────────
@@ -344,6 +345,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._serve_environments()
         elif path == "/api/notification-settings":
             self._serve_notification_settings()
+        elif path == "/api/github-settings":
+            self._serve_github_settings()
         elif path.startswith("/api/exceptions"):
             self._serve_api_exceptions()
         elif path.startswith("/api/scan/") and path.endswith("/logs"):
@@ -528,6 +531,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._handle_environments_post()
         elif path == "/api/notification-settings":
             self._handle_notification_settings_post()
+        elif path == "/api/github-settings":
+            self._handle_github_settings_post()
         else:
             self.send_error(404)
 
@@ -617,12 +622,6 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     except requests.RequestException:
                         pass
 
-                def _mask(val):
-                    if not val: return None
-                    s = str(val)
-                    if len(s) <= 4: return "••••"
-                    return "••••" + s[-4:]
-
                 for e in envs:
                     sec = secrets_lookup.get(e["id"], {})
                     tok = sec.get("github_token", "") if isinstance(sec, dict) else ""
@@ -680,6 +679,14 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             if not keys_in_request:
                 self._json_error(400, "auth_type='keys' requires both aws_access_key_id and aws_secret_access_key.")
                 return
+
+        # Guard: auth_type is required for new environments and must be
+        # 'role' or 'keys'.  Legacy values ('profile' / NULL) are only
+        # permitted on UPDATE for existing environments (scope-a, scope-b).
+        at = (row.get("auth_type") or "").strip()
+        if at not in ("role", "keys"):
+            self._json_error(400, "auth_type is required for new environments and must be 'role' or 'keys'.")
+            return
 
         table_url, headers = self._env_table()
         try:
@@ -993,6 +1000,62 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_github_settings(self):
+        try:
+            from drift_reconciler.github_settings import get_masked_github_token
+            result = get_masked_github_token()
+        except Exception:
+            result = {"github_configured": False, "github_masked": None}
+
+        data = json.dumps(result).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_github_settings_post(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json_error(400, "Invalid or empty JSON body")
+            return
+
+        # Only one field exists on this singleton, so we accept
+        # github_token directly rather than using the {field, value}
+        # indirection the notification-settings endpoint needs (which
+        # multiplexes pagerduty_routing_key / slack_webhook_url).
+        token = (body.get("github_token") or "").strip()
+        if not token:
+            self._json_error(400, "github_token is required and must be non-empty.")
+            return
+
+        try:
+            from drift_reconciler.github_settings import update_github_token
+            ok = update_github_token(token)
+        except Exception as e:
+            self._json_error(502, f"Failed to update: {e}")
+            return
+
+        if not ok:
+            self._json_error(
+                502,
+                "Failed to update — Supabase may be unreachable or the "
+                "app_settings table has not been seeded yet (run "
+                "migrations/create_app_settings_table.sql in the SQL Editor)."
+            )
+            return
+
+        payload = {"success": True, "github_configured": True}
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _json_error(self, status, message, **extra):
         payload = {"error": message}
         payload.update(extra)
@@ -1009,14 +1072,6 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             secrets = get_notification_secrets()
         except Exception:
             secrets = {}
-
-        def _mask(val):
-            if not val:
-                return None
-            s = str(val)
-            if len(s) <= 4:
-                return "••••"
-            return "••••" + s[-4:]
 
         pd_key = secrets.get("pagerduty_routing_key")
         slack_url = secrets.get("slack_webhook_url")
@@ -1359,18 +1414,99 @@ def main() -> int:
         print("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env")
         return 1
 
-    # Clear stale running scans from previous crashed server sessions.
+    # ── Stale-run reconciliation ──────────────────────────────────────
+    # Runs at startup and every 5 min on a background thread.  Marks any
+    # scan_runs / rollback_runs row that's been "running" longer than the
+    # threshold as failed, so orphaned rows don't stay stuck forever after
+    # a process crash, manual kill, or server restart.
+    _STALE_TIMEOUT_MINUTES = 30
+
+    def _reconcile_stale_runs() -> int:
+        """Mark scan_runs and rollback_runs rows that have been 'running'
+        longer than _STALE_TIMEOUT_MINUTES as failed.  Returns the number
+        of rows touched."""
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        cutoff = (_dt.now(_tz.utc) - _td(minutes=_STALE_TIMEOUT_MINUTES)).isoformat()
+        touched = 0
+        headers = _supabase_headers()
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+
+        for table, result_col in (("scan_runs", "result_summary"), ("rollback_runs", "result")):
+            try:
+                # Fetch running rows older than the cutoff.
+                resp = requests.get(
+                    f"{base}/rest/v1/{table}"
+                    f"?select=id,started_at"
+                    f"&status=eq.running"
+                    f"&started_at=lt.{cutoff}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    continue
+                rows = resp.json() if resp.text else []
+                if not rows:
+                    continue
+
+                stale_ids = [r["id"] for r in rows]
+                payload = {
+                    "status": "failed",
+                    "current_stage": "stale_timeout",
+                    "completed_at": _dt.now(_tz.utc).isoformat(),
+                    result_col: {
+                        "summary": "This run never reported completion — the server "
+                                   "may have been restarted or the agent process "
+                                   "may have been killed before it could finish.",
+                        "detail": "Run did not report completion — possibly crashed or interrupted",
+                        "suggestion": "Retry the operation. If the issue persists, "
+                                      "check server logs for the run ID above.",
+                    },
+                }
+                # PATCH each row individually (PostgREST doesn't support
+                # bulk PATCH with per-row values via in()).
+                for rid in stale_ids:
+                    try:
+                        patch_resp = requests.patch(
+                            f"{base}/rest/v1/{table}?id=eq.{rid}",
+                            headers=headers,
+                            json=payload,
+                            timeout=10,
+                        )
+                        if patch_resp.status_code in (200, 204):
+                            touched += 1
+                    except requests.RequestException:
+                        continue
+
+                if stale_ids:
+                    print(f"[stale-reconciler] Marked {len(stale_ids)} stale {table} row(s) as failed "
+                          f"(running since before {cutoff[:19]}Z)")
+            except Exception:
+                continue
+
+        return touched
+
+    # Run once at startup.
     try:
-        r = requests.get(
-            f"{os.environ['SUPABASE_URL'].rstrip('/')}/rest/v1/scan_runs?select=id&status=eq.running",
-            headers=_supabase_headers(), timeout=10)
-        for row in (r.json() or []):
-            requests.delete(
-                f"{os.environ['SUPABASE_URL'].rstrip('/')}/rest/v1/scan_runs?id=eq.{row['id']}",
-                headers=_supabase_headers(), timeout=10)
-        print(f"Cleared {len(r.json() or [])} stale running scan(s)")
+        n = _reconcile_stale_runs()
+        if n > 0:
+            print(f"[stale-reconciler] Startup sweep: {n} stale row(s) reconciled")
     except Exception:
         pass
+
+    # Background thread — re-check every 5 min.
+    def _stale_reconciler_loop() -> None:
+        import time as _time
+        while True:
+            _time.sleep(300)  # 5 min
+            try:
+                n = _reconcile_stale_runs()
+                if n > 0:
+                    print(f"[stale-reconciler] Periodic sweep: {n} stale row(s) reconciled")
+            except Exception:
+                pass
+
+    _stale_thread = threading.Thread(target=_stale_reconciler_loop, daemon=True)
+    _stale_thread.start()
 
     _cleanup_old_logs()
 

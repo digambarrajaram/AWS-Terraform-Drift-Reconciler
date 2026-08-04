@@ -26,6 +26,7 @@ from langgraph.graph import StateGraph, START, END
 import pagerduty_alert as pga
 import slack_notify as slack
 from drift_reconciler.environment_credentials import get_aws_session
+import drift_reconciler.drift_history as drift_history
 import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
@@ -103,6 +104,77 @@ def humanize_terraform_error(raw_error: str) -> dict:
         "summary": "The Terraform plan failed with an unrecognised error.",
         "detail": raw_error,
         "suggestion": "See technical details below.",
+    }
+
+
+def humanize_rollback_error(raw_error: str) -> dict:
+    """Return ``{summary, detail, suggestion}`` for a rollback error.
+
+    Same contract as ``humanize_terraform_error`` — *summary* is the
+    user-facing message, *detail* is the raw technical error kept for
+    debugging, and *suggestion* offers a concrete next step."""
+    text = raw_error.lower() if raw_error else ""
+
+    patterns = [
+        (("no baselines found for pr #",), {
+            "summary": (
+                "This PR doesn't have a recorded baseline yet — this "
+                "usually means the PR hasn't been merged, or drift "
+                "tracking wasn't recording state when it was created. "
+                "A rollback isn't possible until a baseline exists."
+            ),
+            "suggestion": (
+                "Verify the PR was merged (not just closed) and that "
+                "the drift-reconciler pipeline ran successfully when it "
+                "was created. If the PR predates baseline recording, a "
+                "manual rollback with terraform apply may be needed."
+            ),
+        }),
+        (("no resources passed freshness check",), {
+            "summary": (
+                "None of the resources in this PR still show the drift "
+                "that the original fix addressed — the live AWS state "
+                "already matches the rollback target."
+            ),
+            "suggestion": (
+                "This usually means the original drift was independently "
+                "resolved (e.g. a manual terraform apply or console change). "
+                "No rollback is needed."
+            ),
+        }),
+        (("source .tf file not found",), {
+            "summary": (
+                "The Terraform source file referenced in the baseline "
+                "no longer exists on disk in this environment."
+            ),
+            "suggestion": (
+                "Check whether the file was moved, renamed, or deleted "
+                "since the original PR was created. If the resource was "
+                "intentionally removed, the baseline is stale and this "
+                "rollback can be disregarded."
+            ),
+        }),
+        (("terraform plan failed", "terraform plan timed out"), {
+            "summary": (
+                "Could not connect to AWS to verify current resource "
+                "state — the Terraform plan step failed."
+            ),
+            "suggestion": (
+                "Check AWS credentials and network connectivity for this "
+                "scope, then retry. If the issue persists, the state "
+                "backend (S3/DynamoDB) may be temporarily unavailable."
+            ),
+        }),
+    ]
+
+    for keywords, info in patterns:
+        if all(kw in text for kw in keywords):
+            return {"summary": info["summary"], "detail": raw_error, "suggestion": info["suggestion"]}
+
+    return {
+        "summary": "The rollback failed with an unrecognised error.",
+        "detail": raw_error,
+        "suggestion": "See the technical details below for the raw error.",
     }
 
 
@@ -530,18 +602,39 @@ def drift_pr_from_finding(state: State):
         else:
             report_only.append(finding)
 
+    def _already_open(finding: dict) -> dict | None:
+        """Return the open drift_events row if one exists for this finding, else None."""
+        return drift_history.get_open_event(finding["resource_id"], _account_label)
+
     pr_urls = []
     for file_path, group in by_file.items():
         if len(group) == 1:
+            existing = _already_open(group[0])
+            if existing:
+                print(f"  ⏭  {group[0]['resource_id']}: open PR #{existing['pr_number']} "
+                      f"already exists — skipping")
+                continue
             pr = gi.create_drift_pr_for_mode(group[0], "code_to_reality", account_label=_account_label)
         else:
-            pr = gi.create_drift_pr_for_file(group, "code_to_reality", account_label=_account_label)
+            # Filter findings that already have an open PR before batching.
+            actionable = [f for f in group if not _already_open(f)]
+            skipped = len(group) - len(actionable)
+            if skipped:
+                print(f"  ⏭  {file_path}: {skipped} finding(s) already have open PRs — skipped")
+            if not actionable:
+                continue
+            pr = gi.create_drift_pr_for_file(actionable, "code_to_reality", account_label=_account_label)
         if pr is not None:
             # Findings with file_path are always drift fixes (unmanaged
             # findings have file_path=None and land in report_only).
             pr_urls.append({"url": pr.html_url, "type": "drift"})
 
     for finding in report_only:
+        existing = _already_open(finding)
+        if existing:
+            print(f"  ⏭  {finding['resource_id']}: open PR #{existing['pr_number']} "
+                  f"already exists — skipping")
+            continue
         pr = gi.create_drift_pr_for_mode(finding, "code_to_reality", account_label=_account_label)
         if pr is not None:
             is_unmanaged = finding.get("status") in ("unmanaged", "unmanaged_tagged")
@@ -872,12 +965,15 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
             result={"diff": diff},
         )
     except Exception as e:
-        update_rollback_run(
-            run_id,
-            status="failed",
-            completed_at=dt.now(timezone.utc).isoformat(),
-            result={"error": str(e)},
-        )
+        try:
+            update_rollback_run(
+                run_id,
+                status="failed",
+                completed_at=dt.now(timezone.utc).isoformat(),
+                result=humanize_rollback_error(str(e)),
+            )
+        except Exception:
+            pass  # let the original exception propagate — don't mask it
         raise
 
 
@@ -895,7 +991,7 @@ def _run_rollback(tf_dir: str, pr_number: int, run_id: str | None = None) -> Non
             from datetime import datetime as dt, timezone
             from rollback_runs import update_rollback_run
             try:
-                update_rollback_run(run_id, status="failed", completed_at=dt.now(timezone.utc).isoformat(), result={"error": str(e)})
+                update_rollback_run(run_id, status="failed", completed_at=dt.now(timezone.utc).isoformat(), result=humanize_rollback_error(str(e)))
             except Exception:
                 pass
         raise
@@ -1120,6 +1216,35 @@ if __name__ == "__main__":
         print(f"\n[Success] Trends report written to: {output_path}")
         sys.exit(0)
 
+    # Resolve tf_dir once — used by rollback, rollback_preview, and the
+    # main drift-reconciliation pipeline below.
+    if args.tf_dir is not None:
+        tf_dir = os.path.abspath(args.tf_dir)
+    else:
+        import os as _os
+        import requests as _requests
+        url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        env_dict = {}
+        if url and key:
+            resp = _requests.get(
+                f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                env_dict = resp.json()[0]
+        if not env_dict:
+            raise RuntimeError(
+                f"No environment found for slug '{_account_label}' — "
+                f"cannot resolve terraform directory."
+            )
+        from drift_reconciler.environment_credentials import resolve_tf_dir
+        tf_dir = resolve_tf_dir(env_dict)
+
+    if not os.path.isdir(tf_dir):
+        raise RuntimeError(f"Terraform directory not found: {tf_dir}")
+
     if args.rollback:
         if not args.rollback_pr:
             print("Error: --rollback-pr is required with --rollback")
@@ -1127,7 +1252,22 @@ if __name__ == "__main__":
         try:
             _run_rollback(tf_dir, args.rollback_pr, run_id=args.run_id)
         except Exception as e:
+            # _run_rollback normally updates the DB itself before re-raising.
+            # This outer catch is a safety net for exceptions that escape
+            # before the DB update (e.g. a NameError at the call site, or a
+            # rollback_runs update that failed inside the inner handler).
             print(f"Rollback failed: {e}")
+            try:
+                from rollback_runs import update_rollback_run
+                from datetime import datetime as _dt, timezone as _tz
+                update_rollback_run(
+                    args.run_id,
+                    status="failed",
+                    completed_at=_dt.now(_tz.utc).isoformat(),
+                    result=humanize_rollback_error(str(e)),
+                )
+            except Exception:
+                pass
             sys.exit(1)
         sys.exit(0)
 
@@ -1135,37 +1275,30 @@ if __name__ == "__main__":
         if not args.rollback_pr or not args.run_id:
             print("Error: --rollback-pr and --run-id are required with --rollback-preview")
             sys.exit(1)
-        _run_rollback_preview(tf_dir, args.rollback_pr, args.account_label, args.run_id)
+        try:
+            _run_rollback_preview(tf_dir, args.rollback_pr, args.account_label, args.run_id)
+        except Exception as e:
+            # _run_rollback_preview normally catches its own errors and updates
+            # the DB.  This outer catch is a safety net for exceptions that
+            # escape — e.g. a NameError from a stale variable reference, or a
+            # failed DB update inside the inner except handler.  Without this,
+            # the rollback_runs row would stay "running" forever.
+            print(f"Rollback preview failed: {e}")
+            try:
+                from rollback_runs import update_rollback_run
+                from datetime import datetime as _dt, timezone as _tz
+                update_rollback_run(
+                    args.run_id,
+                    status="failed",
+                    completed_at=_dt.now(_tz.utc).isoformat(),
+                    result=humanize_rollback_error(str(e)),
+                )
+            except Exception:
+                pass
+            sys.exit(1)
         sys.exit(0)
 
     try:
-        # Resolve tf_dir: explicit override, or derived from environment.
-        if args.tf_dir is not None:
-            tf_dir = os.path.abspath(args.tf_dir)
-        else:
-            import os as _os
-            import requests as _requests
-            url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-            key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-            env_dict = {}
-            if url and key:
-                resp = _requests.get(
-                    f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
-                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                    timeout=10,
-                )
-                if resp.status_code == 200 and resp.json():
-                    env_dict = resp.json()[0]
-            if not env_dict:
-                raise RuntimeError(
-                    f"No environment found for slug '{_account_label}' — "
-                    f"cannot resolve terraform directory."
-                )
-            from drift_reconciler.environment_credentials import resolve_tf_dir
-            tf_dir = resolve_tf_dir(env_dict)
-
-        if not os.path.isdir(tf_dir):
-            raise RuntimeError(f"Terraform directory not found: {tf_dir}")
 
         _tf_dir = tf_dir
 

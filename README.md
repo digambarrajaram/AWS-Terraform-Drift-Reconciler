@@ -175,6 +175,9 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Structured scan results (mode banner, drift/unmanaged blocks, per-type PR links) | ✅ |
 | Structured error display (summary, suggestion, expandable details) | ✅ |
 | Shared environment selector component (`env-selector.js`) | ✅ |
+| API access token gating (`X-Api-Access-Token` header, constant-time check) | ✅ |
+| Live execution log streaming (terminal pane, 2s polling, scroll-lock) | ✅ |
+| One-time browser token prompt with localStorage persistence | ✅ |
 
 ### Environments & credentials
 
@@ -193,6 +196,9 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Feature | Status |
 |---|---|
 | `scan_runs` lifecycle tracking (running → complete/failed) in Supabase | ✅ |
+| Live stdout capture from agent subprocess (ring buffer + `/tmp/drift-logs/` file) | ✅ |
+| `GET /api/scan/{run_id}/logs?offset={n}` endpoint with file + buffer fallback | ✅ |
+| Subprocess stdout piped with `-u` (unbuffered), `encoding="utf-8"`, `stderr→STDOUT` | ✅ |
 | Terraform plan failure caught inside try/except (was pre-try `sys.exit(1)`) | ✅ |
 | Unmanaged-only scan continues when terraform plan fails | ✅ |
 | Human-readable error messages via `humanize_terraform_error()` pattern matching | ✅ |
@@ -209,12 +215,32 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 ### Prerequisites
 
 - Python 3.11+ with `requests`, `boto3`, `langchain-aws`, `langgraph`, `pygithub`
+- Node.js 20+ with pnpm (for the new React dashboard)
 - Terraform CLI 1.9+
 - Trivy (optional, for security scanning)
 - hcledit (optional, for reliable `.tf` patching)
 - Supabase project (for drift history, exceptions, routing rules, environments, secrets)
 
-### Local run
+## Running the stack
+
+Three services, three terminals:
+
+```bash
+# ── Terminal 1: Python backend (port 8080) ──────────────────────────────
+# Serves the vanilla dashboard HTML/JS/CSS, REST APIs for scan triggers,
+# rollback, exceptions, environments, and the live-log streaming endpoint.
+python dashboard/serve.py --port 8080
+
+# ── Terminal 2: Express API server (port 3000) ──────────────────────────
+# Backend for the new React dashboard — Drizzle ORM, proxy routes, config.
+cd frontend && pnpm install && pnpm --filter @workspace/api-server dev
+
+# ── Terminal 3: React dev server (port 5173) ────────────────────────────
+# New TypeScript dashboard — open http://localhost:5173 in a browser.
+cd frontend && pnpm --filter @workspace/web dev
+```
+
+### CLI (drift pipeline)
 
 ```bash
 # Drift detection only
@@ -230,21 +256,43 @@ python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a
 python drift_reconciler/agent.py --trends --trends-account scope-a
 ```
 
-### Dashboard
 
-```bash
-python dashboard/serve.py --port 8080
+### Dashboard pages
+
+Both dashboards cover the same 10 pages:
+
+| Page | Vanilla (port 8080) | React (port 5173) |
+|---|---|---|
+| Overview / KPI cards | `index.html` | `Overview.tsx` |
+| Drift findings explorer | `explorer.html` | `Explorer.tsx` |
+| Scan trigger + live logs | `scan.html` | `Scan.tsx` |
+| Rollback preview + confirm | `rollback.html` | `Rollback.tsx` |
+| Trends + Chart.js | `trends.html` | `Trends.tsx` |
+| Exception CRUD | `exceptions.html` | `Exceptions.tsx` |
+| Alert settings + routing | `alerts.html` | `Alerts.tsx` |
+| Environment management | `environments.html` | `Environments.tsx` |
+| PR queue | `pr-queue.html` | `PrQueue.tsx` |
+
+### Frontend monorepo structure
+
 ```
-
-Visit `http://localhost:8080` — 8 pages with shared navigation:
-- **Dashboard** — live KPI cards (drift, cost, rollbacks, last scan)
-- **Explorer** — searchable/filterable findings table with pagination
-- **Scan** — trigger scans with stage tracking and structured error display
-- **Rollback** — preview rollback diffs, confirm revert PRs
-- **Trends** — Chart.js visualizations (most-drifted, MTTR, daily volume, KPIs)
-- **Exceptions** — Supabase-backed drift/unmanaged exception CRUD
-- **Alerts** — PagerDuty/Slack credential management + severity routing rules
-- **Environments** — scope metadata, AWS credentials, git source configuration
+frontend/
+  artifacts/
+    web/               # React SPA — 10 pages, shadcn/ui, Tailwind, Supabase
+      src/pages/       # Overview, Explorer, Scan, Rollback, Trends,
+                       #   Exceptions, Alerts, Environments, PR Queue
+      src/components/  # LogViewer, AuthPromptModal, ScopeSelector, ui/*
+      src/hooks/       # useScanLogs, useAuthStore, useDriftEvents, etc.
+      src/api/         # Supabase client + API fetch wrappers
+    api-server/        # Express API server — Drizzle ORM, Pino, CORS
+    mockup-sandbox/    # UI prototyping sandbox with infinite canvas
+  lib/
+    api-spec/          # OpenAPI 3.1 specification (Orval codegen source)
+    api-zod/           # Generated Zod validation schemas
+    api-client-react/  # Generated React query hooks + API client
+    db/                # Drizzle ORM schema + migrations
+  scripts/             # Post-merge build scripts
+```
 
 ### Environment
 
@@ -258,6 +306,7 @@ Copy `.env.example` to `.env` and configure:
 | `PAGERDUTY_ROUTING_KEY` | PagerDuty alerts (legacy — can be managed via dashboard) |
 | `SLACK_WEBHOOK_URL` | Slack notifications (legacy — can be managed via dashboard) |
 | `AWS_REGION` | Default region |
+| `API_ACCESS_TOKEN` | Optional dashboard auth token (shared secret, `X-Api-Access-Token` header) |
 | `DRIFT_CLONE_BASE` | Git clone directory (default: `~/.drift-clones`) |
 
 ### GitHub Actions
@@ -318,6 +367,7 @@ dashboard/
   alerts.html / alerts.js     # Notification settings + routing
   environments.html / environments.js # Environment management
   env-selector.js             # Shared dynamic scope selector
+  auth.js                     # API access token prompt + localStorage persistence
   styles.css                  # Dark-theme responsive stylesheet
 
 terraform_code/
@@ -344,4 +394,14 @@ migrations/
 .github/workflows/
   drift-preview.yml           # PR plan preview
   drift-reconciler.yml        # PR accept/reject, rollback gate, notify
+
+frontend/                     # New TypeScript React dashboard (pnpm monorepo)
+  artifacts/web/              # React SPA — shadcn/ui, Vite, Tailwind
+  artifacts/api-server/       # Express API server — Drizzle, Pino, CORS
+  artifacts/mockup-sandbox/   # UI prototyping sandbox
+  lib/api-spec/               # OpenAPI 3.1 spec (Orval codegen source)
+  lib/api-zod/                # Generated Zod schemas
+  lib/api-client-react/       # Generated React hooks + API client
+  lib/db/                     # Drizzle ORM schema
+  scripts/                    # Post-merge build helpers
 ```

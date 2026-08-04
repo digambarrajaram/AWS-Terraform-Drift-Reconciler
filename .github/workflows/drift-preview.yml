@@ -15,6 +15,7 @@ env:
   TF_VERSION: "1.9.8"
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -35,48 +36,53 @@ jobs:
         id: scope
         run: |
           BRANCH="${{ github.event.pull_request.head.ref }}"
-          TITLE="${{ github.event.pull_request.title }}"
-
-          case "$BRANCH" in
-            *drift-fix/scope-a/*) SCOPE="scope-a" ;;
-            *drift-fix/scope-b/*) SCOPE="scope-b" ;;
-          esac
+          SCOPE=$(echo "$BRANCH" | sed -n 's|.*drift-fix/\([^/]*\)/.*|\1|p')
 
           if [ -z "$SCOPE" ]; then
-            case "$TITLE" in
-              *"[scope-a]"*) SCOPE="scope-a" ;;
-              *"[scope-b]"*) SCOPE="scope-b" ;;
-            esac
+            TITLE="${{ github.event.pull_request.title }}"
+            # NOTE: assumes slugs are prefixed "scope-" — update if/when the
+            # scope→environment terminology migration changes naming convention.
+            SCOPE=$(echo "$TITLE" | sed -n 's/.*\[\(scope-[a-z0-9][a-z0-9-]*\)\].*/\1/p')
           fi
 
           if [ -z "$SCOPE" ]; then
-            echo "::error::Could not resolve scope from branch or title"
+            echo "::error::Could not resolve scope from branch or PR title"
             exit 1
           fi
 
-          case "$SCOPE" in
-            scope-a)
-              REGION_VAR="PROD_A_REGION"
-              ROLE_VAR="SCOPE_A_SCAN_ROLE_ARN"
-              TF_DIR="terraform_code/ec2_terraform_account_a"
-              ;;
-            scope-b)
-              REGION_VAR="PROD_B_REGION"
-              ROLE_VAR="SCOPE_B_SCAN_ROLE_ARN"
-              TF_DIR="terraform_code/ec2_terraform_account_b"
-              ;;
-            *)
-              echo "::error::Unknown scope: $SCOPE"
+          ENV_RESP=$(curl -sS -w "\n%{http_code}" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            "${SUPABASE_URL}/rest/v1/environments?select=region,scan_role_variable,tf_directory_path&slug=eq.${SCOPE}&is_active=eq.true")
+
+          HTTP_CODE=$(echo "$ENV_RESP" | tail -1)
+          ENV_JSON=$(echo "$ENV_RESP" | sed '$d')
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Supabase API returned HTTP $HTTP_CODE for scope=${SCOPE}"
+            exit 1
+          fi
+          if [ -z "$ENV_JSON" ] || [ "$ENV_JSON" = "[]" ]; then
+            echo "::error::No active environment found for scope=${SCOPE} in Supabase environments table"
+            exit 1
+          fi
+
+          REGION=$(echo "$ENV_JSON" | jq -r '.[0].region')
+          ROLE_VAR=$(echo "$ENV_JSON" | jq -r '.[0].scan_role_variable')
+          TF_DIR=$(echo "$ENV_JSON" | jq -r '.[0].tf_directory_path')
+
+          for pair in "region:$REGION" "scan_role_variable:$ROLE_VAR" "tf_directory_path:$TF_DIR"; do
+            key="${pair%%:*}"; val="${pair#*:}"
+            if [ -z "$val" ] || [ "$val" = "null" ]; then
+              echo "::error::$key is empty for scope=${SCOPE} in Supabase"
               exit 1
-              ;;
-          esac
+            fi
+          done
 
           echo "scope=$SCOPE"                 >> "$GITHUB_OUTPUT"
-          echo "aws_region_var=$REGION_VAR"   >> "$GITHUB_OUTPUT"
+          echo "aws_region_var=$REGION"       >> "$GITHUB_OUTPUT"
           echo "role_arn_var=$ROLE_VAR"       >> "$GITHUB_OUTPUT"
           echo "tf_working_dir=$TF_DIR"       >> "$GITHUB_OUTPUT"
-
-          echo "🔍 Resolved scope=$SCOPE  role_var=$ROLE_VAR  dir=$TF_DIR"
+          echo "🔍 Resolved scope=$SCOPE  region=$REGION  role_var=$ROLE_VAR  dir=$TF_DIR"
 
   preview:
     needs: [resolve-scope]

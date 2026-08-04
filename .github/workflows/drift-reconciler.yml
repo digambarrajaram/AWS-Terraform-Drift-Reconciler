@@ -17,12 +17,9 @@ on:
           - 'Accept (Align State)'
           - 'Reject (Revert Code)'
       scope:
-        description: 'Target scope (account + region)'
+        description: 'Target scope slug — must match an active environment in the Supabase environments table'
         required: true
-        type: choice
-        options:
-          - 'scope-a'
-          - 'scope-b'
+        type: string
 
 permissions:
   id-token: write
@@ -34,6 +31,7 @@ env:
   PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -61,52 +59,55 @@ jobs:
 
           if [ -z "$SCOPE" ]; then
             BRANCH="${{ github.event.pull_request.head.ref }}"
-            TITLE="${{ github.event.pull_request.title }}"
-
-            case "$BRANCH" in
-              *drift-fix/scope-a/*) SCOPE="scope-a" ;;
-              *drift-fix/scope-b/*) SCOPE="scope-b" ;;
-            esac
-
+            SCOPE=$(echo "$BRANCH" | sed -n 's|.*drift-fix/\([^/]*\)/.*|\1|p')
             if [ -z "$SCOPE" ]; then
-              case "$TITLE" in
-                *"[scope-a]"*) SCOPE="scope-a" ;;
-                *"[scope-b]"*) SCOPE="scope-b" ;;
-              esac
+              TITLE="${{ github.event.pull_request.title }}"
+              # NOTE: assumes slugs are prefixed "scope-" — update if/when the
+              # scope→environment terminology migration changes naming convention.
+              SCOPE=$(echo "$TITLE" | sed -n 's/.*\[\(scope-[a-z0-9][a-z0-9-]*\)\].*/\1/p')
             fi
           fi
 
           if [ -z "$SCOPE" ]; then
-            echo "::error::Could not resolve scope from branch, title, or input"
+            echo "::error::Could not resolve scope from branch, title, or manual input"
             exit 1
           fi
 
-          case "$SCOPE" in
-            scope-a)
-              ENV="scope-a-apply"
-              REGION_VAR="PROD_A_REGION"
-              ROLE_VAR="SCOPE_A_APPLY_ROLE_ARN"
-              TF_DIR="terraform_code/ec2_terraform_account_a"
-              ;;
-            scope-b)
-              ENV="scope-b-apply"
-              REGION_VAR="PROD_B_REGION"
-              ROLE_VAR="SCOPE_B_APPLY_ROLE_ARN"
-              TF_DIR="terraform_code/ec2_terraform_account_b"
-              ;;
-            *)
-              echo "::error::Unknown scope: $SCOPE"
+          ENV_RESP=$(curl -sS -w "\n%{http_code}" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            "${SUPABASE_URL}/rest/v1/environments?select=region,apply_role_secret_name,tf_directory_path,apply_environment_name&slug=eq.${SCOPE}&is_active=eq.true")
+
+          HTTP_CODE=$(echo "$ENV_RESP" | tail -1)
+          ENV_JSON=$(echo "$ENV_RESP" | sed '$d')
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Supabase API returned HTTP $HTTP_CODE for scope=${SCOPE}"
+            exit 1
+          fi
+          if [ -z "$ENV_JSON" ] || [ "$ENV_JSON" = "[]" ]; then
+            echo "::error::No active environment found for scope=${SCOPE} in Supabase environments table"
+            exit 1
+          fi
+
+          REGION=$(echo "$ENV_JSON" | jq -r '.[0].region')
+          ROLE_VAR=$(echo "$ENV_JSON" | jq -r '.[0].apply_role_secret_name')
+          TF_DIR=$(echo "$ENV_JSON" | jq -r '.[0].tf_directory_path')
+          GH_ENV=$(echo "$ENV_JSON" | jq -r '.[0].apply_environment_name')
+
+          for pair in "region:$REGION" "apply_role_secret_name:$ROLE_VAR" "tf_directory_path:$TF_DIR" "apply_environment_name:$GH_ENV"; do
+            key="${pair%%:*}"; val="${pair#*:}"
+            if [ -z "$val" ] || [ "$val" = "null" ]; then
+              echo "::error::$key is empty for scope=${SCOPE} in Supabase"
               exit 1
-              ;;
-          esac
+            fi
+          done
 
           echo "scope=$SCOPE"                 >> "$GITHUB_OUTPUT"
-          echo "gh_environment=$ENV"           >> "$GITHUB_OUTPUT"
-          echo "aws_region_var=$REGION_VAR"   >> "$GITHUB_OUTPUT"
+          echo "gh_environment=$GH_ENV"       >> "$GITHUB_OUTPUT"
+          echo "aws_region_var=$REGION"       >> "$GITHUB_OUTPUT"
           echo "role_arn_var=$ROLE_VAR"       >> "$GITHUB_OUTPUT"
           echo "tf_working_dir=$TF_DIR"       >> "$GITHUB_OUTPUT"
-
-          echo "🔍 Resolved scope=$SCOPE  env=$ENV  dir=$TF_DIR"
+          echo "🔍 Resolved scope=$SCOPE  env=$GH_ENV  role_var=$ROLE_VAR  dir=$TF_DIR"
 
   # ------------------------------------------------------------------
   # Apply or revert the drift fix in the resolved scope.
@@ -131,43 +132,11 @@ jobs:
           # refs/pull/<PR>/merge that can be stale or gone post-close.
           ref: ${{ github.event.pull_request.base.ref }}
 
-      - name: Resolve scope credentials
-        id: creds
-        run: |
-          SCOPE="${{ needs.resolve-scope.outputs.scope }}"
-          case "$SCOPE" in
-            scope-a)
-              ROLE="${{ secrets.SCOPE_A_APPLY_ROLE_ARN }}"
-              REGION="${{ vars.PROD_A_REGION }}"
-              ;;
-            scope-b)
-              ROLE="${{ secrets.SCOPE_B_APPLY_ROLE_ARN }}"
-              REGION="${{ vars.PROD_B_REGION }}"
-              ;;
-            *)
-              echo "::error::Unknown scope: $SCOPE"
-              exit 1
-              ;;
-          esac
-
-          if [ -z "$ROLE" ]; then
-            echo "::error::Secret SCOPE_*_APPLY_ROLE_ARN is empty — check GitHub Secrets for scope=$SCOPE"
-            exit 1
-          fi
-          if [ -z "$REGION" ]; then
-            echo "::error::Variable PROD_*_REGION is empty — check GitHub Variables for scope=$SCOPE"
-            exit 1
-          fi
-
-          echo "role_arn=$ROLE"       >> "$GITHUB_OUTPUT"
-          echo "aws_region=$REGION"   >> "$GITHUB_OUTPUT"
-          echo "🔐 Resolved role_arn=${ROLE:0:20}... region=$REGION"
-
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ steps.creds.outputs.role_arn }}
-          aws-region: ${{ steps.creds.outputs.aws_region }}
+          role-to-assume: ${{ secrets[needs.resolve-scope.outputs.role_arn_var] }}
+          aws-region: ${{ needs.resolve-scope.outputs.aws_region_var }}
           audience: sts.amazonaws.com
 
       - name: Setup Terraform

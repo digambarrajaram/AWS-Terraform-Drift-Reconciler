@@ -410,7 +410,7 @@ def diff_unmanaged(
                 )
             findings.append(
                 {
-                    "resource_id": f"{live['type']}.{live.get('raw_name', live['id'])}",
+                    "resource_id": f"{live['type']}.{live.get('raw_name') or live['id']}",
                     "risk_level": "LOW",
                     "drift_summary": summary,
                     "plan_output": json.dumps(live, indent=2, default=str),
@@ -435,7 +435,7 @@ def diff_unmanaged(
             )
         findings.append(
             {
-                "resource_id": f"{live['type']}.{live.get('raw_name', live['id'])}",
+                "resource_id": f"{live['type']}.{live.get('raw_name') or live['id']}",
                 "risk_level": "MEDIUM",
                 "drift_summary": summary,
                 "plan_output": json.dumps(live, indent=2, default=str),

@@ -169,6 +169,32 @@ def load_baselines(pr_number: int, account: str) -> list[dict[str, Any]]:
         return []
 
 
+def get_open_event(resource_id: str, account: str) -> dict | None:
+    """Return the open drift_events row for *resource_id* in *account*, or None.
+
+    Used by the PR node to skip creating a new PR when an unresolved one
+    already exists for the same resource identity + scope."""
+    if not _URL or not _KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=id,pr_number,pr_type,status"
+            f"&resource_id=eq.{resource_id}"
+            f"&account=eq.{account}"
+            f"&status=eq.open"
+            f"&limit=1",
+            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            rows = resp.json() if resp.text else []
+            return rows[0] if rows else None
+        return None
+    except requests.RequestException:
+        return None
+
+
 def has_unresolved_drift(account: str) -> bool:
     """Return ``True`` if *account* has any open (unresolved) drift entries."""
     if not _URL or not _KEY:

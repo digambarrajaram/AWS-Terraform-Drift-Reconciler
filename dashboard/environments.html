@@ -33,7 +33,7 @@
         <label>Name <input type="text" name="name" placeholder="Production A" required></label>
         <label>Slug <input type="text" name="slug" placeholder="scope-a" required pattern="[a-z0-9][a-z0-9-]*"></label>
         <label>AWS Account ID <input type="text" name="aws_account_id" placeholder="123456789012" required></label>
-        <label>AWS Profile <input type="text" name="aws_profile" placeholder="account-a"></label>
+        <label id="aws-profile-add-group" style="display:none">AWS Profile <input type="text" name="aws_profile" placeholder="account-a"></label>
         <label>Region <input type="text" name="region" placeholder="us-east-1" required></label>
         <label>TF State Bucket <input type="text" name="tf_state_bucket" placeholder="scope-a-tf-state-123" required></label>
         <label>TF Lock Table <input type="text" name="tf_lock_table" placeholder="terraform-locks"></label>
@@ -83,8 +83,7 @@
         <label>
           Auth Type
           <select name="auth_type" id="auth-type-add">
-            <option value="profile">profile (local ~/.aws/config)</option>
-            <option value="role">role (OIDC assume-role)</option>
+            <option value="role" selected>role (OIDC assume-role)</option>
             <option value="keys">keys (static access key)</option>
           </select>
         </label>

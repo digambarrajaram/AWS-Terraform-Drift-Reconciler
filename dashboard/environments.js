@@ -190,5 +190,7 @@ document.addEventListener("DOMContentLoaded", function() {
         if (el) el.style.display = v === "keys" ? "" : "none";
       });
     });
+    // Fire once on load so role fields are visible (role is the default).
+    authSel.dispatchEvent(new Event("change"));
   }
 });

@@ -219,9 +219,10 @@ function updateTracker(row) {
         });
         html += '</ul>';
         if (summary.drift.pr_links && summary.drift.pr_links.length > 0) {
-          html += '<ul style="margin-bottom:8px">' + summary.drift.pr_links.map(function(url) {
-            return '<li><a href="' + url + '" target="_blank">' + url + '</a></li>';
-          }).join("") + '</ul>';
+          html += '<div style="margin-bottom:8px">' + summary.drift.pr_links.map(function(url) {
+            var prNum = url.split("/").pop();
+            return '<a href="' + url + '" target="_blank" style="display:inline-block;background:#1f6feb;color:#fff;padding:4px 12px;border-radius:6px;text-decoration:none;font-size:12px;margin-right:6px;margin-bottom:4px">View PR #' + prNum + '</a>';
+          }).join("") + '</div>';
         }
       }
 
@@ -236,9 +237,10 @@ function updateTracker(row) {
         html += '</ul>';
         html += '<p style="color:#8b949e;font-size:11px;margin-bottom:8px">These PRs add tracking/import for these resources — they are NOT drift fixes</p>';
         if (summary.unmanaged.pr_links && summary.unmanaged.pr_links.length > 0) {
-          html += '<ul style="margin-bottom:8px">' + summary.unmanaged.pr_links.map(function(url) {
-            return '<li><a href="' + url + '" target="_blank">' + url + '</a></li>';
-          }).join("") + '</ul>';
+          html += '<div style="margin-bottom:8px">' + summary.unmanaged.pr_links.map(function(url) {
+            var prNum = url.split("/").pop();
+            return '<a href="' + url + '" target="_blank" style="display:inline-block;background:#1f6feb;color:#fff;padding:4px 12px;border-radius:6px;text-decoration:none;font-size:12px;margin-right:6px;margin-bottom:4px">View PR #' + prNum + '</a>';
+          }).join("") + '</div>';
         }
       }
     } else {
@@ -292,6 +294,7 @@ function startPolling(runId) {
   terminal.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font:inherit;color:inherit"></pre>';
   terminal.dataset.runId = runId;
   var _logPre = terminal.querySelector("pre");
+  _logPre.appendChild(document.createTextNode(""));
 
   function _scrollToBottom(force) {
     if (force || terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50) {
@@ -345,7 +348,7 @@ function startPolling(runId) {
       var wasAtBottom = terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50;
       for (var i = 0; i < data.lines.length; i++) {
         var line = data.lines[i];
-        if (_logPre) _logPre.textContent += line.text.replace(_ANSI_RE, "") + "\n";
+        if (_logPre && _logPre.firstChild) _logPre.firstChild.nodeValue += line.text.replace(_ANSI_RE, "") + "\n";
         lineOffset = line.n + 1;
       }
       if (wasAtBottom) {

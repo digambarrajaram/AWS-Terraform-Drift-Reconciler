@@ -3,7 +3,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 import { toast } from 'sonner';
 import {
   RotateCcw, CheckCircle, XCircle, Loader2, ExternalLink,
-  AlertTriangle, ChevronRight, Inbox,
+  AlertTriangle, ChevronRight, Inbox, Ban,
 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 
@@ -75,7 +75,7 @@ function relTime(iso: string) {
 }
 
 function fmtDate(iso: string) {
-  try { return format(new Date(iso), 'MMM d, HH:mm'); }
+  try { return format(new Date(iso), 'MMM d, yyyy, HH:mm'); }
   catch { return '—'; }
 }
 
@@ -101,7 +101,7 @@ function EligiblePRList({
 }) {
   return (
     <div>
-      <h2 className="mb-3 text-sm font-semibold">Eligible Open PRs</h2>
+      <h2 className="mb-3 text-sm font-semibold">Eligible PRs</h2>
       <div className="rounded-xl border border-border overflow-hidden">
         {loading ? (
           <div className="p-4 space-y-2">
@@ -147,20 +147,29 @@ function EligiblePRList({
                     <SevBadge sev={ev.severity} />
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap"
-                      title={format(new Date(ev.created_at), 'PPpp')}>
+                      title={format(new Date(ev.created_at), 'MMM d, yyyy, HH:mm')}>
                     {relTime(ev.created_at)}
                   </td>
                   <td className="px-4 py-3 text-right">
                     {hasBaseline ? (
-                      <button
-                        type="button"
-                        onClick={() => onPreview(ev)}
-                        disabled={activePrNumber === ev.pr_number}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 disabled:pointer-events-none"
-                      >
-                        <RotateCcw size={11} />
-                        Preview Rollback
-                      </button>
+                      ev.status === 'open' ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/60 italic"
+                          title="This PR is still open — rollback is available after the PR is merged."
+                        >
+                          Available after merge
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => onPreview(ev)}
+                          disabled={activePrNumber === ev.pr_number}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 disabled:pointer-events-none"
+                        >
+                          <RotateCcw size={11} />
+                          Preview Rollback
+                        </button>
+                      )
                     ) : (
                       <span
                         className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/60 italic"
@@ -177,6 +186,59 @@ function EligiblePRList({
           </table>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── RollbackStageIndicator ──────────────────────────────────────────────────
+
+const ROLLBACK_STAGES = [
+  { key: 'loading_baseline',  label: 'Loading Baseline'  },
+  { key: 'fetching_live_state', label: 'Comparing State' },
+  { key: 'patching_file',     label: 'Patching File'     },
+  { key: 'creating_pr',       label: 'Creating PR'       },
+] as const;
+
+function RollbackStageIndicator({ currentStage, status }: {
+  currentStage: string | null;
+  status: string;
+}) {
+  const currentIdx = status === 'complete'
+    ? ROLLBACK_STAGES.length
+    : ROLLBACK_STAGES.findIndex(s => s.key === currentStage);
+
+  return (
+    <div className="flex items-center gap-1 overflow-x-auto pb-1">
+      {ROLLBACK_STAGES.map((stage, i) => {
+        const isPast    = currentIdx >= 0 && i < currentIdx;
+        const isCurrent = stage.key === currentStage;
+        const isFailed  = isCurrent && status === 'failed';
+        return (
+          <div key={stage.key} className="flex items-center gap-1 shrink-0">
+            <div className="flex flex-col items-center gap-1">
+              <div className={[
+                'flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold transition-colors',
+                isFailed
+                  ? 'bg-destructive text-destructive-foreground'
+                  : isCurrent
+                    ? 'bg-primary text-primary-foreground ring-2 ring-primary/30'
+                    : isPast
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-muted text-muted-foreground',
+              ].join(' ')}>
+                {isFailed ? '✕' : isPast ? '✓' : i + 1}
+              </div>
+              <span className={[
+                'text-[10px] whitespace-nowrap',
+                isCurrent ? 'text-foreground font-medium' : 'text-muted-foreground',
+              ].join(' ')}>{stage.label}</span>
+            </div>
+            {i < ROLLBACK_STAGES.length - 1 && (
+              <div className={['mb-4 h-px w-6 shrink-0', isPast ? 'bg-emerald-500' : 'bg-border'].join(' ')} />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -247,10 +309,11 @@ function DiffTable({ diff }: { diff: PreviewDiffRow[] }) {
 
 // ── RollbackHistory ────────────────────────────────────────────────────────
 
-const RUN_STATUS: Record<RollbackRun['status'], { label: string; cls: string }> = {
-  running:  { label: 'Running',  cls: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400'  },
-  complete: { label: 'Complete', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
-  failed:   { label: 'Failed',   cls: 'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400'      },
+const RUN_STATUS: Record<string, { label: string; cls: string }> = {
+  running:   { label: 'Running',   cls: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400'  },
+  complete:  { label: 'Complete',  cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
+  failed:    { label: 'Failed',    cls: 'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400'      },
+  cancelled: { label: 'Cancelled', cls: 'bg-slate-100  text-slate-700  dark:bg-slate-900/30 dark:text-slate-400' },
 };
 
 function RollbackHistory({
@@ -387,7 +450,7 @@ export default function Rollback() {
     if (run.status === 'complete') {
       setCtx((prev) => prev ? { ...prev, diff: run.result?.diff ?? [] } : prev);
       setPhase('preview_done');
-    } else if (run.status === 'failed') {
+    } else if (run.status === 'failed' || run.status === 'cancelled') {
       setCtx((prev) => prev ? {
         ...prev, failed: true, failedPhase: 'preview',
         errorSummary: run.result?.summary ?? null,
@@ -411,7 +474,7 @@ export default function Rollback() {
       });
       queryClient.invalidateQueries({ queryKey: ['rollbackHistory', scope] });
       queryClient.invalidateQueries({ queryKey: ['eligiblePRs', scope] });
-    } else if (run.status === 'failed') {
+    } else if (run.status === 'failed' || run.status === 'cancelled') {
       setCtx((prev) => prev ? {
         ...prev, failed: true, failedPhase: 'execute',
         errorSummary: run.result?.summary ?? null,
@@ -494,6 +557,12 @@ export default function Rollback() {
   }, [scope, ctx]);
 
   function reset() {
+    const runId = ctx?.executeRunId ?? ctx?.previewRunId;
+    if (runId) {
+      apiFetch(`/rollback/${runId}/cancel`, { method: 'POST' }).catch(() => {});
+      queryClient.invalidateQueries({ queryKey: ['rollbackRun', runId] });
+      queryClient.invalidateQueries({ queryKey: ['rollbackHistory', scope] });
+    }
     setPhase('idle');
     setCtx(null);
   }
@@ -502,6 +571,7 @@ export default function Rollback() {
 
   const activeLog      = phase === 'execute_running' ? executeLogs : previewLogs;
   const activeRunId    = phase === 'execute_running' ? ctx?.executeRunId : ctx?.previewRunId;
+  const activeRun      = phase.startsWith('preview') ? previewRun : executeRun;
   const isRunning      = phase === 'preview_running' || phase === 'execute_running';
   const showLogPanel   = phase === 'preview_running' || phase === 'execute_running' ||
                          (phase === 'preview_done' && !!ctx?.previewRunId) ||
@@ -545,6 +615,32 @@ export default function Rollback() {
               <span className="ml-auto text-[11px] font-mono text-muted-foreground">{activeRunId}</span>
             )}
           </div>
+
+          {/* Stage indicator — show progress during preview/execute */}
+          {isRunning && activeRun.data && (
+            <RollbackStageIndicator
+              currentStage={activeRun.data.current_stage}
+              status={activeRun.data.status}
+            />
+          )}
+          {/* Show checkmarks on completed preview/execute runs too */}
+          {!isRunning && activeRun.data && (
+            <RollbackStageIndicator
+              currentStage={activeRun.data.current_stage}
+              status={activeRun.data.status}
+            />
+          )}
+
+          {/* Cancel button — only while running */}
+          {isRunning && (
+            <button
+              type="button"
+              onClick={reset}
+              className="flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90"
+            >
+              <Ban size={12} /> Cancel {phase === 'preview_running' ? 'Preview' : 'Rollback'}
+            </button>
+          )}
 
           {/* Log viewer — always show while running; keep visible after for reference */}
           {showLogPanel && activeRunId && (

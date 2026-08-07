@@ -7,7 +7,7 @@ export interface ScanRun {
   id: string;
   scope: string;
   unmanaged_flag: boolean;
-  status: 'running' | 'complete' | 'failed';
+  status: 'running' | 'complete' | 'failed' | 'cancelled';
   current_stage: string | null;
   started_at: string;
   completed_at: string | null;

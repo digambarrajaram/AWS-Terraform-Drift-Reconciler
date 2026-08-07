@@ -3,7 +3,7 @@ import { format, parseISO } from 'date-fns';
 import { errorMessage } from '@/lib/errorUtils';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  AreaChart, Area, ResponsiveContainer, Cell,
+  AreaChart, Area, ResponsiveContainer, Cell, LabelList,
 } from 'recharts';
 import {
   Activity, GitPullRequest, CheckCircle, Clock, Layers,
@@ -62,12 +62,14 @@ function DayPicker({ value, onChange }: { value: number; onChange: (d: number) =
 
 function ChartCard({
   title,
+  subtitle,
   loading,
   error,
   empty,
   children,
 }: {
   title:    string;
+  subtitle?: string;
   loading:  boolean;
   error:    Error | null;
   empty:    boolean;
@@ -75,7 +77,12 @@ function ChartCard({
 }) {
   return (
     <div className="rounded-xl border border-border bg-card p-5 space-y-3">
-      <h2 className="text-sm font-semibold text-card-foreground">{title}</h2>
+      <div>
+        <h2 className="text-sm font-semibold text-card-foreground">{title}</h2>
+        {subtitle && (
+          <p className="text-[11px] text-muted-foreground mt-0.5">{subtitle}</p>
+        )}
+      </div>
       {loading ? (
         <div className="space-y-2 py-6">
           <Skeleton className="h-4 w-3/4" />
@@ -179,13 +186,13 @@ function StatTiles({ summary, loading }: { summary: DriftSummary | undefined; lo
 // ── Custom tooltips ────────────────────────────────────────────────────────
 
 function VolumeTooltip({ active, payload, label }: {
-  active?: boolean; payload?: { value: number }[]; label?: string;
+  active?: boolean; payload?: { value: number }[]; label?: number;
 }) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
       <p className="text-muted-foreground mb-1">
-        {label ? format(parseISO(label), 'MMM d, yyyy') : ''}
+        {label ? format(new Date(label), 'MMM d, yyyy, HH:mm') : ''}
       </p>
       <p className="font-semibold text-foreground">{payload[0].value} events</p>
     </div>
@@ -271,10 +278,12 @@ export default function Trends() {
     (a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity),
   );
 
-  // ── Volume — sorted chronologically ───────────────────────────────────
-  const volumeData = [...(volume.data ?? [])].sort(
-    (a, b) => a.day.localeCompare(b.day),
-  );
+  // ── Volume — sorted chronologically, with epoch timestamps for
+  //     time-scaled x-axis spacing so gaps (e.g. Jul 21 → Jul 29) are
+  //     visually wider than consecutive days.
+  const volumeData = [...(volume.data ?? [])]
+    .map((d) => ({ ...d, ts: new Date(d.day).getTime() }))
+    .sort((a, b) => a.ts - b.ts);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl">
@@ -346,6 +355,7 @@ export default function Trends() {
         {/* MTTR by Severity */}
         <ChartCard
           title="Mean Time to Resolve by Severity"
+          subtitle="Resolved fix events in the selected period — not current open drift counts"
           loading={mttr.isLoading}
           error={mttr.error as Error | null}
           empty={!mttr.isLoading && (mttr.data?.length ?? 0) === 0}
@@ -389,6 +399,12 @@ export default function Trends() {
                       fill={SEV_COLOR[entry.severity] ?? '#6b7280'}
                     />
                   ))}
+                  <LabelList
+                    dataKey="avg_hours"
+                    position="top"
+                    style={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                    formatter={(v: number) => `${v.toFixed(1)}h`}
+                  />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -437,12 +453,14 @@ export default function Trends() {
                 stroke="hsl(var(--border))"
               />
               <XAxis
-                dataKey="day"
-                tick={<VolumeTick />}
+                dataKey="ts"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                scale="time"
+                tickFormatter={(ts) => format(new Date(ts), 'MMM d')}
+                tick={TICK_STYLE}
                 axisLine={false}
                 tickLine={false}
-                // Show at most ~7 evenly-spaced ticks regardless of range
-                interval={Math.max(0, Math.floor(volumeData.length / 7) - 1)}
               />
               <YAxis
                 allowDecimals={false}

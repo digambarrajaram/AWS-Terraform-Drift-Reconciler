@@ -95,7 +95,10 @@ export function useRoutingRules(scope: string | null) {
         .select('*')
         .or(`scope.is.null,scope.eq.${scope!}`);
       if (error) throw error;
-      return (data ?? []) as RoutingRule[];
+      const rows = (data ?? []) as RoutingRule[];
+      console.log('[useRoutingRules] scope=', scope, 'rows=', rows.length,
+        rows.map(r => `${r.severity}:${r.scope ?? 'NULL'}=${r.channel}`));
+      return rows;
     },
   });
 }

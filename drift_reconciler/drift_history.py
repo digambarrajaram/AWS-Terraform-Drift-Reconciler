@@ -173,7 +173,12 @@ def get_open_event(resource_id: str, account: str) -> dict | None:
     """Return the open drift_events row for *resource_id* in *account*, or None.
 
     Used by the PR node to skip creating a new PR when an unresolved one
-    already exists for the same resource identity + scope."""
+    already exists for the same resource identity + scope.
+
+    Cross-checks the local ``status=open`` against the GitHub API so a PR
+    that was manually closed on GitHub (without merging) isn't treated as
+    still blocking — the local row stays 'open' because nothing in the
+    pipeline updates it when a PR is closed externally."""
     if not _URL or not _KEY:
         return None
     try:
@@ -187,12 +192,54 @@ def get_open_event(resource_id: str, account: str) -> dict | None:
             headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
             timeout=10,
         )
-        if resp.status_code == 200:
-            rows = resp.json() if resp.text else []
-            return rows[0] if rows else None
-        return None
+        if resp.status_code != 200:
+            return None
+        rows = resp.json() if resp.text else []
+        if not rows:
+            return None
     except requests.RequestException:
         return None
+
+    row = rows[0]
+    pr_number = row.get("pr_number")
+    if not pr_number:
+        return row  # no PR number — can't verify, trust local status
+
+    if _pr_is_actually_open(pr_number):
+        return row
+
+    # PR is closed on GitHub — fix the stale local status so we don't
+    # re-check GitHub every scan.  One PATCH, then return None so the
+    # guard doesn't block a new PR.
+    _patch(
+        {"id": row["id"]},
+        {"status": "resolved",
+         "resolution": "PR closed externally — sync'd by guard on next scan"},
+    )
+    return None
+
+
+def _pr_is_actually_open(pr_number: int) -> bool:
+    """Return True if GitHub PR *pr_number* is still open (not closed/merged)."""
+    repo = os.environ.get("GITHUB_REPO", "").strip()
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not repo or not token:
+        return True  # can't verify — assume open (safe default)
+
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            state = (resp.json() or {}).get("state", "open")
+            return state == "open"
+        # 404 = PR doesn't exist, 401 = bad token — treat as closed
+        return False
+    except requests.RequestException:
+        return True  # network error — assume open (safe default)
 
 
 def has_unresolved_drift(account: str) -> bool:

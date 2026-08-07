@@ -539,20 +539,46 @@ def _regex_patch_tf_file(file_path: str, resource_id: str, changes: dict, delete
         return "\n".join(lines[:block_start] + lines[block_end + 1:])
 
     applied = False
-    total = 0
-    for i in range(block_start, block_end + 1):
-        for field, vals in changes.items():
-            total += 1
-            before_val = _json_to_hcl(vals.get("before"))
-            after_val = _json_to_hcl(vals.get("after"))
+    removals: list[tuple[int, int]] = []  # (start, end) line ranges to delete
+
+    for field, vals in changes.items():
+        before_val = _json_to_hcl(vals.get("before"))
+        after_val  = _json_to_hcl(vals.get("after"))
+
+        # Full-block removal: after is empty/null/[] — remove the
+        # entire nested block (e.g. a route { ... } block).
+        if (not after_val or after_val.strip() in ("", "[]", "{}", "null")) \
+           and before_val and before_val.strip() not in ("", "[]", "{}", "null"):
+            block_pat = rf"^\s*{re.escape(field)}\s*\{{"
+            found = False
+            for i in range(block_start, block_end + 1):
+                if re.match(block_pat, lines[i]):
+                    d = 1
+                    for j in range(i + 1, block_end + 1):
+                        d += lines[j].count("{") - lines[j].count("}")
+                        if d <= 0:
+                            removals.append((i, j))
+                            applied = True
+                            found = True
+                            print(f"  [regex] {resource_id}.{field}: block removal — deleting lines {i+1}-{j+1}")
+                            break
+                    break
+            if not found:
+                print(f"  [regex] {resource_id}.{field}: block removal — pattern '{block_pat}' not found in lines {block_start+1}-{block_end+1}")
+            continue
+
+        # Attribute value replacement (existing logic).
+        for i in range(block_start, block_end + 1):
             if before_val and before_val in lines[i]:
                 lines[i] = lines[i].replace(before_val, after_val, 1)
                 applied = True
+                print(f"  [regex] {resource_id}.{field}: value replace on line {i+1}")
                 break
 
-    if total == 0:
-        print(f"  ⚠ {resource_id}: no patchable fields — "
-              f"PR may contain no file changes (manual HCL edit required)")
+    if removals:
+        # Delete from highest line first so indices stay valid.
+        for start, end in sorted(removals, reverse=True):
+            del lines[start:end + 1]
 
     return "\n".join(lines) if applied else None
 
@@ -581,30 +607,49 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
             if result.returncode != 0:
                 print(f"[WARN] hcledit block rm failed for {resource_id}: {result.stderr}")
         else:
+            print(f"  [patch] {resource_id}: changes={json.dumps({f: {'before_type': type(v.get('before')).__name__, 'after_type': type(v.get('after')).__name__, 'after_empty': _json_to_hcl(v.get('after')).strip() in ('','[]','{}','null')} for f, v in changes.items()}, default=str)}")
             total = 0
+            block_removal_fields: dict[str, dict] = {}
             for field, vals in changes.items():
+                after_val = _json_to_hcl(vals.get("after"))
+                # hcledit can't delete a nested block (e.g. route { ... }
+                # → removed, after_val is "[]").  Track these for the
+                # regex fallback regardless of whether the field name
+                # contains dots/brackets.
+                if after_val.strip() in ("", "[]", "{}", "null"):
+                    print(f"  [patch] {resource_id}.{field}: block removal — routing to regex fallback")
+                    block_removal_fields[field] = vals
+                    continue
                 if "." in field or "[" in field:
+                    print(f"  [patch] {resource_id}.{field}: nested field — skipping hcledit")
                     continue
                 total += 1
-                hcl_val = _json_to_hcl(vals.get("after"))
+                print(f"  [patch] {resource_id}.{field}: hcledit attribute set → {after_val[:60]}")
                 try:
                     subprocess.run(
                         ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                         hcl_val, "-f", tmp_path, "-u"],
+                         after_val, "-f", tmp_path, "-u"],
                         check=False,
                     )
                 except FileNotFoundError:
                     print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
-            if total == 0:
-                # All changed fields are nested (e.g. route, ingress, egress) —
-                # hcledit's attribute set can't handle these.  Fall back to
-                # regex patching instead of leaving the file unmodified.
-                print(f"  ⚠ {resource_id}: no top-level patchable fields — "
-                      f"falling back to regex patching for nested fields")
-                patched = _regex_patch_tf_file(tmp_path, resource_id, changes, deleted)
+            print(f"  [patch] {resource_id}: total={total} hcledit_patchable, {len(block_removal_fields)} block_removal")
+            # Apply block-level removals via regex to the file that
+            # hcledit already touched, so both types of change land.
+            if block_removal_fields:
+                patched = _regex_patch_tf_file(tmp_path, resource_id, block_removal_fields, deleted=False)
+                print(f"  [patch] {resource_id}: regex fallback for {list(block_removal_fields)} → {'patched' if patched is not None else 'no change'}")
                 if patched is not None:
                     with open(tmp_path, "w", encoding="utf-8") as f:
                         f.write(patched)
+            elif total == 0:
+                # All changed fields are nested (e.g. route, ingress, egress) —
+                # hcledit's attribute set can't handle these.  Fall back to
+                # regex patching instead of leaving the file unmodified.
+                print(f"  [patch] {resource_id}: no top-level patchable fields — "
+                      f"falling back to regex patching for nested fields")
+                patched = _regex_patch_tf_file(tmp_path, resource_id, changes, deleted)
+                print(f"  [patch] {resource_id}: regex fallback for all fields → {'patched' if patched is not None else 'no change'}")
 
         with open(tmp_path, encoding="utf-8") as f:
             return f.read()

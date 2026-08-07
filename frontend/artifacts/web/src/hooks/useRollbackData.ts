@@ -18,7 +18,7 @@ export interface RollbackRun {
   pr_number:       number;
   scope:           string;
   mode:            'preview' | 'execute';
-  status:          'running' | 'complete' | 'failed';
+  status:          'running' | 'complete' | 'failed' | 'cancelled';
   current_stage:   string | null;
   started_at:      string;
   completed_at:    string | null;
@@ -52,7 +52,8 @@ export function useEligiblePRs(scope: string | null) {
         .from('drift_events')
         .select('*')
         .eq('account', scope!)
-        .eq('status', 'open')
+        .in('status', ['open', 'resolved'])
+        .not('changes_jsonb', 'is', null)
         .order('created_at', { ascending: false });
       if (error) throw error;
       return (data ?? []).filter((e: DriftEvent) => e.pr_number != null) as DriftEvent[];

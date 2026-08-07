@@ -165,7 +165,7 @@ function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
                   {kv('Region',   e.region)}
                   {kv('Account',  e.account)}
                   {kv('File',     e.file_path)}
-                  {kv('Created',  format(new Date(e.created_at), 'PPpp'))}
+                  {kv('Created',  format(new Date(e.created_at), 'MMM d, yyyy, HH:mm'))}
                   {kv('Unmanaged', e.unmanaged ? 'Yes' : 'No')}
                 </div>
                 {e.resolution && kv('Resolution', e.resolution)}
@@ -505,7 +505,7 @@ export default function PrQueue() {
 
                     {/* Created */}
                     <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                      <span title={format(new Date(ev.created_at), 'PPpp')}>
+                      <span title={format(new Date(ev.created_at), 'MMM d, yyyy, HH:mm')}>
                         {formatDistanceToNow(new Date(ev.created_at), { addSuffix: true })}
                       </span>
                     </td>
@@ -518,21 +518,19 @@ export default function PrQueue() {
                             href={buildPrUrl(repoUrl, githubRepo, ev.pr_number)!}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/20 hover:border-primary/50"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline whitespace-nowrap"
                           >
-                            <ExternalLink size={10} />
-                            #{ev.pr_number}
+                            <ExternalLink size={11} />
+                            View PR #{ev.pr_number}
                           </a>
                         ) : (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-dashed border-muted-foreground/15 px-2 py-0.5 text-[11px] text-muted-foreground/45"
+                          <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-muted-foreground/20 bg-muted/30 px-2.5 py-1 text-[11px] text-muted-foreground whitespace-nowrap"
                                 title="Set GITHUB_REPO in .env or repo_url on the environment to enable PR links.">
-                            #{ev.pr_number}
+                            PR #{ev.pr_number}
                           </span>
                         )
                       ) : (
-                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] text-muted-foreground/40">
-                          no PR
-                        </span>
+                        <span className="text-[11px] text-muted-foreground/40">—</span>
                       )}
                     </td>
                   </tr>

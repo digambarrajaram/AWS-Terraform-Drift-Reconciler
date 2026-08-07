@@ -60,7 +60,7 @@ function ExpiresCell({ expires }: { expires: string | null }) {
   const expired = isExpired(expires);
   return (
     <span className={expired ? 'text-destructive font-medium' : 'text-foreground'}>
-      {format(parseISO(expires), 'MMM d, yyyy')}
+      {format(parseISO(expires), 'MMM d, yyyy, HH:mm')}
       {expired && ' (expired)'}
     </span>
   );
@@ -305,12 +305,12 @@ function DriftTab({
           <form onSubmit={handleAdd} className="space-y-3">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Resource Address *">
-                <input type="text" placeholder="aws_s3_bucket.my-bucket"
+                <input type="text" placeholder="aws_security_group.launch-wizard-8"
                   value={form.resource_address} onChange={(e) => set('resource_address', e.target.value)}
                   className={inputCls} />
               </Field>
               <Field label="Drift Type">
-                <input type="text" placeholder="e.g. tag_drift, config_drift"
+                <input type="text" placeholder="e.g. ingress, tags, instance_type"
                   value={form.drift_type} onChange={(e) => set('drift_type', e.target.value)}
                   className={inputCls} />
               </Field>
@@ -542,12 +542,12 @@ function UnmanagedTab({
           <form onSubmit={handleAdd} className="space-y-3">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Resource Type *">
-                <input type="text" placeholder="e.g. aws_s3_bucket"
+                <input type="text" placeholder="e.g. aws_security_group"
                   value={form.resource_type} onChange={(e) => set('resource_type', e.target.value)}
                   className={inputCls} />
               </Field>
               <Field label="Resource ID Pattern *">
-                <input type="text" placeholder="e.g. prod-* or exact-bucket-name"
+                <input type="text" placeholder="e.g. launch-wizard or sg-*"
                   value={form.resource_id_pattern} onChange={(e) => set('resource_id_pattern', e.target.value)}
                   className={inputCls} />
               </Field>

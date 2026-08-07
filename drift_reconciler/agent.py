@@ -357,10 +357,15 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
         if net_upgrade and risk == "LOW":
             risk = net_upgrade
 
+        dr_summary = build_drift_summary(resource)
+        if net_upgrade and map_risk(resource.get("security_impact")) == "LOW":
+            dr_summary = ("> ⚠ **Network-reachability change** — severity "
+                          "upgraded from Low to Medium.\n\n" + dr_summary)
+
         findings.append({
             "resource_id": resource["address"],
             "risk_level": risk,
-            "drift_summary": build_drift_summary(resource),
+            "drift_summary": dr_summary,
             "plan_output": json.dumps(resource.get("changes") or {"status": status}, indent=2),
             "file_path": resource.get("file_path"),
             "changes": resource.get("changes", {}),
@@ -614,7 +619,7 @@ def _load_routing_rules() -> dict[str, str]:
 
 
 def drift_alert(state: State):
-    report_stage(state.get("run_id"), "drift_alert")
+    report_stage(state.get("run_id"), "alert_agent")
     """Route findings by severity using Supabase routing rules, falling
     back to hardcoded HIGH→PagerDuty / else→Slack if unreachable."""
     if not state.get("drift_detected"):

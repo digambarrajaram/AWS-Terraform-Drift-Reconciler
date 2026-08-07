@@ -325,6 +325,20 @@ def _build_cost_impact(resource: dict[str, Any], region: str) -> dict[str, Any] 
     }
 
 
+def _make_resource_id(resource_type: str, raw_name: str, aws_id: str) -> str:
+    """Build a ``resource_id`` from *resource_type* and either *raw_name*
+    (the Name tag) or *aws_id* (the AWS resource ID).  Never produces a
+    trailing-dot address — if *raw_name* is empty, *aws_id* is always
+    used as the fallback."""
+    name = raw_name or aws_id
+    if not name:
+        raise ValueError(
+            f"Both raw_name and aws_id are empty for resource type "
+            f"'{resource_type}' — cannot construct a valid resource_id."
+        )
+    return f"{resource_type}.{name}"
+
+
 def diff_unmanaged(
     live_resources: list[dict[str, Any]],
     managed_resources: list[dict[str, Any]],
@@ -359,13 +373,13 @@ def diff_unmanaged(
         matched = False
         if live.get("arn") and live["arn"] in managed_arns:
             matched = True
-        if (live["type"], live.get("raw_name", live.get("id"))) in managed_keys:
+        if (live["type"], live.get("raw_name") or live.get("id")) in managed_keys:
             matched = True
         if matched:
             continue
 
         # ---- Match against exceptions ----
-        resource_label = live.get("raw_name", live.get("id"))
+        resource_label = live.get("raw_name") or live.get("id")
         suppressed = False
         for exc in exceptions:
             if exc.get("resource_type") != live["type"]:
@@ -410,7 +424,7 @@ def diff_unmanaged(
                 )
             findings.append(
                 {
-                    "resource_id": f"{live['type']}.{live.get('raw_name') or live['id']}",
+                    "resource_id": _make_resource_id(live["type"], live.get("raw_name", ""), live["id"]),
                     "risk_level": "LOW",
                     "drift_summary": summary,
                     "plan_output": json.dumps(live, indent=2, default=str),
@@ -435,7 +449,7 @@ def diff_unmanaged(
             )
         findings.append(
             {
-                "resource_id": f"{live['type']}.{live.get('raw_name') or live['id']}",
+                "resource_id": _make_resource_id(live["type"], live.get("raw_name", ""), live["id"]),
                 "risk_level": "MEDIUM",
                 "drift_summary": summary,
                 "plan_output": json.dumps(live, indent=2, default=str),

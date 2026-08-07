@@ -36,6 +36,16 @@ _LOG_BUFFERS: dict[str, deque] = {}
 _LOG_LOCK = threading.Lock()
 _LOG_MAXLINES = 2000
 
+# Running subprocesses keyed by run_id so the cancel endpoint can
+# terminate them gracefully (SIGTERM → wait → SIGKILL).
+# Value is (Popen, env, scope) — env is needed by _force_unlock_tf,
+# scope is used by the overlapping-run guard.
+_RUNNING: dict[str, tuple[subprocess.Popen, dict, str]] = {}
+_RUNNING_LOCK = threading.Lock()
+# Run IDs that were cancelled — the exit-watcher checks this to decide
+# whether to attempt a terraform force-unlock.
+_CANCELLED: set[str] = set()
+
 # ── Environment cache (30s TTL) ──────────────────────────────────────
 _ENV_CACHE: dict = {}
 _ENV_CACHE_TS = 0.0
@@ -165,7 +175,62 @@ def _spawn_agent(scope: str, extra_args: list[str]) -> None:
     subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env)
 
 
-def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str) -> subprocess.Popen:
+def _force_unlock_tf(run_id: str, scope: str, env: dict | None = None) -> None:
+    """Release a stale terraform DynamoDB state lock by deleting the
+    lock item directly, bypassing ``terraform force-unlock`` entirely.
+
+    Uses the same AWS credentials the original scan had so auth matches
+    exactly.  Results are logged into the run's log buffer."""
+    lock_table = _get_env_field(scope, "tf_lock_table") or "terraform-locks"
+    region = (env or os.environ).get("AWS_REGION", "us-east-1")
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    def _log(msg: str) -> None:
+        with _LOG_LOCK:
+            b = _LOG_BUFFERS.get(run_id)
+            if b is not None:
+                b.append(f"[{ts}] [cancel] {msg}")
+
+    _log(f"Checking DynamoDB lock table '{lock_table}' in {region}")
+
+    try:
+        import boto3
+        import botocore.exceptions
+
+        access_key = (env or os.environ).get("AWS_ACCESS_KEY_ID", "").strip()
+        secret_key = (env or os.environ).get("AWS_SECRET_ACCESS_KEY", "").strip()
+
+        if access_key and secret_key:
+            ddb = boto3.client("dynamodb", region_name=region,
+                               aws_access_key_id=access_key,
+                               aws_secret_access_key=secret_key)
+        else:
+            ddb = boto3.client("dynamodb", region_name=region)
+
+        resp = ddb.scan(TableName=lock_table, Limit=5)
+        items = resp.get("Items", [])
+
+        if not items:
+            _log(f"✓ No lock items in '{lock_table}' — nothing to release")
+            return
+
+        deleted = 0
+        for item in items:
+            lock_id = item.get("LockID", {}).get("S", "?")
+            ddb.delete_item(TableName=lock_table, Key={"LockID": {"S": lock_id}})
+            deleted += 1
+            _log(f"✓ Deleted lock: {lock_id}")
+
+        _log(f"✓ Released {deleted} lock(s) from '{lock_table}'")
+
+    except botocore.exceptions.ClientError as exc:
+        err = exc.response["Error"]["Code"]
+        _log(f"✗ DynamoDB {err}: {exc.response['Error']['Message'][:200]}")
+    except Exception as exc:
+        _log(f"✗ force-unlock raised: {exc}")
+
+
+def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope: str = "") -> subprocess.Popen:
     """Spawn *cmd* as a fire-and-forget subprocess with stdout captured.
 
     Inserts ``-u`` after the interpreter so piped stdout is unbuffered
@@ -196,6 +261,8 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str) -> sub
 
     with _LOG_LOCK:
         _LOG_BUFFERS[run_id] = deque(maxlen=_LOG_MAXLINES)
+    with _RUNNING_LOCK:
+        _RUNNING[run_id] = (proc, env.copy() if env else os.environ.copy(), scope or "")
 
     def _stream() -> None:
         try:
@@ -221,8 +288,24 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str) -> sub
 
     def _watch_exit() -> None:
         proc.wait()
+        was_cancelled = run_id in _CANCELLED
+        if was_cancelled:
+            _CANCELLED.discard(run_id)
+        with _RUNNING_LOCK:
+            _pair = _RUNNING.pop(run_id, None)
+        _run_scope = _pair[2] if _pair else ""
+
         if proc.returncode == 0:
             return
+
+        # If the process was cancelled, terraform might have left a
+        # stale DynamoDB lock — release it before the next scan starts.
+        # The cancel handler already wrote 'cancelled' to the DB, so
+        # skip the failed-status patch below entirely.
+        if was_cancelled:
+            _force_unlock_tf(run_id, _run_scope, env)
+            return
+
         url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         if not url_base or not key:
@@ -243,8 +326,8 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str) -> sub
                 if resp.status_code != 200 or not resp.json():
                     continue
                 row = resp.json()[0]
-                if row["status"] in ("complete", "failed"):
-                    return  # agent.py already wrote a terminal status — no race, do nothing
+                if row["status"] in ("complete", "failed", "cancelled"):
+                    return
                 requests.patch(
                     f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
                     headers=headers,
@@ -445,8 +528,18 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
 
-            # Non-blocking subprocess — fire and respond 202 immediately.
+            # Guard against overlapping scans for the same scope — two
+            # terraform processes racing for the same state lock will
+            # both fail, and the second lock-acquisition error is confusing.
+            with _RUNNING_LOCK:
+                for rid, (p, _e, _sc) in list(_RUNNING.items()):
+                    if p.poll() is None and _sc == scope:
+                        self._json_error(409, f"Scan already running for {scope} (run: {rid})")
+                        return
+
             tf_dir = _tf_dir_for(scope)
+
+            # Non-blocking subprocess — fire and respond 202 immediately.
             cmd = [
                 _sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -459,7 +552,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT))
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -502,7 +595,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT))
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -559,7 +652,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT))
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -920,13 +1013,12 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         payload = {"severity": severity, "channel": channel, "scope": scope, "updated_at": datetime.now(timezone.utc).isoformat()}
 
         try:
-            # Try PATCH existing row first.
+            # Try PATCH existing row first.  With Prefer: return=representation,
+            # Supabase returns 200 + [{...}] when a row was matched, or
+            # 200 + [] when no rows matched — the body distinguishes them.
             resp = requests.patch(f"{table_url}?{filters}", headers=headers, json=payload, timeout=10)
-            if resp.status_code in (200, 204):
-                pass  # updated
-            elif resp.status_code == 200 and resp.json():
-                pass  # updated with representation
-            else:
+            patched = resp.status_code in (200, 204) and resp.json() if resp.text else False
+            if not patched:
                 # No existing row — INSERT.
                 resp = requests.post(table_url, headers=headers, json=payload, timeout=10)
                 if resp.status_code not in (200, 201):
@@ -1226,7 +1318,10 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 if cost is not None and cost != "":
                     row["max_monthly_cost_usd"] = float(cost)
             if entry.get("approved_by"):
-                row["approved_by"] = entry["approved_by"].strip()
+                # Normalize to lowercase — prevents "Digambar",
+                # "digambar", and "Digambar R" from becoming 3
+                # separate entries in the approved_by column.
+                row["approved_by"] = entry["approved_by"].strip().lower()
 
             try:
                 resp = requests.post(table_url, headers=headers, json=row, timeout=10)
@@ -1311,35 +1406,57 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     def _cancel_run(self, path, table):
         """POST /api/scan/{run_id}/cancel or /api/rollback/{run_id}/cancel
 
-        Marks the run row as 'cancelled' so the frontend stops polling
-        and the status doesn't read 'running' forever."""
+        Marks the run row as 'cancelled' and terminates the subprocess
+        gracefully (SIGTERM → 5 s wait → SIGKILL) so terraform can
+        release its state lock."""
         run_id = path.split("/")[3]  # /api/scan/{run_id}/cancel
+
+        # Write the cancelled status to Supabase FIRST so _watch_exit
+        # sees it and doesn't overwrite it with 'failed'.
         url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if url_base and key:
+            for attempt in range(2):
+                try:
+                    requests.patch(
+                        f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
+                        headers={"apikey": key, "Authorization": f"Bearer {key}",
+                                 "Content-Type": "application/json",
+                                 "Prefer": "return=minimal"},
+                        json={"status": "cancelled",
+                              "completed_at": datetime.now(timezone.utc).isoformat()},
+                        timeout=5,
+                    )
+                    break
+                except requests.RequestException:
+                    if attempt == 1:
+                        print(f"[cancel] Failed to write cancelled status for {run_id} — "
+                              f"the exit watcher will mark it as failed.", file=sys.stderr)
+
+        # Terminate the subprocess gracefully first so terraform can
+        # release the DynamoDB state lock.  Only force-kill if it
+        # doesn't exit within 5 seconds.
+        with _RUNNING_LOCK:
+            pair = _RUNNING.get(run_id)
+            proc = pair[0] if pair else None
+        if proc is not None and proc.poll() is None:
+            _CANCELLED.add(run_id)
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
         if not url_base or not key:
             self._json_error(502, "Supabase not configured")
             return
-        try:
-            resp = requests.patch(
-                f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}",
-                         "Content-Type": "application/json",
-                         "Prefer": "return=minimal"},
-                json={"status": "cancelled",
-                      "completed_at": datetime.now(timezone.utc).isoformat()},
-                timeout=5,
-            )
-            if resp.status_code in (200, 204):
-                data = json.dumps({"ok": True}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-            else:
-                self._json_error(502, f"Supabase returned {resp.status_code}")
-        except requests.RequestException as e:
-            self._json_error(502, f"Supabase unreachable: {e}")
+        data = json.dumps({"ok": True}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     # ── Live log streaming ──────────────────────────────────────────
     def _serve_run_logs(self):

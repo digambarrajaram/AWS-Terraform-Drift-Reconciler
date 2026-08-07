@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { errorMessage } from '@/lib/errorUtils';
 import {
@@ -21,6 +21,9 @@ const CHANNELS: { value: Channel; label: string }[] = [
   { value: 'slack',     label: 'Slack'     },
   { value: 'none',      label: 'None'      },
 ];
+
+// Channel severity tier for escalation detection — higher = more disruptive.
+const CHANNEL_TIER: Record<Channel, number> = { none: 0, slack: 1, pagerduty: 2 };
 
 const SEV_STYLE: Record<Severity, string> = {
   HIGH:   'bg-red-100   text-red-700   dark:bg-red-900/30   dark:text-red-400',
@@ -167,22 +170,33 @@ function RoutingRuleRow({
   scopeLabel,
   scopeValue,
   existingRule,
+  globalChannel,
   onSave,
   saving,
 }: {
-  severity:     Severity;
-  scopeLabel:   string;
-  scopeValue:   string | null; // null = global
-  existingRule: RoutingRule | undefined;
-  onSave:       (severity: Severity, channel: Channel, scope: string | null) => void;
-  saving:       boolean;
+  severity:      Severity;
+  scopeLabel:    string;
+  scopeValue:    string | null; // null = global
+  existingRule:  RoutingRule | undefined;
+  globalChannel: Channel;
+  onSave:        (severity: Severity, channel: Channel, scope: string | null) => void;
+  saving:        boolean;
 }) {
   const current = existingRule?.channel ?? 'none';
   const [channel, setChannel] = useState<Channel>(current);
+  // Sync local state when the rule changes underneath us
+  // (e.g. after a save refetches, or after navigation remounts).
+  useEffect(() => { setChannel(current); }, [current]);
   const dirty = channel !== current;
 
+  // Detect escalation: scope override routes to a more disruptive channel
+  // than the global default (e.g. LOW → Slack globally but LOW → PagerDuty
+  // for this scope).
+  const escalated = scopeValue !== null
+    && CHANNEL_TIER[channel] > CHANNEL_TIER[globalChannel];
+
   return (
-    <tr className="border-b border-border last:border-0">
+    <tr className={['border-b border-border last:border-0', escalated ? 'bg-amber-50/30 dark:bg-amber-950/10' : ''].join(' ')}>
       <td className="px-4 py-3">
         <SevBadge sev={severity} />
       </td>
@@ -203,6 +217,11 @@ function RoutingRuleRow({
             <option key={c.value} value={c.value}>{c.label}</option>
           ))}
         </select>
+        {escalated && (
+          <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400 flex items-center gap-1">
+            <AlertTriangle size={10} /> Escalated above global default ({globalChannel})
+          </p>
+        )}
       </td>
       <td className="px-4 py-3">
         <button
@@ -293,6 +312,8 @@ function RoutingRulesSection({
           {SEVERITIES.map((sev) => {
             const globalKey = `${sev}-global`;
             const scopeKey  = `${sev}-${scope}`;
+            const globalRule = findRule(sev, null);
+            const globalCh: Channel = globalRule?.channel ?? 'none';
             return (
               <React.Fragment key={sev}>
                 {/* Global default row */}
@@ -300,7 +321,8 @@ function RoutingRulesSection({
                   severity={sev}
                   scopeLabel="Global"
                   scopeValue={null}
-                  existingRule={findRule(sev, null)}
+                  existingRule={globalRule}
+                  globalChannel={globalCh}
                   onSave={handleSave}
                   saving={savingKey === globalKey}
                 />
@@ -311,6 +333,7 @@ function RoutingRulesSection({
                     scopeLabel={scopeLabel}
                     scopeValue={scope}
                     existingRule={findRule(sev, scope)}
+                    globalChannel={globalCh}
                     onSave={handleSave}
                     saving={savingKey === scopeKey}
                   />

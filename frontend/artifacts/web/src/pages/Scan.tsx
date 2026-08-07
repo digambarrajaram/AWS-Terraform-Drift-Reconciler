@@ -4,7 +4,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 import { toast } from 'sonner';
 import {
   Play, RotateCcw, CheckCircle, XCircle, Clock,
-  ExternalLink, ChevronRight, Loader2, FileText,
+  ExternalLink, ChevronRight, Loader2, FileText, Ban,
 } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
@@ -34,7 +34,7 @@ function relTime(iso: string) {
 }
 
 function fmtDate(iso: string) {
-  try { return format(new Date(iso), 'MMM d, HH:mm'); }
+  try { return format(new Date(iso), 'MMM d, yyyy, HH:mm'); }
   catch { return '—'; }
 }
 
@@ -42,9 +42,14 @@ function fmtDate(iso: string) {
 
 function StageIndicator({ currentStage, status }: {
   currentStage: string | null;
-  status: ScanRun['status'];
+  status: string;
 }) {
-  const currentIdx = STAGES.findIndex((s) => s.key === currentStage);
+  // When the run is complete, treat ALL stages as done regardless of
+  // which stage was reported last (parallel nodes race on the final
+  // current_stage write — whichever finishes last wins).
+  const currentIdx = status === 'complete'
+    ? STAGES.length
+    : STAGES.findIndex((s) => s.key === currentStage);
 
   return (
     <div className="flex items-center gap-1 overflow-x-auto pb-1">
@@ -124,14 +129,16 @@ function ScanResult({ run }: { run: ScanRun }) {
               <>
                 <p className="text-lg font-semibold text-card-foreground">{rs.drift.count} finding{rs.drift.count !== 1 ? 's' : ''}</p>
                 {(rs.drift.pr_links ?? []).length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {rs.drift.pr_links.map((url) => (
-                      <a key={url} href={url} target="_blank" rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-xs text-primary hover:underline truncate">
-                        <ExternalLink size={10} className="shrink-0" />
-                        {url}
-                      </a>
-                    ))}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {rs.drift.pr_links.map((url) => {
+                      const prNum = url.split('/').pop();
+                      return (
+                        <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
+                          <ExternalLink size={11} /> View PR #{prNum}
+                        </a>
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -147,14 +154,16 @@ function ScanResult({ run }: { run: ScanRun }) {
               <>
                 <p className="text-lg font-semibold text-card-foreground">{rs.unmanaged.count} finding{rs.unmanaged.count !== 1 ? 's' : ''}</p>
                 {(rs.unmanaged.pr_links ?? []).length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {rs.unmanaged.pr_links.map((url) => (
-                      <a key={url} href={url} target="_blank" rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-xs text-primary hover:underline truncate">
-                        <ExternalLink size={10} className="shrink-0" />
-                        {url}
-                      </a>
-                    ))}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {rs.unmanaged.pr_links.map((url) => {
+                      const prNum = url.split('/').pop();
+                      return (
+                        <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
+                          <ExternalLink size={11} /> View PR #{prNum}
+                        </a>
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -183,10 +192,11 @@ function ScanResult({ run }: { run: ScanRun }) {
 
 // ── ScanHistory ────────────────────────────────────────────────────────────
 
-const STATUS_STYLE: Record<ScanRun['status'], { label: string; cls: string }> = {
-  running:  { label: 'Running',  cls: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400'  },
-  complete: { label: 'Complete', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
-  failed:   { label: 'Failed',   cls: 'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400'      },
+const STATUS_STYLE: Record<string, { label: string; cls: string }> = {
+  running:   { label: 'Running',   cls: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400'  },
+  complete:  { label: 'Complete',  cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
+  failed:    { label: 'Failed',    cls: 'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400'      },
+  cancelled: { label: 'Cancelled', cls: 'bg-slate-100  text-slate-700  dark:bg-slate-900/30 dark:text-slate-400' },
 };
 
 function ScanHistory({ runs, activeRunId, onSelect, loading }: {
@@ -290,6 +300,16 @@ export default function Scan() {
     }
   }, [logsComplete, activeRunId, scope, invalidate]);
 
+  const handleCancel = useCallback(async () => {
+    if (!activeRunId) return;
+    try {
+      await apiFetch(`/scan/${activeRunId}/cancel`, { method: 'POST' });
+    } catch { /* fire-and-forget */ }
+    // Refetch scan history so the cancelled status appears without refresh.
+    if (scope) invalidate(scope, activeRunId);
+    setActiveRunId(null);
+  }, [activeRunId, scope, invalidate]);
+
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!scope) return;
@@ -319,7 +339,7 @@ export default function Scan() {
 
   const run         = activeRun.data;
   const isRunning   = run?.status === 'running';
-  const isDone      = run?.status === 'complete' || run?.status === 'failed';
+  const isDone      = run?.status === 'complete' || run?.status === 'failed' || run?.status === 'cancelled';
   const showResult  = isDone && run != null;
   const showLog     = activeRunId != null;
 
@@ -392,7 +412,9 @@ export default function Scan() {
               ) : isDone ? (
                 run?.status === 'complete'
                   ? <CheckCircle size={15} className="text-emerald-500" />
-                  : <XCircle size={15} className="text-destructive" />
+                  : run?.status === 'cancelled'
+                    ? <Ban size={15} className="text-slate-500" />
+                    : <XCircle size={15} className="text-destructive" />
               ) : (
                 <Clock size={15} className="text-muted-foreground" />
               )}
@@ -402,6 +424,17 @@ export default function Scan() {
             </div>
             <span className="text-xs text-muted-foreground font-mono">{activeRunId}</span>
           </div>
+
+          {/* Cancel — only while running */}
+          {isRunning && (
+            <button
+              type="button"
+              onClick={handleCancel}
+              className="flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90"
+            >
+              <Ban size={12} /> Cancel Scan
+            </button>
+          )}
 
           {/* Stage indicator */}
           {run && (

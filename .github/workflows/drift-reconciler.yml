@@ -225,10 +225,14 @@ jobs:
           (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Accept (Align State)')
         run: |
+          RESOLUTION="PR merged — code updated to match live AWS state"
+          case "${{ github.event.pull_request.title }}" in
+            *"[ROLLBACK]"*) RESOLUTION="Rollback merged — code reverted to pre-fix state" ;;
+          esac
           python ${{ github.workspace }}/drift_reconciler/drift_history.py resolve \
             ${{ github.event.pull_request.number }} \
             ${{ needs.resolve-scope.outputs.scope }} \
-            "PR merged — code updated to match live AWS state"
+            "$RESOLUTION"
 
       # =================================================================
       # SCENARIO B: REJECTED (Closed) → Revert AWS to match original code
@@ -262,10 +266,14 @@ jobs:
           (github.event_name == 'pull_request' && github.event.pull_request.merged == false) ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_type == 'Reject (Revert Code)')
         run: |
+          RESOLUTION="PR closed — AWS reverted to match original code"
+          case "${{ github.event.pull_request.title }}" in
+            *"[ROLLBACK]"*) RESOLUTION="Rollback closed — original fix restored" ;;
+          esac
           python ${{ github.workspace }}/drift_reconciler/drift_history.py resolve \
             ${{ github.event.pull_request.number }} \
             ${{ needs.resolve-scope.outputs.scope }} \
-            "PR closed — AWS reverted to match original code"
+            "$RESOLUTION"
 
       - name: Comment Result
         if: github.event_name == 'pull_request'

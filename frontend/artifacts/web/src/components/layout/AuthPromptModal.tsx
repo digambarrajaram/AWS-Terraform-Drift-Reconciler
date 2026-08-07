@@ -1,10 +1,12 @@
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { saveToken } from '@/api/apiFetch';
 
 export default function AuthPromptModal() {
   const needsToken = useAuthStore((s) => s.needsToken);
   const setNeedsToken = useAuthStore((s) => s.setNeedsToken);
+  const queryClient = useQueryClient();
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
 
@@ -18,6 +20,10 @@ export default function AuthPromptModal() {
       return;
     }
     saveToken(trimmed);
+    // Invalidate all queries so they retry with the now-valid token —
+    // without this, the 401 from the first attempt stays cached and
+    // every page stays blank until the user navigates away and back.
+    queryClient.invalidateQueries();
     setNeedsToken(false);
     setValue('');
     setError('');

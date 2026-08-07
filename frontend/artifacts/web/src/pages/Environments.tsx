@@ -182,7 +182,7 @@ type FormState = {
 const BLANK_FORM: FormState = {
   slug: '', name: '', aws_account_id: '', region: '',
   tf_state_bucket: '', tf_directory_path: '',
-  auth_type: 'profile',
+  auth_type: 'role',
   aws_profile: '', aws_role_arn: '', aws_external_id: '',
   tf_lock_table: '', scan_role_variable: '',
   apply_role_secret_name: '', apply_environment_name: '',
@@ -261,6 +261,10 @@ function validateForm(form: FormState, isEdit: boolean, env?: Environment): stri
   if (!form.region.trim())           errs.push('Region is required');
   if (!form.tf_state_bucket.trim())  errs.push('Terraform state bucket is required');
   if (!form.tf_directory_path.trim()) errs.push('Terraform directory path is required');
+
+  if (!isEdit && !['role', 'keys'].includes(form.auth_type)) {
+    errs.push('Auth type must be "role" or "keys" for new environments');
+  }
 
   if (form.auth_type === 'keys') {
     const hasStoredKey    = env?.aws_access_key_configured;
@@ -347,7 +351,7 @@ function EnvForm({
               <Field label="Slug" required error={!isEdit && form.slug && !SLUG_RE.test(form.slug) ? 'lowercase letters, digits, and hyphens only' : undefined}>
                 <input
                   type="text"
-                  placeholder="prod"
+                  placeholder="scope-e"
                   value={form.slug}
                   onChange={(e) => set('slug', e.target.value)}
                   disabled={isEdit}
@@ -358,7 +362,7 @@ function EnvForm({
                 )}
               </Field>
               <Field label="Display Name" required>
-                <input type="text" placeholder="Production" value={form.name}
+                <input type="text" placeholder="Environment E" value={form.name}
                   onChange={(e) => set('name', e.target.value)} className={inputCls} />
               </Field>
               <Field label="AWS Account ID" required>
@@ -374,7 +378,7 @@ function EnvForm({
                   onChange={(e) => set('tf_state_bucket', e.target.value)} className={inputCls} />
               </Field>
               <Field label="TF Directory Path" required>
-                <input type="text" placeholder="./terraform/prod" value={form.tf_directory_path}
+                <input type="text" placeholder="./terraform/ec2_terraform_account_e" value={form.tf_directory_path}
                   onChange={(e) => set('tf_directory_path', e.target.value)} className={inputCls} />
               </Field>
             </div>
@@ -385,7 +389,9 @@ function EnvForm({
             <p className={sectionHeadingCls}>AWS Authentication</p>
             <Field label="Auth Type" required>
               <div className="flex gap-3">
-                {(['profile', 'role', 'keys'] as const).map((t) => (
+                {((isEdit && env?.auth_type === 'profile'
+                  ? ['profile', 'role', 'keys']
+                  : ['role', 'keys']) as const).map((t) => (
                   <label key={t} className="flex items-center gap-1.5 cursor-pointer select-none text-xs">
                     <input
                       type="radio"
@@ -457,11 +463,11 @@ function EnvForm({
                   onChange={(e) => set('scan_role_variable', e.target.value)} className={inputCls} />
               </Field>
               <Field label="Apply Role Secret Name">
-                <input type="text" placeholder="prod-apply-role" value={form.apply_role_secret_name}
+                <input type="text" placeholder="scope-e-apply-role" value={form.apply_role_secret_name}
                   onChange={(e) => set('apply_role_secret_name', e.target.value)} className={inputCls} />
               </Field>
               <Field label="Apply Environment Name">
-                <input type="text" placeholder="production" value={form.apply_environment_name}
+                <input type="text" placeholder="scope-e-apply" value={form.apply_environment_name}
                   onChange={(e) => set('apply_environment_name', e.target.value)} className={inputCls} />
               </Field>
             </div>
@@ -696,7 +702,7 @@ export default function Environments() {
                       {env.region}
                     </td>
                     <td className="px-4 py-3">
-                      <AuthBadge type={env.auth_type} />
+                      <AuthBadge type={env.auth_type || 'profile'} />
                     </td>
                     <td className="px-4 py-3">
                       <ActiveBadge active={env.is_active} />

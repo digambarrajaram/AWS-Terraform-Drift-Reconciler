@@ -20,8 +20,8 @@ export function LogViewer({ lines, complete }: { lines: LogLine[]; complete: boo
   }
 
   useEffect(() => {
-    if (!userScrolledUp.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!userScrolledUp.current && containerRef.current) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
   }, [lines.length]);
 

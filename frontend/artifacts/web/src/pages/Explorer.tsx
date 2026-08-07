@@ -107,7 +107,7 @@ function EventDetail({ e }: { e: DriftEvent }) {
           {kv('Region',   e.region)}
           {kv('Account',  e.account)}
           {kv('File',     e.file_path)}
-          {kv('Created',  format(new Date(e.created_at), 'PPpp'))}
+          {kv('Created',  format(new Date(e.created_at), 'MMM d, yyyy, HH:mm'))}
           {kv('Unmanaged', e.unmanaged ? 'Yes' : 'No')}
         </div>
         {e.resolution && kv('Resolution', e.resolution)}
@@ -278,7 +278,7 @@ function DriftCard({
           {event.account}
           {event.region && <> · {event.region}</>}
           {' · '}
-          <span title={format(new Date(event.created_at), 'PPpp')}>
+          <span title={format(new Date(event.created_at), 'MMM d, yyyy, HH:mm')}>
             {formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}
           </span>
         </p>
@@ -783,7 +783,7 @@ export default function Explorer() {
                         <Badge value={ev.status} map={STATUS_CLS} />
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                        <span title={format(new Date(ev.created_at), 'PPpp')}>
+                        <span title={format(new Date(ev.created_at), 'MMM d, yyyy, HH:mm')}>
                           {formatDistanceToNow(new Date(ev.created_at), { addSuffix: true })}
                         </span>
                       </td>

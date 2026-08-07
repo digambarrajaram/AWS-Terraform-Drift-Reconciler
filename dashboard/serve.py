@@ -405,7 +405,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._unauthorized()
             return
 
-        if path == "/api/scan":
+        if path.startswith("/api/scan/") and path.endswith("/cancel"):
+            self._cancel_run(path, "scan_runs")
+        elif path.startswith("/api/rollback/") and path.endswith("/cancel"):
+            self._cancel_run(path, "rollback_runs")
+        elif path == "/api/scan":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length > 0 else b""
             try:
@@ -1302,6 +1306,40 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    # ── Cancel in-progress run ─────────────────────────────────────
+    def _cancel_run(self, path, table):
+        """POST /api/scan/{run_id}/cancel or /api/rollback/{run_id}/cancel
+
+        Marks the run row as 'cancelled' so the frontend stops polling
+        and the status doesn't read 'running' forever."""
+        run_id = path.split("/")[3]  # /api/scan/{run_id}/cancel
+        url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url_base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        try:
+            resp = requests.patch(
+                f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json",
+                         "Prefer": "return=minimal"},
+                json={"status": "cancelled",
+                      "completed_at": datetime.now(timezone.utc).isoformat()},
+                timeout=5,
+            )
+            if resp.status_code in (200, 204):
+                data = json.dumps({"ok": True}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._json_error(502, f"Supabase returned {resp.status_code}")
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
 
     # ── Live log streaming ──────────────────────────────────────────
     def _serve_run_logs(self):

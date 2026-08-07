@@ -297,6 +297,36 @@ def map_risk(security_impact) -> str:
     return {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(security_impact, "LOW")
 
 
+# Resource types and change patterns that alter network reachability.
+# The LLM's freeform security_impact may misclassify these as "low"
+# (e.g. a removed default route).  Any finding matching these rules
+# gets upgraded to at least MEDIUM.
+_NETWORK_RISK_TYPES = frozenset({
+    "aws_route_table", "aws_route_table_association",
+    "aws_internet_gateway", "aws_nat_gateway",
+    "aws_vpc_peering_connection", "aws_vpc_peering_connection_accepter",
+    "aws_security_group", "aws_security_group_rule",
+    "aws_vpc_security_group_ingress_rule", "aws_vpc_security_group_egress_rule",
+    "aws_network_acl", "aws_network_acl_rule",
+})
+_NETWORK_RISK_FIELDS = frozenset({"route", "routes", "cidr_block",
+    "cidr_ipv4", "cidr_ipv6", "cidr_blocks", "ipv6_cidr_blocks",
+    "ingress", "egress", "destination_cidr_block", "gateway_id",
+    "nat_gateway_id", "internet_gateway_id", "vpc_peering_connection_id",
+})
+
+
+def _min_network_risk(resource_id: str, changes: dict) -> str | None:
+    """Return ``"MEDIUM"`` if *resource_id* and *changes* match a
+    network-reachability pattern, ``None`` otherwise (no upgrade)."""
+    rtype = resource_id.split(".")[0] if "." in resource_id else resource_id
+    if rtype not in _NETWORK_RISK_TYPES:
+        return None
+    if any(f in _NETWORK_RISK_FIELDS for f in changes):
+        return "MEDIUM"
+    return None
+
+
 def build_drift_summary(resource: dict) -> str:
     if resource.get("status") == "deleted_externally":
         return "Resource was deleted outside of Terraform (found in state, missing from AWS)."
@@ -319,9 +349,17 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
         status = resource.get("status")
         if not resource.get("changes") and status not in ("deleted_externally", "externally_managed"):
             continue
+        risk = map_risk(resource.get("security_impact"))
+        # Network-reachability changes are never "low" — upgrade the LLM's
+        # freeform classification when the resource type + changed fields
+        # match a known network-risk pattern.
+        net_upgrade = _min_network_risk(resource["address"], resource.get("changes", {}))
+        if net_upgrade and risk == "LOW":
+            risk = net_upgrade
+
         findings.append({
             "resource_id": resource["address"],
-            "risk_level": map_risk(resource.get("security_impact")),
+            "risk_level": risk,
             "drift_summary": build_drift_summary(resource),
             "plan_output": json.dumps(resource.get("changes") or {"status": status}, indent=2),
             "file_path": resource.get("file_path"),

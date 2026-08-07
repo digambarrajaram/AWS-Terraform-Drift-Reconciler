@@ -41,6 +41,7 @@
       </label>
 
       <button type="submit" id="scan-submit">Run Scan</button>
+      <button type="button" id="scan-cancel" style="display:none;background:#da3633;border:1px solid #da3633;color:#fff;padding:8px 20px;border-radius:6px;cursor:pointer;font-size:13px">Cancel Scan</button>
     </form>
 
     <div id="scan-stages" class="stages">
@@ -288,8 +289,9 @@ function startPolling(runId) {
   var fetchInFlight = false;
   var terminal = document.getElementById("scan-terminal");
   terminal.hidden = false;
-  terminal.textContent = "";
+  terminal.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font:inherit;color:inherit"></pre>';
   terminal.dataset.runId = runId;
+  var _logPre = terminal.querySelector("pre");
 
   function _scrollToBottom(force) {
     if (force || terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50) {
@@ -343,7 +345,7 @@ function startPolling(runId) {
       var wasAtBottom = terminal.scrollTop + terminal.clientHeight >= terminal.scrollHeight - 50;
       for (var i = 0; i < data.lines.length; i++) {
         var line = data.lines[i];
-        terminal.textContent += line.text.replace(_ANSI_RE, "") + "\n";
+        if (_logPre) _logPre.textContent += line.text.replace(_ANSI_RE, "") + "\n";
         lineOffset = line.n + 1;
       }
       if (wasAtBottom) {
@@ -406,6 +408,7 @@ function startPolling(runId) {
     // One final drain in case the interval hadn't fired recently.
     if (!logComplete) _fetchLogs();
     _supabase().removeChannel(channel);
+    document.getElementById("scan-cancel").style.display = "none";
   }
 
   var channel = _supabase()
@@ -464,6 +467,15 @@ async function _resumeRunningScan() {
 document.addEventListener("DOMContentLoaded", function() {
   var form = document.getElementById("scan-form");
   var btn = document.getElementById("scan-submit");
+  document.getElementById("scan-cancel").addEventListener("click", function() {
+    var rid = document.getElementById("scan-terminal").dataset.runId;
+    if (rid) {
+      fetch("/api/scan/" + rid + "/cancel", { method: "POST", headers: _authHeaders() }).catch(function() {});
+    }
+    _stop();
+    btn.disabled = false;
+    btn.textContent = "Run Scan";
+  });
 
   form.addEventListener("submit", async function(e) {
     e.preventDefault();
@@ -488,6 +500,7 @@ document.addEventListener("DOMContentLoaded", function() {
       var data = await resp.json().catch(function() { return {}; });
 
       if (resp.status === 202 && data.run_id) {
+        document.getElementById("scan-cancel").style.display = "";
         startPolling(data.run_id);
       } else if (resp.status === 409) {
         _errorMsg("Scan already running for " + scope + " (run: " + (data.run_id || "unknown") + ")");

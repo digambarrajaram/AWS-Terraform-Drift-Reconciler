@@ -37,6 +37,7 @@
       <h2>Rollback Preview</h2>
       <div id="rollback-detail-body"></div>
       <button type="button" id="rollback-confirm" hidden>Confirm Rollback</button>
+      <button type="button" id="rollback-cancel" hidden style="background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 18px;border-radius:6px;cursor:pointer;font-size:13px;margin-left:8px">Cancel</button>
     </div>
   </main>
 <script>
@@ -56,9 +57,9 @@ function _supabase() {
 async function fetchEligiblePRs(scope) {
   var resolved = await _supabase()
     .from("drift_events")
-    .select("id,created_at,resource_id,severity,pr_number,pr_type,drift_summary,changes_jsonb")
+    .select("id,created_at,resource_id,severity,pr_number,pr_type,drift_summary,changes_jsonb,status")
     .eq("account", scope)
-    .eq("status", "resolved")
+    .in("status", ["open", "resolved"])
     .in("pr_type", ["fix", "batch", "rollback"])
     .not("changes_jsonb", "is", null)
     .order("created_at", { ascending: false })
@@ -111,7 +112,7 @@ function renderRollbackList(rows) {
   var body = document.getElementById("rollback-list-body");
   body.innerHTML = "";
   if (!rows || rows.length === 0) {
-    body.innerHTML = '<div class="empty">No eligible PRs for rollback.</div>';
+    body.innerHTML = '<div class="empty">No PRs with baselines found. Run a drift scan to create fix PRs — open PRs will appear here and become eligible for rollback after merge.</div>';
     return;
   }
   var html = rows.map(function(r) {
@@ -119,7 +120,11 @@ function renderRollbackList(rows) {
     var date = (r.created_at || "").slice(0, 10);
     var sev = (r.severity || "LOW").toLowerCase();
     var summary = _baselineSummary(r.changes_jsonb);
-    return '<div class="rollback-row"><div class="rollback-row-main"><span class="sev-' + sev + '">' + (r.severity || "LOW") + '</span> <code>' + (r.resource_id || "?") + '</code> <span>PR ' + prLink + '</span> <span class="empty">' + date + '</span> <button type="button" class="btn-preview" data-pr="' + r.pr_number + '" data-scope="' + (r.account || 'scope-a') + '">Preview Rollback</button></div>' + (summary ? '<div class="rollback-summary">' + summary + '</div>' : '') + '</div>';
+    var isOpen = r.status === "open";
+    var btnLabel = isOpen ? "Preview Rollback (available after merge)" : "Preview Rollback";
+    var btnDisabled = isOpen ? " disabled" : "";
+    var rowClass = isOpen ? " rollback-row-disabled" : "";
+    return '<div class="rollback-row' + rowClass + '"><div class="rollback-row-main"><span class="sev-' + sev + '">' + (r.severity || "LOW") + '</span> <code>' + (r.resource_id || "?") + '</code> <span>PR ' + prLink + '</span> <span class="empty">' + date + '</span> <button type="button" class="btn-preview" data-pr="' + r.pr_number + '" data-scope="' + (r.account || 'scope-a') + '"' + btnDisabled + '>' + btnLabel + '</button></div>' + (summary ? '<div class="rollback-summary">' + summary + '</div>' : '') + '</div>';
   }).join("");
   body.innerHTML = html;
   body.querySelectorAll(".btn-preview").forEach(function(btn) {
@@ -159,6 +164,7 @@ async function startPreview(prNumber, scope) {
     }
 
     _activeRunId = data.run_id;
+    document.getElementById("rollback-cancel").hidden = false;
     var previewStart = Date.now();
     _activePollTimer = setInterval(async function() {
       var thisRunId = _activeRunId;
@@ -186,6 +192,7 @@ async function startPreview(prNumber, scope) {
         // Guard: don't render if user clicked a different PR in the meantime.
         if (thisRunId !== _activeRunId && _activeRunId !== null) return;
         if (result.data.status === "complete" && result.data.result) {
+          document.getElementById("rollback-cancel").hidden = true;
           var res = result.data.result;
           if (typeof res === "string") { try { res = JSON.parse(res); } catch(e) { res = {}; } }
           renderDiff(res.diff || []);
@@ -211,6 +218,26 @@ function _showRollbackError(msg) {
   var detail = document.getElementById("rollback-detail");
   detail.hidden = false;
   document.getElementById("rollback-detail-body").innerHTML = '<div class="error">' + msg + '</div>';
+}
+
+function _cancelRollback() {
+  var runId = _activeRunId;
+  if (_activePollTimer) { clearInterval(_activePollTimer); _activePollTimer = null; }
+  _activeRunId = null;
+  document.getElementById("rollback-detail").hidden = true;
+  document.getElementById("rollback-confirm").hidden = true;
+  document.getElementById("rollback-cancel").hidden = true;
+  // Re-enable all preview buttons.
+  document.querySelectorAll(".btn-preview").forEach(function(b) {
+    b.disabled = false;
+    b.textContent = "Preview Rollback";
+  });
+  // Mark the run as cancelled in the database.
+  if (runId) {
+    fetch("/api/rollback/" + runId + "/cancel", {
+      method: "POST", headers: _authHeaders()
+    }).catch(function() {});
+  }
 }
 
 function renderDiff(diff) {
@@ -243,6 +270,7 @@ function renderDiff(diff) {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
+  document.getElementById("rollback-cancel").addEventListener("click", function() { _cancelRollback(); });
   document.getElementById("rollback-confirm").addEventListener("click", async function() {
     if (!_currentPrNumber) return;
     var btn = document.getElementById("rollback-confirm");
@@ -270,6 +298,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
       if (_activePollTimer) { clearInterval(_activePollTimer); _activePollTimer = null; }
       _activeRunId = data.run_id;
+      document.getElementById("rollback-cancel").hidden = false;
       var pollStart = Date.now();
       _activePollTimer = setInterval(async function() {
         var thisRunId = _activeRunId;

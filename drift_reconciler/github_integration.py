@@ -596,8 +596,15 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False):
                 except FileNotFoundError:
                     print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
             if total == 0:
-                print(f"  ⚠ {resource_id}: no patchable fields — "
-                      f"PR may contain no file changes (manual HCL edit required)")
+                # All changed fields are nested (e.g. route, ingress, egress) —
+                # hcledit's attribute set can't handle these.  Fall back to
+                # regex patching instead of leaving the file unmodified.
+                print(f"  ⚠ {resource_id}: no top-level patchable fields — "
+                      f"falling back to regex patching for nested fields")
+                patched = _regex_patch_tf_file(tmp_path, resource_id, changes, deleted)
+                if patched is not None:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        f.write(patched)
 
         with open(tmp_path, encoding="utf-8") as f:
             return f.read()

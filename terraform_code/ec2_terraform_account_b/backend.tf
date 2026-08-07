@@ -9,6 +9,6 @@ terraform {
     key            = "ec2_scope_b/terraform.tfstate"
     region         = "us-west-2"
     encrypt        = true
-    use_lockfile   = true
+    dynamodb_table = "terraform-locks-b"
   }
 }

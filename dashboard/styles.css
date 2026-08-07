@@ -230,6 +230,7 @@ html body main table#findings-table tbody#findings-body tr td a {
   margin-bottom: 24px;
   max-height: 420px;
   overflow-y: auto;
+  overflow-anchor: none;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   font-size: 12px;
   line-height: 1.5;
@@ -242,6 +243,7 @@ html body main table#findings-table tbody#findings-body tr td a {
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;
   padding: 14px 18px; margin-bottom: 8px;
 }
+.rollback-row-disabled { opacity: 0.55; }
 .rollback-summary {
   color: #8b949e; font-size: 12px; margin-top: 6px; padding-left: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

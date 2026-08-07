@@ -89,7 +89,10 @@ def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
             else:
                 print(f"[slack] Message failed — HTTP {resp.status_code}: {resp.text[:200]}")
         except requests.RequestException as exc:
-            print(f"[slack] Message failed — {exc}")
+            # Keep the terminal log clean — DNS / connection errors are
+            # common in dev and shouldn't leak raw stack traces.
+            exc_name = type(exc).__name__
+            print(f"[slack] Message failed ({exc_name})")
 
     return sent
 

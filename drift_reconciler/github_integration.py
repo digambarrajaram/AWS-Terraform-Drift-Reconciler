@@ -9,6 +9,8 @@ import json
 import re
 import shutil
 import tempfile
+import time
+import requests
 
 import drift_reconciler.drift_history as drift_history
 
@@ -47,15 +49,26 @@ def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch
     safe_id = resource_id.replace(".", "-")
     safe_account = _safe_label(account_label)
     prefix = f"drift-fix/{safe_account}/{safe_id}-"
-    open_prs = repo.get_pulls(state="open", base=base_branch)
-    for pr in open_prs:
-        if not pr.head.ref.startswith(prefix):
-            continue
-        branch_is_rollback = "-rollback-" in pr.head.ref
-        if branch_is_rollback != is_rollback:
-            continue
-        pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
-        pr.edit(state="closed")
+
+    for attempt in range(3):
+        try:
+            open_prs = repo.get_pulls(state="open", base=base_branch)
+            for pr in open_prs:
+                if not pr.head.ref.startswith(prefix):
+                    continue
+                branch_is_rollback = "-rollback-" in pr.head.ref
+                if branch_is_rollback != is_rollback:
+                    continue
+                pr.create_issue_comment("Superseded by a newer run for the same drifted resource; closing.")
+                pr.edit(state="closed")
+            return
+        except (requests.exceptions.RequestException, GithubException) as exc:
+            if attempt == 2:
+                raise
+            print(
+                f"  ⚠ GitHub PR listing failed during close_superseded_prs attempt {attempt + 1}/3: {exc}"
+            )
+            time.sleep(1)
 
 
 def create_drift_pr(

@@ -19,8 +19,51 @@ data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {}
 
-data "aws_vpc" "default" {
-  default = true
+resource "aws_vpc" "drift_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "drift-vpc"
+  }
+}
+
+resource "aws_subnet" "drift_subnet" {
+  vpc_id                  = aws_vpc.drift_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "drift-subnet"
+  }
+}
+
+resource "aws_internet_gateway" "drift_igw" {
+  vpc_id = aws_vpc.drift_vpc.id
+
+  tags = {
+    Name = "drift-igw"
+  }
+}
+
+resource "aws_route_table" "drift_route_table" {
+  vpc_id = aws_vpc.drift_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.drift_igw.id
+  }
+
+  tags = {
+    Name = "drift-route-table"
+  }
+}
+
+resource "aws_route_table_association" "drift_rta" {
+  subnet_id      = aws_subnet.drift_subnet.id
+  route_table_id = aws_route_table.drift_route_table.id
 }
 
 # Ubuntu 24.04 LTS (Noble) - Free Tier Eligible, 8GB root volume
@@ -67,7 +110,7 @@ variable "key_name" {
 resource "aws_security_group" "drift_web_ssh_sg" {
   name        = "web-ssh-security-group"
   description = "Allow restricted SSH and public HTTPS"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.drift_vpc.id
 
   lifecycle {
     ignore_changes = [ingress, egress]
@@ -113,6 +156,7 @@ resource "aws_instance" "drift_web_server" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = "t2.nano" # FREE TIER ELIGIBLE (750 hrs/month)
   key_name               = var.key_name
+  subnet_id              = aws_subnet.drift_subnet.id
   vpc_security_group_ids = [aws_security_group.drift_web_ssh_sg.id]
 
   # Ubuntu 24.04 uses 8GB by default - no override needed

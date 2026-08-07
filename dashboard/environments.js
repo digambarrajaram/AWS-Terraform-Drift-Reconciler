@@ -10,18 +10,20 @@ function renderEnvironmentsTable(rows) {
   tbody.innerHTML = "";
 
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No environments registered.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No environments registered.</td></tr>';
     return;
   }
 
   var html = "";
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
+    var auth = r.auth_type || "profile";
     html += '<tr class="sev-low">' +
       '<td>' + (r.name || "") + '</td>' +
       '<td><code>' + (r.slug || "") + '</code></td>' +
       '<td>' + (r.region || "—") + '</td>' +
       '<td>' + (r.aws_account_id || "—") + '</td>' +
+      '<td><span class="badge-status-open" style="font-size:11px">' + auth + '</span></td>' +
       '<td><span class="' + (r.is_active ? 'badge-status-open' : 'badge-status-fail') + '">' + (r.is_active ? 'active' : 'inactive') + '</span></td>' +
       '<td>' +
         '<button class="btn-expire env-edit" data-id="' + r.id + '">Edit</button> ' +
@@ -102,13 +104,13 @@ function _showEditForm(id, rows) {
 
 async function refreshAll() {
   var tbody = document.getElementById("env-body");
-  if (tbody) tbody.innerHTML = '<tr><td colspan="7"><div class="skeleton" style="height:20px"></div></td></tr>';
+  if (tbody) tbody.innerHTML = '<tr><td colspan="8"><div class="skeleton" style="height:20px"></div></td></tr>';
 
   try {
     var data = await fetchEnvironments();
     renderEnvironmentsTable(data);
   } catch (err) {
-    if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="error">' + err.message + '</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="error">' + err.message + '</td></tr>';
   }
 }
 

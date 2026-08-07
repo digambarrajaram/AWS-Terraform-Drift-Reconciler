@@ -51,15 +51,50 @@ _llm = None
 
 
 def _get_llm():
-    """Lazily construct the Bedrock LLM client so --region from CLI takes
-    effect before the first call."""
+    """Lazily construct the LLM client so --region from CLI and env vars
+    take effect before the first call.
+
+    Resolution order:
+    1. Groq   — if ``GROQ_API_KEY`` is set, use it (free tier, no AWS).
+    2. Gemini — if ``GEMINI_API_KEY`` is set, use it (no AWS dependency).
+    3. Bedrock — falls back to the Bedrock-specific credentials
+       (``AWS_BEDROCK_*``), or the default boto3 credential chain and
+       ``AWS_REGION`` when those are unset."""
     global _llm
-    if _llm is None:
-        _llm = ChatBedrockConverse(
-            model="us.amazon.nova-pro-v1:0",
+    if _llm is not None:
+        return _llm
+
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        from langchain_groq import ChatGroq
+        _llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
-            region_name=_region,
+            api_key=groq_key,
         )
+        return _llm
+
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        _llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            temperature=0.1,
+            google_api_key=gemini_key,
+        )
+        return _llm
+
+    kwargs: dict = dict(
+        model="us.amazon.nova-pro-v1:0",
+        temperature=0.1,
+        region_name=os.environ.get("AWS_BEDROCK_REGION", _region),
+    )
+    access_key = os.environ.get("AWS_BEDROCK_ACCESS_KEY_ID", "").strip()
+    secret_key = os.environ.get("AWS_BEDROCK_SECRET_ACCESS_KEY", "").strip()
+    if access_key and secret_key:
+        kwargs["aws_access_key_id"] = access_key
+        kwargs["aws_secret_access_key"] = secret_key
+    _llm = ChatBedrockConverse(**kwargs)
     return _llm
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1430,7 +1465,7 @@ if __name__ == "__main__":
                         f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                         f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
                         f.write(agent_output)
-                    print(f"\n[Success] Report successfully written to: {report_path}")
+                    print(f"\n[Success] Report written: {report_filename}")
                     summary["report_path"] = report_path
                 except Exception as e:
                     print(f"\n[Warning] Failed to write report file: {str(e)}")

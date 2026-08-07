@@ -218,6 +218,48 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str) -> sub
                 pass
 
     threading.Thread(target=_stream, daemon=True, name=f"log-{run_id[:8]}").start()
+
+    def _watch_exit() -> None:
+        proc.wait()
+        if proc.returncode == 0:
+            return
+        url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url_base or not key:
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+        with _LOG_LOCK:
+            buf = _LOG_BUFFERS.get(run_id)
+            tail = list(buf)[-15:] if buf else []
+        error_summary = "\n".join(tail)[:2000]
+
+        for table, result_col in (("scan_runs", "result_summary"), ("rollback_runs", "result")):
+            try:
+                resp = requests.get(
+                    f"{url_base}/rest/v1/{table}?select=status&id=eq.{run_id}",
+                    headers=headers, timeout=5,
+                )
+                if resp.status_code != 200 or not resp.json():
+                    continue
+                row = resp.json()[0]
+                if row["status"] in ("complete", "failed"):
+                    return  # agent.py already wrote a terminal status — no race, do nothing
+                requests.patch(
+                    f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
+                    headers=headers,
+                    json={
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        result_col: {"error": f"Process exited with code {proc.returncode}", "log_tail": error_summary},
+                    },
+                    timeout=5,
+                )
+                return
+            except requests.RequestException:
+                continue
+
+    threading.Thread(target=_watch_exit, daemon=True, name=f"watch-{run_id[:8]}").start()
     return proc
 
 

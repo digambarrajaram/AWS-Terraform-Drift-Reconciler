@@ -1,4 +1,5 @@
 let _client = null;
+let _currentScope = "";
 
 function _supabase() {
   if (_client) return _client;
@@ -235,6 +236,7 @@ function _unsubscribeRealtime() {
 }
 
 function _setScope(scope) {
+  _currentScope = scope;
   const url = new URL(window.location);
   url.searchParams.set("scope", scope);
   window.history.replaceState(null, "", url);
@@ -256,10 +258,16 @@ function _readScopeFromURL() {
 document.addEventListener("DOMContentLoaded", () => {
   var urlScope = _readScopeFromURL();
   window.EnvSelector.renderEnvTabs(".scope-tabs", _setScope, urlScope).then(function () {
-    var scope = urlScope || window.EnvSelector.getDefaultEnvironment(/* from cache */);
-    if (scope) _setScope(scope);
+    if (urlScope) {
+      _setScope(urlScope);
+    } else {
+      // No URL scope — pick up whichever tab renderEnvTabs marked active
+      // (first environment by default).
+      var activeTab = document.querySelector(".scope-tab.active");
+      if (activeTab) _setScope(activeTab.dataset.scope);
+    }
   });
 
   // Fallback poll — keeps cards fresh if realtime disconnects.
-  _pollTimer = setInterval(() => refreshAll(scope), 60_000);
+  _pollTimer = setInterval(() => { if (_currentScope) refreshAll(_currentScope); }, 60_000);
 });

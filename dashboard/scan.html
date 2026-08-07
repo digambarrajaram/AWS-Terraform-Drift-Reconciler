@@ -135,6 +135,9 @@ function updateTracker(row) {
 
   // Post-process: mark no-op stages (hollow dot) when they ran but
   // produced nothing.
+  var prLinks = row.pr_links || [];
+  if (typeof prLinks === "string") { try { prLinks = JSON.parse(prLinks); } catch(e) { prLinks = []; } }
+
   if (status === "complete") {
     var drCount = (summary.drift && summary.drift.count) || 0;
     var umCount = (summary.unmanaged && summary.unmanaged.count) || 0;
@@ -162,9 +165,6 @@ function updateTracker(row) {
 
   const resultEl = document.getElementById("scan-result");
   const bodyEl = document.getElementById("scan-result-body");
-
-  var prLinks = row.pr_links || [];
-  if (typeof prLinks === "string") { try { prLinks = JSON.parse(prLinks); } catch(e) { prLinks = []; } }
 
   if (status === "complete") {
     resultEl.hidden = false;

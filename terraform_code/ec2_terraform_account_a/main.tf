@@ -19,6 +19,7 @@ data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {}
 
+# trivy:ignore:AWS-0178 -- A human must decide the correct configuration for VPC Flow Logs, including the log destination and traffic type.
 resource "aws_vpc" "drift_vpc" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
@@ -29,6 +30,7 @@ resource "aws_vpc" "drift_vpc" {
   }
 }
 
+# trivy:ignore:AWS-0164 -- A human must decide whether instances in this subnet should receive a public IP address by default
 resource "aws_subnet" "drift_subnet" {
   vpc_id                  = aws_vpc.drift_vpc.id
   cidr_block              = "10.0.1.0/24"

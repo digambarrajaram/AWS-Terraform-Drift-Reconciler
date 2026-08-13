@@ -173,7 +173,7 @@ resource "aws_instance" "drift_web_server" {
   }
 
   tags = {
-    Name = "WebServer"
+    Name = "thisisnewnametoservertocheckdrift"
   }
 }
 

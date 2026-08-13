@@ -10,6 +10,7 @@ Usage (standalone test):
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,24 +31,54 @@ _HEADERS = {
 
 
 def _post(row: dict[str, Any]) -> bool:
-    """Insert one row.  Returns True on success."""
+    """Insert one row.  Returns True on success.
+
+    Retries up to 3 attempts on transient failures (network errors and
+    5xx responses).  4xx responses fail immediately — retrying won't fix
+    a malformed payload or bad credentials."""
     if not _URL or not _KEY:
         print("  [history] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
-    try:
-        resp = requests.post(
-            f"{_URL}/rest/v1/{_TABLE}",
-            headers=_HEADERS,
-            json=row,
-            timeout=10,
-        )
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            resp = requests.post(
+                f"{_URL}/rest/v1/{_TABLE}",
+                headers=_HEADERS,
+                json=row,
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            # Network error — retry unless attempts exhausted.
+            if attempts >= 3:
+                print(f"  ⚠⚠⚠ CRITICAL: drift_events write FAILED after {attempts} attempts for "
+                      f"resource_id={row.get('resource_id', '?')} — dedup guard will NOT catch this "
+                      f"resource on future scans, risking duplicate PRs. Manual DB check recommended.")
+                print(f"  [history] POST request failed: {exc}")
+                return False
+            print(f"  [history] POST request failed (attempt {attempts}/3): {exc}")
+            time.sleep(attempts)  # 1s, then 2s
+            continue
+
         if resp.status_code in (200, 201):
             return True
-        print(f"  [history] POST failed ({resp.status_code}): {resp.text[:200]}")
-        return False
-    except requests.RequestException as exc:
-        print(f"  [history] POST request failed: {exc}")
-        return False
+
+        # 4xx — no point retrying a malformed payload or bad credentials.
+        if 400 <= resp.status_code < 500:
+            print(f"  [history] POST failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+
+        # 5xx — transient server error, retry unless attempts exhausted.
+        if attempts >= 3:
+            print(f"  ⚠⚠⚠ CRITICAL: drift_events write FAILED after {attempts} attempts for "
+                  f"resource_id={row.get('resource_id', '?')} — dedup guard will NOT catch this "
+                  f"resource on future scans, risking duplicate PRs. Manual DB check recommended.")
+            print(f"  [history] POST failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+        print(f"  [history] POST failed ({resp.status_code}, attempt {attempts}/3): {resp.text[:200]}")
+        time.sleep(attempts)  # 1s, then 2s
+        continue
 
 
 def _patch(params: dict[str, Any], data: dict[str, Any]) -> bool:
@@ -169,11 +200,17 @@ def load_baselines(pr_number: int, account: str) -> list[dict[str, Any]]:
         return []
 
 
-def get_open_event(resource_id: str, account: str) -> dict | None:
+def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -> dict | None:
     """Return the open drift_events row for *resource_id* in *account*, or None.
 
     Used by the PR node to skip creating a new PR when an unresolved one
     already exists for the same resource identity + scope.
+
+    When *pr_type* is provided the query scopes to that type so a
+    security-only finding doesn't collide with an open drift-fix PR
+    for the same resource, and vice versa.  When *pr_type* is None
+    (the default) the query matches any type — preserving existing
+    callers that don't pass it.
 
     Cross-checks the local ``status=open`` against the GitHub API so a PR
     that was manually closed on GitHub (without merging) isn't treated as
@@ -181,13 +218,18 @@ def get_open_event(resource_id: str, account: str) -> dict | None:
     pipeline updates it when a PR is closed externally."""
     if not _URL or not _KEY:
         return None
+    filters = (
+        f"&resource_id=eq.{resource_id}"
+        f"&account=eq.{account}"
+        f"&status=eq.open"
+    )
+    if pr_type is not None:
+        filters += f"&pr_type=eq.{pr_type}"
     try:
         resp = requests.get(
             f"{_URL}/rest/v1/{_TABLE}"
             f"?select=id,pr_number,pr_type,status"
-            f"&resource_id=eq.{resource_id}"
-            f"&account=eq.{account}"
-            f"&status=eq.open"
+            f"{filters}"
             f"&limit=1",
             headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
             timeout=10,

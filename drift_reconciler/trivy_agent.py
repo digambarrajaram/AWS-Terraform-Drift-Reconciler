@@ -18,7 +18,6 @@ import subprocess
 import sys
 from typing import Annotated, Literal
 
-from langchain_aws import ChatBedrockConverse
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
@@ -40,6 +39,7 @@ class State(TypedDict):
     scan_results: list[dict]
     issues: list[dict]
     fixes_applied: Annotated[list[FixEntry], lambda a, b: a + b]
+    needs_review: list[dict]   # plain overwrite — fix_issues rebuilds the list each call
     iteration: int
     max_iterations: int
     passed: bool
@@ -67,7 +67,7 @@ _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
 
 _IGNORE_COMMENT_RE = re.compile(r'^\s*#\s*trivy:ignore:([A-Za-z0-9\-]+)\s*(?:--\s*(.*))?$', re.MULTILINE)
 
-_llm = None
+from drift_reconciler.llm_client import _get_llm
 
 # Cache for provider schema loaded via `terraform providers schema -json`,
 # keyed by tf_dir.  Shared across fix attempts within the same run.
@@ -157,18 +157,6 @@ def _find_invalid_attributes(block_text: str, valid_attrs: set[str]) -> list[str
                 invalid.append(attr)
     return invalid
 
-
-def _get_llm():
-    """Lazily construct the Bedrock LLM client (same model as the main
-    drift-reconciler pipeline), so it's only initialized if actually needed."""
-    global _llm
-    if _llm is None:
-        _llm = ChatBedrockConverse(
-            model="us.amazon.nova-pro-v1:0",
-            temperature=0.1,
-            region_name=os.environ.get("AWS_REGION", "us-east-1"),
-        )
-    return _llm
 
 
 def _extract_hcl_block(text: str) -> str | None:
@@ -470,14 +458,13 @@ def _llm_fix_block(block_text: str, issue: dict) -> str | None:
         "value for these will typically still fail the same scanner rule, "
         "since it cannot be verified as actually correct or actually secure.\n\n"
         "If — and only if — the finding falls into this category, do NOT "
-        "guess a value. Instead return the block completely UNCHANGED, but "
-        "add exactly one comment line directly above the resource block, in "
-        f"this exact format:\n"
-        f"  # trivy:ignore:{issue['rule_id']} -- <one short sentence: what a human must decide>\n"
-        "Do not add this comment for findings you CAN resolve unambiguously "
-        "(e.g. enabling encryption, versioning, logging, a boolean flag, or "
-        "any fix that doesn't depend on account-specific values) — for those, "
-        "make the real fix as normal.\n\n"
+        "guess a value. Instead return the block completely UNCHANGED, with "
+        "no comment added — the caller treats an unchanged block as \"no fix "
+        "possible\" and handles it accordingly.\n"
+        "Do not return an unchanged block for findings you CAN resolve "
+        "unambiguously (e.g. enabling encryption, versioning, logging, a "
+        "boolean flag, or any fix that doesn't depend on account-specific "
+        "values) — for those, make the real fix as normal.\n\n"
         "Return ONLY the corrected (or annotated) block inside a single "
         "```hcl code block, with no other commentary."
     )
@@ -612,6 +599,14 @@ def _apply_fix(file_path: str, issue: dict) -> tuple[str, int] | None:
         print(f"  ⚠ LLM output for {issue['rule_id']} doesn't match expected resource, rejecting")
         return None
 
+    # The LLM must never "fix" a finding by inserting a trivy:ignore
+    # suppression comment — that hides the problem instead of fixing it.
+    # Reject even if the rest of the block changed, since the prompt
+    # change alone doesn't guarantee the model never adds one anyway.
+    if re.search(r'#\s*trivy:ignore', new_block):
+        print(f"  ⚠ LLM output for {issue['rule_id']} contains a suppression comment, rejecting")
+        return None
+
     new_block_lines = new_block.splitlines()
     delta = len(new_block_lines) - (end - start + 1)
     new_lines = lines[: start - 1] + new_block_lines + lines[end:]
@@ -735,7 +730,7 @@ def fix_issues(state: State) -> dict:
     fixes: list[FixEntry] = []
 
     if not issues:
-        return {"iteration": iteration + 1, "fixes_applied": []}
+        return {"iteration": iteration + 1, "fixes_applied": [], "needs_review": []}
 
     ordered_issues = sorted(
         issues, key=lambda i: _SEVERITY_RANK.get((i.get("severity") or "UNKNOWN").upper(), 4)
@@ -743,10 +738,10 @@ def fix_issues(state: State) -> dict:
 
     # Partition into three buckets:
     #   pre_existing  — was in the baseline; don't auto-fix (not our bug)
-    #   needs_review  — requires a human decision (CIDR, KMS ARN, etc.)
+    #   needs_review_precategorized — requires a human decision (CIDR, KMS ARN, etc.)
     #   auto_fixable  — safe for the LLM to attempt
     auto_fixable: list[dict] = []
-    needs_review: list[dict] = []
+    needs_review_precategorized: list[dict] = []
     pre_existing: list[dict] = []
     for issue in ordered_issues:
         if issue.get("origin") == "pre-existing":
@@ -754,7 +749,7 @@ def fix_issues(state: State) -> dict:
             continue
         resolution = issue.get("resolution", "")
         if resolution and _requires_human_context(resolution, issue["rule_id"]):
-            needs_review.append(issue)
+            needs_review_precategorized.append(issue)
         else:
             auto_fixable.append(issue)
 
@@ -767,15 +762,29 @@ def fix_issues(state: State) -> dict:
             print(f"      → {issue.get('description', issue.get('title', ''))[:140]}")
             print()
 
-    if needs_review:
-        print(f"  ⚠ {len(needs_review)} finding(s) need a human decision "
+    if needs_review_precategorized:
+        print(f"  ⚠ {len(needs_review_precategorized)} finding(s) need a human decision "
               f"(CIDR, KMS ARN, IAM role, etc.) — will not attempt auto-fix:\n")
-        for issue in needs_review:
+        for issue in needs_review_precategorized:
             resource = issue.get('resource') or os.path.basename(issue.get('target', '') or '?')
             print(f"      {issue['rule_id']}  on  {resource}")
             print(f"      → {issue['resolution'][:140]}")
             print(f"      Suppress: # trivy:ignore:{issue['rule_id']} -- {issue['resolution'][:80]}")
+            print(f"      To suppress: Resource Address = {issue.get('resource', 'unknown')}  |  Trivy Rule ID = {issue['rule_id']}")
             print()
+
+    # Unresolved-issue accumulator — surfaced to the caller instead of
+    # being silently dropped.  Pre-categorized human-judgment findings
+    # land here too, so the caller sees every finding that wasn't fixed.
+    needs_review: list[dict] = [
+        {
+            "rule_id": issue["rule_id"],
+            "resource": issue.get("resource"),
+            "resolution": issue.get("resolution", ""),
+            "reason": "requires human judgment",
+        }
+        for issue in needs_review_precategorized
+    ]
 
     file_line_offsets: dict[str, int] = {}
 
@@ -807,13 +816,21 @@ def fix_issues(state: State) -> dict:
             print(f"  ✓ {rule_id}: {desc}  ({os.path.basename(file_path)}, {issue.get('resource')})")
         else:
             print(f"  ⏭  {rule_id}: no applicable fix  ({resolution[:80]})")
+            resource_addr = issue.get("resource", "unknown")
+            print(f"      To suppress: Resource Address = {resource_addr}  |  Trivy Rule ID = {rule_id}")
+            needs_review.append({
+                "rule_id": rule_id,
+                "resource": issue.get("resource"),
+                "resolution": resolution,
+                "reason": "no applicable automated fix",
+            })
 
     # When every remaining issue requires a human decision or is
     # pre-existing (not our bug), there is nothing the agent can do —
     # force the loop to exit by saturating the iteration counter, so
     # should_continue routes to END immediately.
     next_iteration = max_iter if (not auto_fixable and not fixes) else iteration + 1
-    return {"iteration": next_iteration, "fixes_applied": fixes}
+    return {"iteration": next_iteration, "fixes_applied": fixes, "needs_review": needs_review}
 
 
 
@@ -902,6 +919,7 @@ def main():
         "scan_results": [],
         "issues": [],
         "fixes_applied": [],
+        "needs_review": [],
         "iteration": 0,
         "max_iterations": args.max_iterations,
         "passed": False,

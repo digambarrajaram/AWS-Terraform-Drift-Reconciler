@@ -4,7 +4,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 import { toast } from 'sonner';
 import {
   Play, RotateCcw, CheckCircle, XCircle, Clock,
-  ExternalLink, ChevronRight, Loader2, FileText, Ban,
+  ExternalLink, ChevronRight, Loader2, FileText, Ban, Shield,
 } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
@@ -26,6 +26,23 @@ const STAGES = [
   { key: 'drift_pr',        label: 'Drift PR'         },
 ] as const;
 
+const TRIVY_ONLY_STAGES = [
+  { key: 'trivy_only_scan', label: 'Security Scan' },
+  { key: 'trivy_only_pr',   label: 'Security PR'    },
+] as const;
+
+const UNMANAGED_ONLY_STAGES = [
+  { key: 'unmanaged_scan', label: 'Unmanaged Scan' },
+  { key: 'drift_pr',       label: 'Unmanaged PR'   },
+] as const;
+
+const DRIFT_ONLY_STAGES = [
+  { key: 'reconcile_agent', label: 'Reconcile'   },
+  { key: 'trivy_gate',      label: 'Trivy Gate'  },
+  { key: 'alert_agent',     label: 'Alert Agent' },
+  { key: 'drift_pr',        label: 'Drift PR'    },
+] as const;
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function relTime(iso: string) {
@@ -38,22 +55,34 @@ function fmtDate(iso: string) {
   catch { return '—'; }
 }
 
+function stageLabel(run: ScanRun): string {
+  if (!run.current_stage) return '—';
+  const type = run.scan_type ?? run.result_summary?.mode;
+  const set = type === 'trivy_only' ? TRIVY_ONLY_STAGES
+    : type === 'unmanaged_only' ? UNMANAGED_ONLY_STAGES
+    : type === 'drift_only' ? DRIFT_ONLY_STAGES
+    : STAGES;
+  const match = set.find(s => s.key === run.current_stage);
+  return match?.label ?? run.current_stage;
+}
+
 // ── StageIndicator ─────────────────────────────────────────────────────────
 
-function StageIndicator({ currentStage, status }: {
+function StageIndicator({ currentStage, status, stages = STAGES }: {
   currentStage: string | null;
   status: string;
+  stages?: typeof STAGES | typeof TRIVY_ONLY_STAGES | typeof UNMANAGED_ONLY_STAGES | typeof DRIFT_ONLY_STAGES;
 }) {
   // When the run is complete, treat ALL stages as done regardless of
   // which stage was reported last (parallel nodes race on the final
   // current_stage write — whichever finishes last wins).
   const currentIdx = status === 'complete'
-    ? STAGES.length
-    : STAGES.findIndex((s) => s.key === currentStage);
+    ? stages.length
+    : stages.findIndex((s) => s.key === currentStage);
 
   return (
     <div className="flex items-center gap-1 overflow-x-auto pb-1">
-      {STAGES.map((stage, i) => {
+      {stages.map((stage, i) => {
         const isPast    = currentIdx >= 0 && i < currentIdx;
         const isCurrent = stage.key === currentStage;
         const isFailed  = isCurrent && status === 'failed';
@@ -82,7 +111,7 @@ function StageIndicator({ currentStage, status }: {
                 {stage.label}
               </span>
             </div>
-            {i < STAGES.length - 1 && (
+            {i < stages.length - 1 && (
               <div className={[
                 'mb-4 h-px w-6 shrink-0',
                 isPast ? 'bg-emerald-500' : 'bg-border',
@@ -250,10 +279,10 @@ function ScanHistory({ runs, activeRunId, onSelect, loading }: {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-muted-foreground text-xs">
-                      {run.current_stage ?? '—'}
+                      {stageLabel(run)}
                     </td>
                     <td className="px-4 py-2.5 text-muted-foreground text-xs">
-                      {run.result_summary?.mode ?? '—'}
+                      {run.scan_type ?? run.result_summary?.mode ?? '—'}
                     </td>
                     <td className="px-4 py-2.5 text-xs">
                       {run.result_summary?.drift?.found
@@ -286,8 +315,10 @@ export default function Scan() {
   const invalidate  = useInvalidateScanRuns();
 
   const [activeRunId,   setActiveRunId]   = useState<string | null>(null);
-  const [unmanagedFlag, setUnmanagedFlag] = useState(false);
-  const [submitting,    setSubmitting]    = useState(false);
+  const [scanMode,  setScanMode]  = useState('drift_only');
+  const [submittingScan,     setSubmittingScan]     = useState(false);
+  const [submittingSecurity, setSubmittingSecurity] = useState(false);
+  const submitting = submittingScan || submittingSecurity;
 
   const history    = useScanRunHistory(scope);
   const activeRun  = useScanRun(activeRunId);
@@ -313,11 +344,11 @@ export default function Scan() {
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!scope) return;
-    setSubmitting(true);
+    setSubmittingScan(true);
     try {
       const res = await apiFetch<{ run_id: string }>('/scan', {
         method: 'POST',
-        body: JSON.stringify({ scope, unmanaged_flag: unmanagedFlag }),
+        body: JSON.stringify({ scope, scan_mode: scanMode }),
       });
       setActiveRunId(res.run_id);
     } catch (err) {
@@ -333,9 +364,35 @@ export default function Scan() {
         });
       }
     } finally {
-      setSubmitting(false);
+      setSubmittingScan(false);
     }
-  }, [scope, unmanagedFlag]);
+  }, [scope, scanMode]);
+
+  const handleTrivyOnlyScan = useCallback(async () => {
+    if (!scope) return;
+    setSubmittingSecurity(true);
+    try {
+      const res = await apiFetch<{ run_id: string }>('/scan/trivy-only', {
+        method: 'POST',
+        body: JSON.stringify({ scope }),
+      });
+      setActiveRunId(res.run_id);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.runId) {
+        toast.warning('Scan already running', {
+          description: `Run ID: ${err.runId}`,
+          action: { label: 'View', onClick: () => setActiveRunId(err.runId!) },
+        });
+        setActiveRunId(err.runId);
+      } else {
+        toast.error('Failed to start security scan', {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      setSubmittingSecurity(false);
+    }
+  }, [scope]);
 
   const run         = activeRun.data;
   const isRunning   = run?.status === 'running';
@@ -364,41 +421,40 @@ export default function Scan() {
         <div className="rounded-xl border border-border bg-card p-5 space-y-4">
           <h2 className="text-sm font-semibold text-card-foreground">Start a Scan</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="flex items-center gap-3 select-none">
-              <input
-                type="checkbox"
-                className="sr-only"
-                checked={unmanagedFlag}
-                onChange={(e) => setUnmanagedFlag(e.target.checked)}
-                id="unmanaged-toggle"
-              />
-              <label
-                htmlFor="unmanaged-toggle"
-                className={[
-                  'relative h-5 w-9 rounded-full transition-colors shrink-0 cursor-pointer',
-                  unmanagedFlag ? 'bg-primary' : 'bg-muted border border-input',
-                ].join(' ')}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[11px] font-medium text-muted-foreground">Scan Mode</label>
+              <select
+                value={scanMode}
+                onChange={(e) => setScanMode(e.target.value)}
+                className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring w-full max-w-xs"
               >
-                <div className={[
-                  'absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform',
-                  unmanagedFlag ? 'translate-x-4' : 'translate-x-0',
-                ].join(' ')} />
-              </label>
-              <div>
-                <p className="text-sm font-medium text-foreground">Include unmanaged resources</p>
-                <p className="text-xs text-muted-foreground">Scan for resources not tracked in IaC</p>
-              </div>
+                <option value="drift_only">Drift only</option>
+                <option value="drift_and_unmanaged">Drift + Unmanaged</option>
+                <option value="unmanaged_only">Unmanaged only</option>
+              </select>
             </div>
 
-            <button
-              type="submit"
-              disabled={submitting || !scope}
-              className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {submitting
-                ? <><Loader2 size={14} className="animate-spin" /> Starting…</>
-                : <><Play size={14} /> Run Scan</>}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="submit"
+                disabled={submitting || !scope}
+                className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {submittingScan
+                  ? <><Loader2 size={14} className="animate-spin" /> Starting…</>
+                  : <><Play size={14} /> Run Scan</>}
+              </button>
+              <button
+                type="button"
+                disabled={submitting || !scope}
+                onClick={handleTrivyOnlyScan}
+                className="flex items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+              >
+                {submittingSecurity
+                  ? <><Loader2 size={14} className="animate-spin" /> Starting…</>
+                  : <><Shield size={14} /> Security Scan</>}
+              </button>
+            </div>
           </form>
         </div>
       ) : (
@@ -438,7 +494,20 @@ export default function Scan() {
 
           {/* Stage indicator */}
           {run && (
-            <StageIndicator currentStage={run.current_stage} status={run.status} />
+            <StageIndicator
+              currentStage={run.current_stage}
+              status={run.status}
+              stages={(() => {
+                const type = run.scan_type ?? run.result_summary?.mode;
+                switch (type) {
+                  case 'trivy_only':         return TRIVY_ONLY_STAGES;
+                  case 'unmanaged_only':     return UNMANAGED_ONLY_STAGES;
+                  case 'drift_only':         return DRIFT_ONLY_STAGES;
+                  case 'drift_and_unmanaged': return STAGES;
+                  default:                    return STAGES;
+                }
+              })()}
+            />
           )}
 
           {/* Log viewer */}

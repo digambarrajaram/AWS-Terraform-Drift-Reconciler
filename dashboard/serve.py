@@ -145,7 +145,27 @@ def _validate_exception_entry_local(exception_type: str, entry: dict) -> tuple[b
                 return False, f"expires ({expires}) is not a valid ISO date (YYYY-MM-DD)."
         return True, None
 
-    if exception_type == "unmanaged":
+    elif exception_type == "security":
+        addr = (entry.get("resource_address") or "").strip()
+        if not addr:
+            return False, "resource_address is required and must be a non-empty string."
+        rule_id = (entry.get("rule_id") or "").strip()
+        if not rule_id:
+            return False, "rule_id is required and must be a non-empty string."
+        reason = (entry.get("reason") or "").strip()
+        if not reason:
+            return False, "reason is required and must be a non-empty string."
+        expires = (entry.get("expires") or "").strip()
+        if expires:
+            try:
+                exp_date = datetime.strptime(expires, "%Y-%m-%d").date()
+                if exp_date <= datetime.now().date():
+                    return False, f"expires ({expires}) is in the past."
+            except ValueError:
+                return False, f"expires ({expires}) is not a valid ISO date (YYYY-MM-DD)."
+        return True, None
+
+    elif exception_type == "unmanaged":
         rt = (entry.get("resource_type") or "").strip()
         if not rt:
             return False, "resource_type is required and must be a non-empty string."
@@ -492,6 +512,67 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._cancel_run(path, "scan_runs")
         elif path.startswith("/api/rollback/") and path.endswith("/cancel"):
             self._cancel_run(path, "rollback_runs")
+        elif path == "/api/scan/trivy-only":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._json_error(400, "Invalid or empty JSON body")
+                return
+
+            scope = body.get("scope", "")
+            if scope not in _get_valid_scopes():
+                self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
+                return
+
+            # Check for an existing running scan in this scope.
+            try:
+                resp = _supabase_get(
+                    "scan_runs",
+                    {"select": "id", "scope": f"eq.{scope}", "status": "eq.running", "limit": "1"}
+                )
+                if resp.status_code == 200 and resp.json():
+                    existing_id = resp.json()[0]["id"]
+                    self._json_error(409, f"Scan already running for {scope}", run_id=existing_id)
+                    return
+            except requests.RequestException as exc:
+                self._json_error(502, f"Supabase unreachable: {exc}")
+                return
+
+            try:
+                run_id = create_scan_run(scope, unmanaged_flag=False, scan_type="trivy_only")
+            except Exception as se:
+                self._json_error(502, f"Failed to create scan run: {se}")
+                return
+
+            with _RUNNING_LOCK:
+                for rid, (p, _e, _sc) in list(_RUNNING.items()):
+                    if p.poll() is None and _sc == scope:
+                        self._json_error(409, f"Scan already running for {scope} (run: {rid})")
+                        return
+
+            tf_dir = _tf_dir_for(scope)
+
+            cmd = [
+                _sys.executable,
+                str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
+                "--tf-dir", tf_dir,
+                "--account-label", scope,
+                "--run-id", run_id,
+                "--trivy-only",
+            ]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            _configure_aws_env(env, scope)
+            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+
+            resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
         elif path == "/api/scan":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length > 0 else b""
@@ -521,9 +602,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # Insert the scan_run row.
-            unmanaged = body.get("unmanaged_flag", False)
+            scan_mode = body.get("scan_mode", "drift_only")
+            if scan_mode not in ("drift_only", "drift_and_unmanaged", "unmanaged_only"):
+                self._json_error(400, "scan_mode must be drift_only, drift_and_unmanaged, or unmanaged_only.")
+                return
+            unmanaged_flag_for_db = scan_mode in ("drift_and_unmanaged", "unmanaged_only")
             try:
-                run_id = create_scan_run(scope, unmanaged)
+                run_id = create_scan_run(scope, unmanaged_flag_for_db, scan_type=scan_mode)
             except Exception as se:
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
@@ -546,9 +631,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 "--tf-dir", tf_dir,
                 "--account-label", scope,
                 "--run-id", run_id,
+                "--scan-mode", scan_mode,
             ]
-            if unmanaged:
-                cmd.append("--scan-unmanaged")
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
@@ -1255,6 +1339,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         payload = {
             "drift_exceptions": _fetch("drift"),
             "unmanaged_exceptions": _fetch("unmanaged"),
+            "security_exceptions": _fetch("security"),
         }
         data = json.dumps(payload).encode("utf-8")
         self.send_response(200)
@@ -1278,8 +1363,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         exception_type = body.get("exception_type", "")
-        if exception_type not in ("drift", "unmanaged"):
-            self._json_error(400, "exception_type must be 'drift' or 'unmanaged'.")
+        if exception_type not in ("drift", "unmanaged", "security"):
+            self._json_error(400, "exception_type must be 'drift', 'unmanaged', or 'security'.")
             return
 
         action = body.get("action", "")
@@ -1307,6 +1392,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             if exception_type == "drift":
                 row["resource_address"] = (entry.get("resource_address") or "").strip()
                 row["drift_type"] = (entry.get("drift_type") or "*").strip()
+                row["auto"] = bool(entry.get("auto"))
+                expires = (entry.get("expires") or "").strip()
+                if expires:
+                    row["expires"] = expires
+            elif exception_type == "security":
+                row["resource_address"] = (entry.get("resource_address") or "").strip()
+                row["rule_id"] = (entry.get("rule_id") or "").strip()
                 row["auto"] = bool(entry.get("auto"))
                 expires = (entry.get("expires") or "").strip()
                 if expires:
@@ -1353,6 +1445,14 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, "resource_address is required.")
                 return
             filter_parts.append(f"resource_address=eq.{addr}")
+        elif exception_type == "security":
+            addr = (entry.get("resource_address") or "").strip()
+            rule_id = (entry.get("rule_id") or "").strip()
+            if not addr or not rule_id:
+                self._json_error(400, "resource_address and rule_id are required.")
+                return
+            filter_parts.append(f"resource_address=eq.{addr}")
+            filter_parts.append(f"rule_id=eq.{rule_id}")
         else:
             rt = (entry.get("resource_type") or "").strip()
             pat = (entry.get("resource_id_pattern") or "").strip()

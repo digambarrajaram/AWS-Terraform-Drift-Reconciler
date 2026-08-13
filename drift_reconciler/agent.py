@@ -21,7 +21,6 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() in ('cp1252', 'cp1250', '
 logging.getLogger("botocore").setLevel(logging.ERROR)
 from typing import Annotated
 from typing_extensions import TypedDict
-from langchain_aws import ChatBedrockConverse
 from langgraph.graph import StateGraph, START, END
 import pagerduty_alert as pga
 import slack_notify as slack
@@ -31,7 +30,7 @@ import github_integration as gi
 import json
 from langchain_core.messages import AIMessage
 from trivy_agent import graph as trivy_graph, State as TrivyState
-from trivy_agent import _run_trivy, _extract_issues
+from trivy_agent import _run_trivy, _extract_issues, fix_issues
 from scan_runs import report_stage
 import unmanaged_scanner
 
@@ -47,55 +46,7 @@ _drift_script_path = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "formatting_drift_json.py"
 )
 
-_llm = None
-
-
-def _get_llm():
-    """Lazily construct the LLM client so --region from CLI and env vars
-    take effect before the first call.
-
-    Resolution order:
-    1. Groq   — if ``GROQ_API_KEY`` is set, use it (free tier, no AWS).
-    2. Gemini — if ``GEMINI_API_KEY`` is set, use it (no AWS dependency).
-    3. Bedrock — falls back to the Bedrock-specific credentials
-       (``AWS_BEDROCK_*``), or the default boto3 credential chain and
-       ``AWS_REGION`` when those are unset."""
-    global _llm
-    if _llm is not None:
-        return _llm
-
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if groq_key:
-        from langchain_groq import ChatGroq
-        _llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0.1,
-            api_key=groq_key,
-        )
-        return _llm
-
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if gemini_key:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        _llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
-            temperature=0.1,
-            google_api_key=gemini_key,
-        )
-        return _llm
-
-    kwargs: dict = dict(
-        model="us.amazon.nova-pro-v1:0",
-        temperature=0.1,
-        region_name=os.environ.get("AWS_BEDROCK_REGION", _region),
-    )
-    access_key = os.environ.get("AWS_BEDROCK_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("AWS_BEDROCK_SECRET_ACCESS_KEY", "").strip()
-    if access_key and secret_key:
-        kwargs["aws_access_key_id"] = access_key
-        kwargs["aws_secret_access_key"] = secret_key
-    _llm = ChatBedrockConverse(**kwargs)
-    return _llm
+from drift_reconciler.llm_client import _get_llm
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -289,6 +240,7 @@ class State(TypedDict):
     drift_findings: list[dict]   # one entry per drifted resource
     trivy_scanned: bool
     scan_unmanaged: bool
+    scan_mode: str
     run_id: str | None
     terraform_failed: bool
 
@@ -539,6 +491,7 @@ def trivy_gate(state: State):
             "scan_results": [],
             "issues": [],
             "fixes_applied": [],
+            "needs_review": [],
             "iteration": 0,
             "max_iterations": 3,
             "passed": False,
@@ -680,14 +633,14 @@ def drift_pr_from_finding(state: State):
         else:
             report_only.append(finding)
 
-    def _already_open(finding: dict) -> dict | None:
+    def _already_open(finding: dict, pr_type: str = "fix") -> dict | None:
         """Return the open drift_events row if one exists for this finding, else None."""
-        return drift_history.get_open_event(finding["resource_id"], _account_label)
+        return drift_history.get_open_event(finding["resource_id"], _account_label, pr_type)
 
     pr_urls = []
     for file_path, group in by_file.items():
         if len(group) == 1:
-            existing = _already_open(group[0])
+            existing = _already_open(group[0], "fix")
             if existing:
                 print(f"  ⏭  {group[0]['resource_id']}: open PR #{existing['pr_number']} "
                       f"already exists — skipping")
@@ -695,7 +648,7 @@ def drift_pr_from_finding(state: State):
             pr = gi.create_drift_pr_for_mode(group[0], "code_to_reality", account_label=_account_label)
         else:
             # Filter findings that already have an open PR before batching.
-            actionable = [f for f in group if not _already_open(f)]
+            actionable = [f for f in group if not _already_open(f, "batch")]
             skipped = len(group) - len(actionable)
             if skipped:
                 print(f"  ⏭  {file_path}: {skipped} finding(s) already have open PRs — skipped")
@@ -708,7 +661,7 @@ def drift_pr_from_finding(state: State):
             pr_urls.append({"url": pr.html_url, "type": "drift"})
 
     for finding in report_only:
-        existing = _already_open(finding)
+        existing = _already_open(finding, "unmanaged")
         if existing:
             print(f"  ⏭  {finding['resource_id']}: open PR #{existing['pr_number']} "
                   f"already exists — skipping")
@@ -779,6 +732,181 @@ def unmanaged_scan_node(state: State):
     return {"drift_findings": existing + findings, "drift_detected": True}
 
 
+def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str | None = None) -> dict:
+    """Standalone Trivy security scan — no drift detection, no reconcile agent.
+
+    Copies ``.tf`` files to a temp directory, scans for misconfigurations,
+    filters out suppressed issues via the exception registry, attempts
+    automatic fixes, and creates one PR per modified file with
+    ``pr_type="security_only"``.
+
+    Returns ``{"pr_urls": [...], "needs_review": [...]}`` — ``pr_urls`` is
+    a list of ``{"url": str, "type": "security_only"}`` dicts, and
+    ``needs_review`` lists findings that could not be auto-fixed so the
+    caller can surface them instead of silently dropping them.
+    """
+    from formatting_drift_json import check_security_suppression
+
+    report_stage(run_id, "trivy_only_scan")
+
+    tmpdir = tempfile.mkdtemp(prefix="trivy_only_")
+
+    try:
+        # ── Copy .tf files into the temp workspace ────────────────────
+        for item in os.listdir(tf_dir):
+            s = os.path.join(tf_dir, item)
+            d = os.path.join(tmpdir, item)
+            if os.path.isfile(s) and item.endswith(".tf"):
+                shutil.copy2(s, d)
+
+        # ── Scan ──────────────────────────────────────────────────────
+        raw = _run_trivy(tmpdir)
+        if "error" in raw:
+            print(f"  [trivy-only] Scan error: {raw['error']}")
+            return {"pr_urls": [], "needs_review": []}
+
+        issues = _extract_issues(raw, tmpdir)
+        if not issues:
+            print("  [trivy-only] No issues found.")
+            return {"pr_urls": [], "needs_review": []}
+
+        print(f"  [trivy-only] {len(issues)} issue(s) found")
+
+        # ── Filter suppressed ─────────────────────────────────────────
+        before = len(issues)
+        issues = [
+            i for i in issues
+            if not (
+                i.get("resource") and i.get("rule_id")
+                and check_security_suppression(i["resource"], i["rule_id"], scope)
+            )
+        ]
+        if before > len(issues):
+            print(f"  [trivy-only] {before - len(issues)} suppressed, {len(issues)} remaining")
+        else:
+            print(f"  [trivy-only] {len(issues)} issue(s) — none suppressed")
+
+        # ── Apply fixes (single pass — no re-scan loop) ──────────────
+        fix_state: TrivyState = {
+            "tf_dir": tmpdir,
+            "scan_results": [],
+            "issues": issues,
+            "fixes_applied": [],
+            "needs_review": [],
+            "iteration": 0,
+            "max_iterations": 3,
+            "passed": False,
+            "trivy_error": False,
+            "messages": [],
+            "baseline_issues": [],
+            "baseline_captured": False,
+        }
+        result = fix_issues(fix_state)
+        all_fixes = result.get("fixes_applied", [])
+        needs_review = result.get("needs_review", [])
+        if not all_fixes:
+            print("  [trivy-only] No fixes applied.")
+            return {"pr_urls": [], "needs_review": needs_review}
+
+        files_touched = len({f["file_path"] for f in all_fixes})
+        print(f"  [trivy-only] {len(all_fixes)} fix(es) applied across {files_touched} file(s)")
+
+        # ── Map Trivy severity → drift risk_level vocabulary ──────────
+        _sev_to_risk = {"CRITICAL": "HIGH", "HIGH": "HIGH", "MEDIUM": "MEDIUM"}
+        # LOW and UNKNOWN default to "LOW"
+
+        # ── Group fixes by file → one PR per file ─────────────────────
+        import difflib
+
+        by_file: dict[str, list[dict]] = {}
+        for fix in all_fixes:
+            by_file.setdefault(fix["file_path"], []).append(fix)
+
+        report_stage(run_id, "trivy_only_pr")
+
+        pr_urls: list[dict] = []
+        for tmp_file_path, fixes_in_file in by_file.items():
+            basename = os.path.basename(tmp_file_path)
+            derived_resource_id = f"trivy-security-{basename.replace('.tf', '')}"
+
+            # Dedup — don't create a second security PR for the same file
+            # while an earlier one is still open.
+            existing = drift_history.get_open_event(derived_resource_id, account_label, "security_only")
+            if existing:
+                print(f"  ⏭  {derived_resource_id}: open security PR "
+                      f"#{existing['pr_number']} already exists — skipping")
+                continue
+
+            # ── Patched content (from tmpdir) ─────────────────────────
+            with open(tmp_file_path, encoding="utf-8") as f:
+                patched_content = f.read()
+
+            # ── Unified diff against the original file ────────────────
+            original_path = os.path.join(tf_dir, basename)
+            if os.path.isfile(original_path):
+                with open(original_path, encoding="utf-8") as f:
+                    original_content = f.read()
+                diff_lines = list(difflib.unified_diff(
+                    original_content.splitlines(keepends=True),
+                    patched_content.splitlines(keepends=True),
+                    fromfile=f"a/{basename}",
+                    tofile=f"b/{basename}",
+                ))
+                plan_output = "".join(diff_lines)
+                repo_path = gi.to_repo_relative_path(original_path)
+            else:
+                plan_output = ("(original file not found — "
+                               "full patched content below)")
+                repo_path = f"drift-reports/security-{basename}"
+
+            # ── Determine highest severity among this file's fixes ────
+            # fixes_applied entries carry rule_id but not severity —
+            # resolve from the original issues list.
+            _SEVERITY_RANK_LOOKUP = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+            rule_severity: dict[str, str] = {}
+            for iss in issues:
+                rid = iss.get("rule_id", "")
+                if rid:
+                    sev = (iss.get("severity") or "UNKNOWN").upper()
+                    cur = rule_severity.get(rid)
+                    if cur is None or _SEVERITY_RANK_LOOKUP.get(sev, 4) < _SEVERITY_RANK_LOOKUP.get(cur, 4):
+                        rule_severity[rid] = sev
+            highest_sev = "LOW"
+            for fix in fixes_in_file:
+                sev = rule_severity.get(fix["rule_id"], "UNKNOWN")
+                rank = _SEVERITY_RANK_LOOKUP.get(sev, 4)
+                if rank <= _SEVERITY_RANK_LOOKUP.get(highest_sev, 4):
+                    highest_sev = sev
+            risk_level = _sev_to_risk.get(highest_sev, "LOW")
+
+            # ── Markdown summary ──────────────────────────────────────
+            count = len(fixes_in_file)
+            drift_summary = "\n".join(
+                f"- **`{f['rule_id']}`**: {f['description']}"
+                for f in fixes_in_file
+            )
+            pr_title = f"Security fix: {basename} ({count} issue{'s' if count != 1 else ''})"
+
+            pr = gi.create_drift_pr(
+                resource_id=derived_resource_id,
+                pr_title=pr_title,
+                drift_summary=drift_summary,
+                plan_output=plan_output,
+                file_path=repo_path,
+                file_content=patched_content,
+                risk_level=risk_level,
+                account_label=account_label,
+                security=True,
+            )
+            if pr is not None:
+                pr_urls.append({"url": pr.html_url, "type": "security_only"})
+
+        return {"pr_urls": pr_urls, "needs_review": needs_review}
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 workflow = StateGraph(State)
 workflow.add_node("unmanaged_scan", unmanaged_scan_node)
 workflow.add_node("reconcile_agent", agent_node)
@@ -788,10 +916,14 @@ workflow.add_node("drift_pr", drift_pr_from_finding)
 
 workflow.add_conditional_edges(
     START,
-    lambda state: "unmanaged_scan" if state.get("scan_unmanaged") else "reconcile_agent",
+    lambda state: "unmanaged_scan" if state.get("scan_mode") in ("drift_and_unmanaged", "unmanaged_only") else "reconcile_agent",
     {"unmanaged_scan": "unmanaged_scan", "reconcile_agent": "reconcile_agent"},
 )
-workflow.add_edge("unmanaged_scan", "reconcile_agent")
+workflow.add_conditional_edges(
+    "unmanaged_scan",
+    lambda state: "drift_pr" if state.get("scan_mode") == "unmanaged_only" else "reconcile_agent",
+    {"drift_pr": "drift_pr", "reconcile_agent": "reconcile_agent"},
+)
 workflow.add_edge("reconcile_agent", "trivy_gate")
 workflow.add_edge("trivy_gate", "alert_agent")
 workflow.add_edge("trivy_gate", "drift_pr")
@@ -1229,10 +1361,16 @@ if __name__ == "__main__":
         help="Human-readable label for the AWS account being scanned",
     )
     parser.add_argument(
-        "--scan-unmanaged",
+        "--scan-mode",
+        choices=["drift_only", "drift_and_unmanaged", "unmanaged_only"],
+        default="drift_only",
+        help="Scan mode: drift_only (default), drift_and_unmanaged, or unmanaged_only",
+    )
+    parser.add_argument(
+        "--trivy-only",
         action="store_true",
         default=False,
-        help="Scan for AWS resources that exist outside of Terraform state",
+        help="Run only the Trivy security scan (no drift detection, no reconcile)",
     )
     parser.add_argument(
         "--rollback",
@@ -1292,6 +1430,71 @@ if __name__ == "__main__":
             f.write(report)
         print(report)
         print(f"\n[Success] Trends report written to: {output_path}")
+        sys.exit(0)
+
+    # --trivy-only mode: security scan only, no drift detection or terraform plan.
+    if args.trivy_only:
+        if args.tf_dir is not None:
+            tf_dir = os.path.abspath(args.tf_dir)
+        else:
+            import os as _os
+            import requests as _requests
+            url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+            key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+            env_dict = {}
+            if url and key:
+                resp = _requests.get(
+                    f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
+                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                    timeout=10,
+                )
+                if resp.status_code == 200 and resp.json():
+                    env_dict = resp.json()[0]
+            if not env_dict:
+                raise RuntimeError(
+                    f"No environment found for slug '{_account_label}' — "
+                    f"cannot resolve terraform directory."
+                )
+            from drift_reconciler.environment_credentials import resolve_tf_dir
+            tf_dir = resolve_tf_dir(env_dict)
+
+        if not os.path.isdir(tf_dir):
+            raise RuntimeError(f"Terraform directory not found: {tf_dir}")
+
+        try:
+            results = run_trivy_only_scan(tf_dir, _account_label, _account_label, _run_id)
+            if _run_id:
+                from scan_runs import update_scan_run
+                from datetime import datetime as dt, timezone
+                pr_urls = results["pr_urls"]
+                needs_review = results["needs_review"]
+                summary = {
+                    "mode": "trivy_only",
+                    "security": {
+                        "found": len(pr_urls) > 0,
+                        "count": len(pr_urls),
+                        "pr_links": [r["url"] for r in pr_urls],
+                        "needs_review": needs_review,
+                    },
+                }
+                update_scan_run(
+                    _run_id,
+                    status="complete",
+                    completed_at=dt.now(timezone.utc).isoformat(),
+                    result_summary=summary,
+                    pr_links=[r["url"] for r in pr_urls] if pr_urls else None,
+                )
+        except Exception as e:
+            if _run_id:
+                from scan_runs import update_scan_run
+                from datetime import datetime as dt, timezone
+                update_scan_run(
+                    _run_id,
+                    status="failed",
+                    completed_at=dt.now(timezone.utc).isoformat(),
+                    result_summary=str(e),
+                )
+            raise
         sys.exit(0)
 
     # Resolve tf_dir once — used by rollback, rollback_preview, and the
@@ -1380,13 +1583,23 @@ if __name__ == "__main__":
 
         _tf_dir = tf_dir
 
-        # Gather the data using our folder-aware pipeline
-        drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
+        scan_unmanaged = args.scan_mode in ("drift_and_unmanaged", "unmanaged_only")
+
+        # Gather the data using our folder-aware pipeline — except in
+        # unmanaged_only mode, where drift detection is irrelevant and
+        # the terraform plan would only waste time and log a misleading
+        # failure on a step we never needed.
+        if args.scan_mode == "unmanaged_only":
+            print("Skipping terraform plan — unmanaged_only mode does not need drift detection.")
+            drift_report = json.dumps({"report_type": "no_drift", "resources": []})
+        else:
+            drift_report = get_terraform_drift_data(tf_dir, _drift_script_path)
 
         _terraform_failed = False
 
+
         if "Failed" in drift_report or "Error" in drift_report:
-            if args.scan_unmanaged:
+            if scan_unmanaged:
                 print(f"\n⚠  Terraform plan failed — proceeding with unmanaged scan only.")
                 print(_strip_ansi(drift_report))
                 drift_report = json.dumps({"report_type": "no_drift", "resources": []})
@@ -1397,7 +1610,7 @@ if __name__ == "__main__":
         _print_drift_exceptions(drift_report)
 
         if not _terraform_failed:
-            print("\nData fetched successfully. Sending to Amazon Nova...")
+            print("\nData fetched successfully. Sending to LLM for analysis...")
         system_prompt = (
             f"## Context\n"
             f"Account: {_account_label}  |  Region: {_region}\n\n"
@@ -1452,7 +1665,8 @@ if __name__ == "__main__":
                 {"role": "user", "content": user_query}
             ],
             "trivy_scanned": False,
-            "scan_unmanaged": args.scan_unmanaged,
+            "scan_unmanaged": scan_unmanaged,
+            "scan_mode": args.scan_mode,
             "run_id": args.run_id,
             "terraform_failed": _terraform_failed,
         }

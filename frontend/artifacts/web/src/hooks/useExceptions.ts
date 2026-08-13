@@ -28,9 +28,23 @@ export interface UnmanagedException {
   active:               boolean;
 }
 
+export interface SecurityException {
+  id:               string | number;
+  scope:            string;
+  exception_type:   'security';
+  resource_address: string;
+  rule_id:          string;
+  reason:           string;
+  approved_by:      string | null;
+  expires:          string | null;
+  auto:             boolean;
+  active:           boolean;
+}
+
 export interface ExceptionsResponse {
   drift_exceptions:     DriftException[];
   unmanaged_exceptions: UnmanagedException[];
+  security_exceptions:  SecurityException[];
 }
 
 export interface ExceptionMutation {

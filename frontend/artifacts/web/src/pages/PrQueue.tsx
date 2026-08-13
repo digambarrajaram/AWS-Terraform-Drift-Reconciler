@@ -323,6 +323,7 @@ function FilterBar({
         <option value="batch">Batch</option>
         <option value="rollback">Rollback</option>
         <option value="unmanaged">Unmanaged</option>
+        <option value="security_only">Security Only</option>
         <option value="manual">Manual</option>
       </select>
 

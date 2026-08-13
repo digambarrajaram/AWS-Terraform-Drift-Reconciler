@@ -20,7 +20,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useScope } from '@/hooks/useScope';
 import {
   useExceptions, useExceptionsMutation,
-  type DriftException, type UnmanagedException,
+  type DriftException, type UnmanagedException, type SecurityException,
 } from '@/hooks/useExceptions';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -239,7 +239,7 @@ function DriftTab({
           drift_type:       form.drift_type.trim() || null,
           reason:           form.reason.trim(),
           approved_by:      form.approved_by.trim() || null,
-          expires:          form.expires ? new Date(form.expires + 'T23:59:59').toISOString() : null,
+          expires:          form.expires.trim() || null,
           auto:             form.auto,
         },
       });
@@ -652,6 +652,243 @@ function UnmanagedTab({
   );
 }
 
+// ── SecurityTab ─────────────────────────────────────────────────────────────
+
+const SECURITY_BLANK = {
+  resource_address: '', rule_id: '', reason: '',
+  approved_by: '', expires: '', auto: false,
+};
+
+function SecurityTab({
+  rows, scope, mutation,
+}: {
+  rows: SecurityException[];
+  scope: string;
+  mutation: ReturnType<typeof useExceptionsMutation>;
+}) {
+  const [showForm, setShowForm]   = useState(false);
+  const [form, setForm]           = useState(SECURITY_BLANK);
+  const [formErr, setFormErr]     = useState('');
+  const [expireTarget, setExpireTarget] = useState<SecurityException | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SecurityException | null>(null);
+
+  function set(k: keyof typeof SECURITY_BLANK, v: string | boolean) {
+    setForm((p) => ({ ...p, [k]: v }));
+    setFormErr('');
+  }
+
+  function validate(): string {
+    if (!form.resource_address.trim()) return 'Resource address is required';
+    if (!form.rule_id.trim())          return 'Trivy rule ID is required';
+    if (!form.reason.trim())           return 'Reason is required';
+    if (form.expires) {
+      const d = new Date(form.expires);
+      if (isNaN(d.getTime()))  return 'Invalid expiry date';
+      if (d <= new Date())     return 'Expiry date must be in the future';
+    }
+    return '';
+  }
+
+  async function handleAdd(e: React.FormEvent) {
+    e.preventDefault();
+    const err = validate();
+    if (err) { setFormErr(err); return; }
+    try {
+      await mutation.mutateAsync({
+        scope,
+        exception_type: 'security',
+        action: 'add',
+        entry: {
+          resource_address: form.resource_address.trim(),
+          rule_id:          form.rule_id.trim(),
+          reason:           form.reason.trim(),
+          approved_by:      form.approved_by.trim() || null,
+          expires:          form.expires.trim() || null,
+          auto:             form.auto,
+        },
+      });
+      toast.success('Security exception added');
+      setForm(SECURITY_BLANK);
+      setShowForm(false);
+    } catch (err) {
+      toast.error('Failed to add exception', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function handleExpire(iso: string) {
+    if (!expireTarget) return;
+    try {
+      await mutation.mutateAsync({
+        scope,
+        exception_type: 'security',
+        action: 'expire',
+        entry: { id: expireTarget.id, expires: iso },
+      });
+      toast.success('Expiry date set');
+      setExpireTarget(null);
+    } catch (err) {
+      toast.error('Failed to set expiry', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    try {
+      await mutation.mutateAsync({
+        scope,
+        exception_type: 'security',
+        action: 'delete',
+        entry: { id: deleteTarget.id },
+      });
+      toast.success('Exception deleted');
+      setDeleteTarget(null);
+    } catch (err) {
+      toast.error('Failed to delete exception', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return (
+    <div className="space-y-4 mt-4">
+      <button type="button" onClick={() => setShowForm((v) => !v)}
+        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors">
+        {showForm ? <ChevronUp size={13} /> : <Plus size={13} />}
+        {showForm ? 'Cancel' : 'Add Security Exception'}
+      </button>
+
+      {showForm && (
+        <div className="rounded-xl border border-border bg-card p-5">
+          <h3 className="text-sm font-semibold mb-4">New Security Exception</h3>
+          <form onSubmit={handleAdd} className="space-y-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Resource Address *">
+                <input type="text" placeholder="aws_s3_bucket.example"
+                  value={form.resource_address} onChange={(e) => set('resource_address', e.target.value)}
+                  className={inputCls} />
+              </Field>
+              <Field label="Trivy Rule ID *">
+                <input type="text" placeholder="AVD-AWS-0002"
+                  value={form.rule_id} onChange={(e) => set('rule_id', e.target.value)}
+                  className={inputCls} />
+              </Field>
+              <Field label="Reason *">
+                <textarea placeholder="Why is this exception needed?"
+                  value={form.reason} onChange={(e) => set('reason', e.target.value)}
+                  rows={2} className={`${inputCls} resize-none`} />
+              </Field>
+              <Field label="Approved By">
+                <input type="text" placeholder="slack handle or email"
+                  value={form.approved_by} onChange={(e) => set('approved_by', e.target.value)}
+                  className={inputCls} />
+              </Field>
+              <Field label="Expires (optional — must be future)">
+                <input type="date" min={todayISO()}
+                  value={form.expires} onChange={(e) => set('expires', e.target.value)}
+                  className={inputCls} />
+              </Field>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input type="checkbox" checked={form.auto}
+                onChange={(e) => set('auto', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-input accent-primary" />
+              <span className="text-xs text-foreground">Auto-suppress</span>
+            </label>
+            {formErr && <FormError msg={formErr} />}
+            <div className="flex gap-2 pt-1">
+              <button type="submit" disabled={mutation.isPending}
+                className="rounded-md bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {mutation.isPending ? 'Adding…' : 'Add Exception'}
+              </button>
+              <button type="button" onClick={() => { setShowForm(false); setFormErr(''); setForm(SECURITY_BLANK); }}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent transition-colors">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div className="rounded-xl border border-border overflow-hidden">
+        {rows.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 py-14 text-center">
+            <Inbox size={32} className="text-muted-foreground/40" />
+            <p className="text-sm text-muted-foreground">No security exceptions</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[760px]">
+              <thead>
+                <tr className="border-b border-border bg-muted/40">
+                  {['Resource Address', 'Rule ID', 'Reason', 'Approved By', 'Expires', 'Auto', 'Status', ''].map((h) => (
+                    <th key={`security-${h}`} className="px-4 py-2.5 text-left font-medium text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {rows.map((row) => {
+                  const expired = isExpired(row.expires);
+                  const dim = expired || !row.active;
+                  return (
+                    <tr key={String(row.id)} className={`transition-colors hover:bg-muted/30 ${dim ? 'opacity-60' : ''}`}>
+                      <td className="px-4 py-3 font-mono max-w-[200px]">
+                        <span className="block truncate" title={row.resource_address}>{row.resource_address}</span>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-foreground">{row.rule_id}</td>
+                      <td className="px-4 py-3 max-w-[200px]">
+                        <span className="block truncate" title={row.reason}>{row.reason}</span>
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <ExpiresCell expires={row.expires} />
+                      </td>
+                      <td className="px-4 py-3">
+                        {row.auto ? (
+                          <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">Auto</span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <ActiveBadge active={row.active} expires={row.expires} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <RowActions
+                          onExpire={() => setExpireTarget(row)}
+                          onDelete={() => setDeleteTarget(row)}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <ExpireDialog
+        open={!!expireTarget}
+        label={expireTarget?.resource_address ?? ''}
+        onClose={() => setExpireTarget(null)}
+        onConfirm={handleExpire}
+        pending={mutation.isPending}
+      />
+      <DeleteDialog
+        open={!!deleteTarget}
+        label={deleteTarget?.resource_address ?? ''}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDelete}
+        pending={mutation.isPending}
+      />
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────
 
 export default function Exceptions() {
@@ -661,6 +898,7 @@ export default function Exceptions() {
 
   const driftRows     = data?.drift_exceptions     ?? [];
   const unmanagedRows = data?.unmanaged_exceptions ?? [];
+  const securityRows  = data?.security_exceptions  ?? [];
 
   return (
     <div className="p-6 space-y-4 max-w-6xl">
@@ -694,6 +932,14 @@ export default function Exceptions() {
                 </span>
               )}
             </TabsTrigger>
+            <TabsTrigger value="security">
+              Security
+              {securityRows.length > 0 && (
+                <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {securityRows.length}
+                </span>
+              )}
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="drift">
@@ -702,6 +948,10 @@ export default function Exceptions() {
 
           <TabsContent value="unmanaged">
             <UnmanagedTab rows={unmanagedRows} scope={scope!} mutation={mutation} />
+          </TabsContent>
+
+          <TabsContent value="security">
+            <SecurityTab rows={securityRows} scope={scope!} mutation={mutation} />
           </TabsContent>
         </Tabs>
       )}

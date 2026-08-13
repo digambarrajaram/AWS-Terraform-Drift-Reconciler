@@ -153,6 +153,57 @@ def load_drift_exceptions(scope: str) -> tuple[list[dict], list[dict]]:
     return active, expired
 
 
+def check_security_suppression(resource_address: str, rule_id: str, scope: str) -> bool:
+    """Return True if this (resource_address, rule_id) pair has an active,
+    non-expired security exception for this scope.
+
+    Fails open — any network error or missing configuration returns False
+    (no suppression), so a broken suppression check never silently hides a
+    real security finding."""
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not key or not scope:
+        return False
+
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/drift_exception_registry"
+            f"?select=id,expires"
+            f"&scope=eq.{scope}"
+            f"&exception_type=eq.security"
+            f"&resource_address=eq.{resource_address}"
+            f"&rule_id=eq.{rule_id}"
+            f"&active=eq.true"
+            f"&limit=1",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return False
+        rows = resp.json() if resp.text else []
+    except requests.RequestException:
+        return False
+
+    if not isinstance(rows, list) or not rows:
+        return False
+
+    entry = rows[0]
+    if not isinstance(entry, dict):
+        return False
+
+    expires_str = (entry.get("expires") or "").strip()
+    if not expires_str:
+        return True  # no expiry — permanently suppressed
+
+    try:
+        expires_date = date.fromisoformat(expires_str)
+        if expires_date <= date.today():
+            return False  # expired — don't honor
+        return True  # future expiry — still active
+    except (ValueError, TypeError):
+        return False  # malformed date — can't confirm validity, fail open
+
+
 def _matches_exception(resource_address: str, drift_fields: set[str], status: str | None, entry: dict) -> bool:
     """Return True if *entry* suppresses this specific drift finding."""
     addr = entry.get("resource_address", "")

@@ -39,13 +39,16 @@ def report_stage(run_id: str | None, stage_name: str) -> None:
     update_scan_run(run_id, current_stage=stage_name)
 
 
-def create_scan_run(scope: str, unmanaged_flag: bool = False) -> str:
+def create_scan_run(scope: str, unmanaged_flag: bool = False, scan_type: str | None = None) -> str:
     if not _URL or not _KEY:
         raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
+    payload: dict = {"scope": scope, "unmanaged_flag": unmanaged_flag, "status": "running"}
+    if scan_type is not None:
+        payload["scan_type"] = scan_type
     resp = requests.post(
         f"{_URL}/rest/v1/{_TABLE}",
         headers=_HEADERS,
-        json={"scope": scope, "unmanaged_flag": unmanaged_flag, "status": "running"},
+        json=payload,
         timeout=10,
     )
     _debug(f"  [scan_runs] POST → {resp.status_code} {resp.text[:120]}")

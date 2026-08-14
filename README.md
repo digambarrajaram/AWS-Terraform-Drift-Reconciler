@@ -316,7 +316,7 @@ Two workflows handle PR lifecycle:
 - `drift-preview.yml` — posts `terraform plan` output as a PR comment on `pull_request: [opened, synchronize]`
 - `drift-reconciler.yml` — on `pull_request: [closed]`, runs `terraform apply` (accepted) or revert (rejected), resolves drift history, posts Slack notification
 
-Required GitHub Secrets: `SCOPE_A_APPLY_ROLE_ARN` / `SCOPE_B_APPLY_ROLE_ARN`, `PROD_A_REGION` / `PROD_B_REGION` (Variables), `PAGERDUTY_ROUTING_KEY`, `SLACK_WEBHOOK_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+Required GitHub Secrets: `PAGERDUTY_ROUTING_KEY`, `SLACK_WEBHOOK_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`. AWS role ARNs and regions are fetched from the Supabase `environments` table by the workflows — no per-scope GitHub Secrets or Variables needed.
 
 ---
 

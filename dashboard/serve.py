@@ -27,6 +27,7 @@ import sys as _sys
 _sys.path.insert(0, str(_REPO_ROOT))
 from drift_reconciler.scan_runs import create_scan_run, update_scan_run
 from drift_reconciler.rollback_runs import create_rollback_run
+from drift_reconciler.environment_credentials import resolve_tf_dir
 from drift_reconciler.utils import mask_secret as _mask
 _DASHBOARD_DIR = _REPO_ROOT / "dashboard"
 
@@ -92,7 +93,17 @@ def _get_env_field(slug: str, field: str, default: str = "") -> str:
 
 
 def _tf_dir_for(scope: str) -> str:
-    return _get_env_field(scope, "tf_directory_path") or f"terraform_code/ec2_terraform_{scope}"
+    env = next((e for e in _get_active_environments() if e["slug"] == scope), None)
+    if env is None:
+        return f"terraform_code/ec2_terraform_{scope}"  # legacy fallback, unchanged
+    try:
+        return resolve_tf_dir(env)
+    except RuntimeError as exc:
+        # Surface git-clone failures clearly instead of letting a bad path
+        # silently reach the subprocess and fail later with a confusing
+        # "directory not found" error.
+        print(f"  ⚠ resolve_tf_dir failed for scope={scope}: {exc}")
+        raise
 
 
 def _aws_profile_for(scope: str) -> str:
@@ -892,7 +903,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             row[field] = val
 
         # Optional fields
-        for opt in ["aws_profile", "tf_lock_table", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "aws_external_id"]:
+        for opt in ["aws_profile", "tf_lock_table", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "scan_role_arn", "aws_external_id"]:
             if body.get(opt):
                 row[opt] = body[opt].strip()
 
@@ -966,7 +977,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._json_error(400, "Invalid or empty JSON body")
             return
 
-        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "scan_role_variable", "apply_role_secret_name", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "aws_external_id"}
+        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "scan_role_arn", "aws_external_id"}
         updates = {}
         github_token_val = None
         aws_access_key_val = None

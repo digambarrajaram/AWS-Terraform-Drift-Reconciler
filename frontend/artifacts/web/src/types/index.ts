@@ -11,10 +11,9 @@ export interface Environment {
   auth_type:                 'profile' | 'role' | 'keys' | null;
   aws_profile:               string | null;
   aws_role_arn:              string | null;
+  scan_role_arn:             string | null;
   aws_external_id:           string | null;
   tf_lock_table:             string | null;
-  scan_role_variable:        string | null;
-  apply_role_secret_name:    string | null;
   apply_environment_name:    string | null;
   repo_url:                  string | null;
   repo_branch:               string | null;

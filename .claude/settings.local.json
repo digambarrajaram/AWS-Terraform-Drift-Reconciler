@@ -74,7 +74,11 @@
       "Bash(pip install *)",
       "Bash(PYTHONPATH=/mnt/d/aws-terraform-drift-reconciler python3 *)",
       "Bash(terraform *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(awk '-F[ :]' '{print $NF}')",
+      "Bash(awk '{print $NF}')",
+      "Bash(awk '{print $1}')",
+      "Bash(chmod +x /mnt/d/aws-terraform-drift-reconciler/scripts/ec2_setup.sh)"
     ]
   }
 }

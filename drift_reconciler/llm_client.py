@@ -7,6 +7,8 @@ so they share the same resolution chain without duplicating the function.
 import logging
 import os
 
+from langchain_aws import ChatBedrockConverse
+
 # Suppress botocore credential-discovery noise ("Both api_key and AWS
 # credentials were provided …") that fires every time a Bedrock client is
 # instantiated.  This is purely SDK chatter; actual auth errors still

@@ -103,8 +103,6 @@ Stores configuration for each AWS account/scope being monitored.
 | `tf_state_bucket` | text | S3 bucket for Terraform state |
 | `tf_lock_table` | text | DynamoDB lock table (default: "terraform-locks") |
 | `tf_directory_path` | text | Repo-relative path to .tf files |
-| `scan_role_variable` | text | GitHub Variable name for scan role ARN |
-| `apply_role_secret_name` | text | GitHub Secret name for apply role ARN |
 | `apply_environment_name` | text | GitHub Environment for approval gate |
 | `is_active` | boolean | Soft-delete flag (default true) |
 | `auth_type` | text | `'profile'`, `'role'`, or `'keys'`. CHECK: `auth_type = ANY (ARRAY['profile', 'role', 'keys'])` |
@@ -345,8 +343,6 @@ Returns all environments (including inactive ones) with masked secrets.
     "tf_state_bucket": "scope-a-tf-state-...",
     "tf_lock_table": "terraform-locks",
     "tf_directory_path": "terraform_code/ec2_terraform_account_a",
-    "scan_role_variable": "SCOPE_A_SCAN_ROLE_ARN",
-    "apply_role_secret_name": "SCOPE_A_APPLY_ROLE_ARN",
     "apply_environment_name": "scope-a-apply",
     "is_active": true,
     "auth_type": "profile",
@@ -389,8 +385,6 @@ Create a new environment.
   "tf_directory_path": "terraform_code/ec2_terraform_account_c", // required
   "aws_profile": "account-c",          // optional
   "tf_lock_table": "terraform-locks",  // optional
-  "scan_role_variable": "...",         // optional
-  "apply_role_secret_name": "...",     // optional
   "apply_environment_name": "...",     // optional
   "repo_url": "...",                   // optional
   "repo_branch": "main",               // optional
@@ -422,7 +416,7 @@ Update an environment. Accepts the same optional fields as POST.
 
 **Auth**: API access token required.
 
-**Allowed fields**: `name`, `aws_account_id`, `aws_profile`, `region`, `tf_state_bucket`, `tf_lock_table`, `tf_directory_path`, `scan_role_variable`, `apply_role_secret_name`, `apply_environment_name`, `is_active`, `repo_url`, `repo_branch`, `git_auth_type`, `auth_type`, `aws_role_arn`, `aws_external_id`
+**Allowed fields**: `name`, `aws_account_id`, `aws_profile`, `region`, `tf_state_bucket`, `tf_lock_table`, `tf_directory_path`, `apply_environment_name`, `is_active`, `repo_url`, `repo_branch`, `git_auth_type`, `auth_type`, `aws_role_arn`, `aws_external_id`
 
 **Secret fields**: `_github_token`, `_aws_access_key_id`, `_aws_secret_access_key` are routed to `environment_secrets`.
 
@@ -1219,15 +1213,15 @@ Triggers on:
 - `workflow_dispatch` (manual trigger)
 
 **Jobs**:
-1. `resolve-scope` — Determines scope from branch name or PR title
+1. `resolve-scope` — Determines scope from branch name or PR title, then fetches `region`, `tf_directory_path`, `apply_environment_name`, and `aws_role_arn` directly from the Supabase `environments` table (anon key). The role ARN is passed straight to `configure-aws-credentials` — no GitHub Secret indirection.
 2. `reconcile-infra` — The main reconciliation job:
    - **ACCEPT** (merged PR): Runs pre-apply drift gate, rollback freshness check, then `terraform apply`
    - **REJECT** (closed PR): Runs pre-apply drift gate, then `terraform apply` to revert
    - Both paths: marks drift history resolved, comments on PR, sends Slack notification
 
-**Required secrets**: `SCOPE_A_APPLY_ROLE_ARN`, `SCOPE_B_APPLY_ROLE_ARN`, `PAGERDUTY_ROUTING_KEY`, `SLACK_WEBHOOK_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+**Required secrets**: `PAGERDUTY_ROUTING_KEY`, `SLACK_WEBHOOK_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`
 
-**Required variables**: `PROD_A_REGION`, `PROD_B_REGION`, `DRIFT_GATE_MODE` (optional, `"block"` or empty for warn-only)
+**Required variables**: `DRIFT_GATE_MODE` (optional, `"block"` or empty for warn-only)
 
 ### `drift-preview.yml` (exists but not analyzed in detail)
 

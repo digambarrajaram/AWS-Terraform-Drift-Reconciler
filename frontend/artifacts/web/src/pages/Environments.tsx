@@ -166,10 +166,9 @@ type FormState = {
   auth_type:              'profile' | 'role' | 'keys';
   aws_profile:            string;
   aws_role_arn:           string;
+  scan_role_arn:          string;
   aws_external_id:        string;
   tf_lock_table:          string;
-  scan_role_variable:     string;
-  apply_role_secret_name: string;
   apply_environment_name: string;
   repo_url:               string;
   repo_branch:            string;
@@ -183,9 +182,9 @@ const BLANK_FORM: FormState = {
   slug: '', name: '', aws_account_id: '', region: '',
   tf_state_bucket: '', tf_directory_path: '',
   auth_type: 'role',
-  aws_profile: '', aws_role_arn: '', aws_external_id: '',
-  tf_lock_table: '', scan_role_variable: '',
-  apply_role_secret_name: '', apply_environment_name: '',
+  aws_profile: '', aws_role_arn: '', scan_role_arn: '', aws_external_id: '',
+  tf_lock_table: '',
+  apply_environment_name: '',
   repo_url: '', repo_branch: '',
   git_auth_type: 'none',
   _github_token: '', _aws_access_key_id: '', _aws_secret_access_key: '',
@@ -202,10 +201,9 @@ function envToForm(e: Environment): FormState {
     auth_type:              e.auth_type,
     aws_profile:            e.aws_profile            ?? '',
     aws_role_arn:           e.aws_role_arn            ?? '',
+    scan_role_arn:          e.scan_role_arn           ?? '',
     aws_external_id:        e.aws_external_id         ?? '',
     tf_lock_table:          e.tf_lock_table           ?? '',
-    scan_role_variable:     e.scan_role_variable      ?? '',
-    apply_role_secret_name: e.apply_role_secret_name  ?? '',
     apply_environment_name: e.apply_environment_name  ?? '',
     repo_url:               e.repo_url                ?? '',
     repo_branch:            e.repo_branch             ?? '',
@@ -226,8 +224,6 @@ function buildPayload(form: FormState, isEdit: boolean): Record<string, unknown>
     auth_type:              form.auth_type,
     git_auth_type:          form.git_auth_type,
     tf_lock_table:          form.tf_lock_table.trim()          || null,
-    scan_role_variable:     form.scan_role_variable.trim()     || null,
-    apply_role_secret_name: form.apply_role_secret_name.trim() || null,
     apply_environment_name: form.apply_environment_name.trim() || null,
     repo_url:               form.repo_url.trim()               || null,
     repo_branch:            form.repo_branch.trim()            || null,
@@ -236,13 +232,17 @@ function buildPayload(form: FormState, isEdit: boolean): Record<string, unknown>
 
   if (form.auth_type === 'profile') {
     p.aws_profile = form.aws_profile.trim() || null;
-  } else if (form.auth_type === 'role') {
-    p.aws_role_arn    = form.aws_role_arn.trim()    || null;
-    p.aws_external_id = form.aws_external_id.trim() || null;
   } else if (form.auth_type === 'keys') {
     if (form._aws_access_key_id.trim())     p._aws_access_key_id     = form._aws_access_key_id.trim();
     if (form._aws_secret_access_key.trim()) p._aws_secret_access_key = form._aws_secret_access_key.trim();
   }
+
+  // CI/CD role fields are independent of the dashboard's own auth method —
+  // always sent so an environment with auth_type='keys' doesn't silently
+  // lose its role ARNs on save.
+  p.aws_role_arn    = form.aws_role_arn.trim()    || null;
+  p.scan_role_arn   = form.scan_role_arn.trim()   || null;
+  p.aws_external_id = form.aws_external_id.trim() || null;
 
   if (form.git_auth_type === 'token' && form._github_token.trim()) {
     p._github_token = form._github_token.trim();
@@ -261,6 +261,7 @@ function validateForm(form: FormState, isEdit: boolean, env?: Environment): stri
   if (!form.region.trim())           errs.push('Region is required');
   if (!form.tf_state_bucket.trim())  errs.push('Terraform state bucket is required');
   if (!form.tf_directory_path.trim()) errs.push('Terraform directory path is required');
+  if (!form.aws_role_arn.trim())     errs.push('AWS Role ARN is required (used by GitHub Actions workflows)');
 
   if (!isEdit && !['role', 'keys'].includes(form.auth_type)) {
     errs.push('Auth type must be "role" or "keys" for new environments');
@@ -292,6 +293,9 @@ function EnvForm({
 
   const [form,   setForm]   = useState<FormState>(BLANK_FORM);
   const [errors, setErrors] = useState<string[]>([]);
+  const [showRoleArn,     setShowRoleArn]     = useState(false);
+  const [showScanRoleArn, setShowScanRoleArn] = useState(false);
+  const [showExternalId,  setShowExternalId]  = useState(false);
 
   // Sync form when the sheet opens
   useEffect(() => {
@@ -353,7 +357,7 @@ function EnvForm({
                   type="text"
                   placeholder="scope-e"
                   value={form.slug}
-                  onChange={(e) => set('slug', e.target.value)}
+                  onChange={(e) => set('slug', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
                   disabled={isEdit}
                   className={`${inputCls} ${isEdit ? 'opacity-50 cursor-not-allowed' : ''}`}
                 />
@@ -407,25 +411,83 @@ function EnvForm({
               </div>
             </Field>
 
+            {/* ── CI/CD roles — always visible, independent of Auth Type ── */}
+            <div className="space-y-3">
+              <p className={sectionHeadingCls}>CI/CD Roles (GitHub Actions)</p>
+              <p className="text-[11px] text-muted-foreground -mt-2">
+                Required for GitHub Actions workflows, independent of the Auth Type below.
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="Apply Role ARN">
+                  <div className="relative">
+                    <input
+                      type={showRoleArn ? 'text' : 'password'}
+                      placeholder="arn:aws:iam::123456789012:role/MyRole"
+                      value={form.aws_role_arn}
+                      onChange={(e) => set('aws_role_arn', e.target.value)}
+                      autoComplete="new-password"
+                      className={`${inputCls} pr-8`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRoleArn((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showRoleArn ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    Used by the apply workflow (terraform apply).
+                  </p>
+                </Field>
+                <Field label="Scan Role ARN">
+                  <div className="relative">
+                    <input
+                      type={showScanRoleArn ? 'text' : 'password'}
+                      placeholder="arn:aws:iam::123456789012:role/MyScanRole"
+                      value={form.scan_role_arn}
+                      onChange={(e) => set('scan_role_arn', e.target.value)}
+                      autoComplete="new-password"
+                      className={`${inputCls} pr-8`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowScanRoleArn((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showScanRoleArn ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    Optional — used by the preview/scan workflow (read-only). Falls back to Apply Role ARN if left blank.
+                  </p>
+                </Field>
+                <Field label="External ID">
+                  <div className="relative">
+                    <input
+                      type={showExternalId ? 'text' : 'password'}
+                      placeholder="optional" value={form.aws_external_id}
+                      onChange={(e) => set('aws_external_id', e.target.value)}
+                      autoComplete="new-password"
+                      className={`${inputCls} pr-8`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowExternalId((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showExternalId ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
+                </Field>
+              </div>
+            </div>
+
             {authType === 'profile' && (
               <Field label="AWS Profile">
                 <input type="text" placeholder="default" value={form.aws_profile}
                   onChange={(e) => set('aws_profile', e.target.value)} className={inputCls} />
               </Field>
-            )}
-
-            {authType === 'role' && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="AWS Role ARN">
-                  <input type="text" placeholder="arn:aws:iam::123456789012:role/MyRole"
-                    value={form.aws_role_arn}
-                    onChange={(e) => set('aws_role_arn', e.target.value)} className={inputCls} />
-                </Field>
-                <Field label="External ID">
-                  <input type="text" placeholder="optional" value={form.aws_external_id}
-                    onChange={(e) => set('aws_external_id', e.target.value)} className={inputCls} />
-                </Field>
-              </div>
             )}
 
             {authType === 'keys' && (
@@ -457,14 +519,6 @@ function EnvForm({
               <Field label="Lock Table">
                 <input type="text" placeholder="terraform-locks" value={form.tf_lock_table}
                   onChange={(e) => set('tf_lock_table', e.target.value)} className={inputCls} />
-              </Field>
-              <Field label="Scan Role Variable">
-                <input type="text" placeholder="TF_VAR_scan_role" value={form.scan_role_variable}
-                  onChange={(e) => set('scan_role_variable', e.target.value)} className={inputCls} />
-              </Field>
-              <Field label="Apply Role Secret Name">
-                <input type="text" placeholder="scope-e-apply-role" value={form.apply_role_secret_name}
-                  onChange={(e) => set('apply_role_secret_name', e.target.value)} className={inputCls} />
               </Field>
               <Field label="Apply Environment Name">
                 <input type="text" placeholder="scope-e-apply" value={form.apply_environment_name}

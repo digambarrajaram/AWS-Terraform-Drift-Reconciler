@@ -29,7 +29,7 @@ jobs:
     outputs:
       scope:           ${{ steps.scope.outputs.scope }}
       aws_region_var:  ${{ steps.scope.outputs.aws_region_var }}
-      role_arn_var:    ${{ steps.scope.outputs.role_arn_var }}
+      role_arn:        ${{ steps.scope.outputs.role_arn }}
       tf_working_dir:  ${{ steps.scope.outputs.tf_working_dir }}
     steps:
       - name: Resolve scope from PR branch/title
@@ -52,7 +52,7 @@ jobs:
 
           ENV_RESP=$(curl -sS -w "\n%{http_code}" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            "${SUPABASE_URL}/rest/v1/environments?select=region,scan_role_variable,tf_directory_path&slug=eq.${SCOPE}&is_active=eq.true")
+            "${SUPABASE_URL}/rest/v1/environments?select=region,tf_directory_path,aws_role_arn,scan_role_arn&slug=eq.${SCOPE}&is_active=eq.true")
 
           HTTP_CODE=$(echo "$ENV_RESP" | tail -1)
           ENV_JSON=$(echo "$ENV_RESP" | sed '$d')
@@ -67,10 +67,10 @@ jobs:
           fi
 
           REGION=$(echo "$ENV_JSON" | jq -r '.[0].region')
-          ROLE_VAR=$(echo "$ENV_JSON" | jq -r '.[0].scan_role_variable')
+          ROLE_ARN=$(echo "$ENV_JSON" | jq -r '.[0].scan_role_arn // .[0].aws_role_arn')
           TF_DIR=$(echo "$ENV_JSON" | jq -r '.[0].tf_directory_path')
 
-          for pair in "region:$REGION" "scan_role_variable:$ROLE_VAR" "tf_directory_path:$TF_DIR"; do
+          for pair in "region:$REGION" "aws_role_arn:$ROLE_ARN" "tf_directory_path:$TF_DIR"; do
             key="${pair%%:*}"; val="${pair#*:}"
             if [ -z "$val" ] || [ "$val" = "null" ]; then
               echo "::error::$key is empty for scope=${SCOPE} in Supabase"
@@ -80,9 +80,9 @@ jobs:
 
           echo "scope=$SCOPE"                 >> "$GITHUB_OUTPUT"
           echo "aws_region_var=$REGION"       >> "$GITHUB_OUTPUT"
-          echo "role_arn_var=$ROLE_VAR"       >> "$GITHUB_OUTPUT"
+          echo "role_arn=$ROLE_ARN"           >> "$GITHUB_OUTPUT"
           echo "tf_working_dir=$TF_DIR"       >> "$GITHUB_OUTPUT"
-          echo "🔍 Resolved scope=$SCOPE  region=$REGION  role_var=$ROLE_VAR  dir=$TF_DIR"
+          echo "🔍 Resolved scope=$SCOPE  region=$REGION  role_arn=$ROLE_ARN  dir=$TF_DIR"
 
   preview:
     needs: [resolve-scope]
@@ -102,8 +102,8 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars[needs.resolve-scope.outputs.role_arn_var] }}
-          aws-region: ${{ vars[needs.resolve-scope.outputs.aws_region_var] }}
+          role-to-assume: ${{ needs.resolve-scope.outputs.role_arn }}
+          aws-region: ${{ needs.resolve-scope.outputs.aws_region_var }}
           audience: sts.amazonaws.com
 
       - name: Setup Terraform

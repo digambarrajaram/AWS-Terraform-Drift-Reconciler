@@ -13,6 +13,7 @@ import { ApiError } from '@/api/apiFetch';
 import Overview from '@/pages/Overview';
 import Scan from '@/pages/Scan';
 import PrQueue from '@/pages/PrQueue';
+import Approvals from '@/pages/Approvals';
 import Rollback from '@/pages/Rollback';
 import Trends from '@/pages/Trends';
 import Exceptions from '@/pages/Exceptions';
@@ -78,6 +79,7 @@ export default function App() {
                 <Route path="/"            element={<Overview />} />
                 <Route path="/scan"        element={<Scan />} />
                 <Route path="/pr-queue"    element={<PrQueue />} />
+                <Route path="/approvals"   element={<Approvals />} />
                 <Route path="/rollback"    element={<Rollback />} />
                 <Route path="/trends"      element={<Trends />} />
                 <Route path="/exceptions"  element={<Exceptions />} />

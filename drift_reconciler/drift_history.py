@@ -284,6 +284,28 @@ def _pr_is_actually_open(pr_number: int) -> bool:
         return True  # network error — assume open (safe default)
 
 
+def has_unresolved_drift_except(account: str, pr_number: int) -> bool:
+    """Return ``True`` if *account* has open drift entries from any PR other
+    than *pr_number*.  The applied PR's own rows stay 'open' until the
+    post-apply resolve step, so the plain ``has_unresolved_drift`` would
+    always report True at gate time."""
+    if not _URL or not _KEY:
+        return False
+    try:
+        resp = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=id&account=eq.{account}&status=eq.open&pr_number=neq.{pr_number}&limit=1",
+            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json() if resp.text else []
+            return len(data) > 0 if isinstance(data, list) else False
+        return False
+    except requests.RequestException:
+        return False
+
+
 def has_unresolved_drift(account: str) -> bool:
     """Return ``True`` if *account* has any open (unresolved) drift entries."""
     if not _URL or not _KEY:

@@ -49,7 +49,7 @@ export interface ExceptionsResponse {
 
 export interface ExceptionMutation {
   scope:           string;
-  exception_type:  'drift' | 'unmanaged';
+  exception_type:  'drift' | 'unmanaged' | 'security';
   action:          'add' | 'expire' | 'delete';
   entry:           Record<string, unknown>;
 }

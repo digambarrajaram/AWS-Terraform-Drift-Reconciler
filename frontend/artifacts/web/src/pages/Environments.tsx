@@ -558,6 +558,12 @@ function EnvForm({
                 ))}
               </div>
             </Field>
+            {form.repo_url && gitAuthType !== 'token' && (
+              <p className="flex items-start gap-1.5 rounded-md border border-amber-400/40 bg-amber-100/60 dark:bg-amber-900/20 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
+                <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                This environment's git access is read-only. If a post-merge safety gate ever blocks an apply, the automatic revert cannot push — you'll need to revert manually. Use a token with write access to enable automatic recovery.
+              </p>
+            )}
             {gitAuthType === 'token' && (
               <SecretField
                 label="GitHub Token"

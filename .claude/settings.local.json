@@ -78,7 +78,12 @@
       "Bash(awk '-F[ :]' '{print $NF}')",
       "Bash(awk '{print $NF}')",
       "Bash(awk '{print $1}')",
-      "Bash(chmod +x /mnt/d/aws-terraform-drift-reconciler/scripts/ec2_setup.sh)"
+      "Bash(chmod +x /mnt/d/aws-terraform-drift-reconciler/scripts/ec2_setup.sh)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(echo \"grep exit: $?\")",
+      "Bash(echo \"tsc Approvals check exit: $?\")",
+      "Bash(echo \"grep exit: $? \\(1 = no Approvals errors\\)\")",
+      "Bash(echo \"grep exit: $? \\(1 = no Environments errors\\)\")"
     ]
   }
 }

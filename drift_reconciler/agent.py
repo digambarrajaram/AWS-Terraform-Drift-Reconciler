@@ -1341,6 +1341,260 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
     print("\nRollback PR(s) created. Review and merge to revert the original fix.")
 
 
+def _revert_on_gate_failure(
+    tf_dir: str, pr_number: int, scope: str, reason: str, env_dict: dict,
+) -> dict:
+    """Attempt to revert the merged drift-fix commit after a gate failure.
+
+    Mirrors drift-reconciler.yml's recovery step: git config → revert -m 1
+    → push.  The merge_commit_sha is read from the pending_applies row.
+
+    Returns ``{"status": ..., "result": {...}}`` — never raises: a failed
+    revert gets the distinct 'manual_revert_required' status instead of
+    collapsing into the generic 'failed' bucket."""
+    import requests as _requests
+
+    def _outcome(status: str, result: dict) -> dict:
+        return {"status": status, "result": result}
+
+    # Fetch merge_commit_sha from the approved pending_applies row.
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    sha = ""
+    if url and key:
+        try:
+            resp = _requests.get(
+                f"{url}/rest/v1/pending_applies"
+                f"?select=merge_commit_sha"
+                f"&pr_number=eq.{pr_number}&scope=eq.{scope}&status=eq.approved&limit=1",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                sha = (resp.json()[0].get("merge_commit_sha") or "").strip()
+        except _requests.RequestException as exc:
+            return _outcome("manual_revert_required", {
+                "reason": reason,
+                "reverted": False,
+                "error": f"could not fetch merge_commit_sha: {exc}",
+                "message": "Automatic revert failed — could not read the merge commit SHA. Manual revert required.",
+            })
+
+    if not sha:
+        return _outcome("manual_revert_required", {
+            "reason": reason,
+            "reverted": False,
+            "error": "pending_applies row has no merge_commit_sha",
+            "message": "Automatic revert failed — no merge commit SHA recorded. Manual revert required.",
+        })
+
+    branch = (env_dict.get("repo_branch") or "main").strip() or "main"
+
+    def _git(args: list[str], timeout: int = 120) -> None:
+        # Git config + revert + push must run inside tf_dir so they hit
+        # the clone's repo (origin URL carries the token when git_auth_type='token').
+        subprocess.run(
+            ["git"] + args,
+            cwd=tf_dir,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
+            check=True,
+        )
+
+    try:
+        print(f"[apply] Reverting merge commit {sha} on {branch} …")
+        _git(["config", "user.name", "drift-reconciler"])
+        _git(["config", "user.email", "drift-reconciler@noreply"])
+        _git(["revert", "--no-edit", "-m", "1", sha])
+        _git(["push", "origin", branch], timeout=300)
+        print("[apply] ✓ Revert pushed — code and live state are consistent again.")
+        return _outcome("reverted_gate_blocked", {
+            "reason": reason,
+            "reverted": True,
+            "commit": sha,
+        })
+    except subprocess.CalledProcessError as exc:
+        print(f"[apply] ✗ Automatic revert failed: {exc.stderr[:300] if hasattr(exc, 'stderr') else exc}")
+        return _outcome("manual_revert_required", {
+            "reason": reason,
+            "reverted": False,
+            "error": f"{exc}",
+            "message": (
+                f"Automatic revert failed — this environment's git credentials may "
+                f"be read-only. Manual revert of commit {sha} required."
+            ),
+        })
+    except subprocess.TimeoutExpired as exc:
+        print(f"[apply] ✗ Automatic revert timed out: {exc}")
+        return _outcome("manual_revert_required", {
+            "reason": reason,
+            "reverted": False,
+            "error": f"timed out: {exc}",
+            "message": f"Automatic revert timed out. Manual revert of commit {sha} required.",
+        })
+
+
+def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = None) -> None:
+    """Apply an approved drift fix for *pr_number* in *scope*.
+
+    Mirrors the GitHub Actions ACCEPT path (terraform init + apply) but
+    runs on the server: builds an AWS session via ``get_aws_session``
+    (role/keys/profile per the environment row) and injects the
+    credentials into the terraform subprocess env.
+
+    Writes the pending_applies row to 'applied' on success and 'failed'
+    on error — the write happens in BOTH branches, so an exception can't
+    leave the row stuck on 'approved' forever."""
+    import requests as _requests
+    from drift_reconciler.environment_credentials import get_aws_session
+    from drift_reconciler.pending_applies import update_pending_apply
+    from datetime import datetime as _dt, timezone as _tz
+
+    def _finish(status: str, result: dict) -> None:
+        update_pending_apply(
+            pr_number,
+            scope,
+            status=status,
+            applied_at=_dt.now(_tz.utc).isoformat(),
+            result=result,
+        )
+
+    try:
+        # Fetch the environment row for the AWS session (same pattern as
+        # unmanaged_scan_node).
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        env_dict = {}
+        if url and key:
+            resp = _requests.get(
+                f"{url}/rest/v1/environments?select=*&slug=eq.{scope}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                env_dict = resp.json()[0]
+        if not env_dict:
+            raise RuntimeError(f"No environment found for slug '{scope}' — check the environments table.")
+
+        session = get_aws_session(env_dict)
+        creds = session.get_credentials()
+        if creds is None:
+            raise RuntimeError(f"get_aws_session returned no credentials for '{scope}'.")
+
+        sub_env = os.environ.copy()
+        sub_env["AWS_ACCESS_KEY_ID"] = creds.access_key
+        sub_env["AWS_SECRET_ACCESS_KEY"] = creds.secret_key
+        if creds.token:
+            sub_env["AWS_SESSION_TOKEN"] = creds.token
+        sub_env["AWS_REGION"] = env_dict.get("region") or sub_env.get("AWS_REGION", "us-east-1")
+        # Clear any profile hint so terraform uses the injected keys,
+        # not a stale named profile on the server.
+        sub_env.pop("AWS_PROFILE", None)
+
+        print(f"\n--- Apply approved fix for PR #{pr_number} ({scope}) ---")
+        print(f"[apply] terraform init in {tf_dir} …")
+        init = subprocess.run(
+            ["terraform", "init", "-no-color", "-input=false"],
+            cwd=tf_dir, env=sub_env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=300,
+        )
+        if init.returncode != 0:
+            raise RuntimeError(f"terraform init failed:\n{_strip_ansi(init.stderr)[:800]}")
+
+        print(f"[apply] terraform plan …")
+        plan = subprocess.run(
+            ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
+            cwd=tf_dir, env=sub_env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=600,
+        )
+        if plan.returncode != 0:
+            raise RuntimeError(f"terraform plan failed:\n{_strip_ansi(plan.stderr)[:800]}")
+
+        # ── Safety gates (mirror drift-reconciler.yml ACCEPT path) ────
+        gate_failure: str | None = None
+
+        # Gate A: pre-apply drift gate.  Excludes this PR's own rows (they
+        # stay 'open' until the post-apply resolve step — including them
+        # would fail every apply).
+        from drift_reconciler.drift_history import (
+            has_unresolved_drift_except, load_baselines,
+        )
+        if has_unresolved_drift_except(scope, pr_number):
+            gate_failure = "pre_apply_check: unresolved drift exists in scope"
+
+        # Gate B: rollback freshness gate — compare live values from the
+        # plan JSON against the stored baseline (changes_jsonb) for this
+        # PR.  Shape confirmed from rollback_check.py's comparison loop
+        # and drift_history.load_baselines().
+        if not gate_failure:
+            baselines = load_baselines(pr_number, scope)
+            if baselines:
+                from rollback_check import _extract_field_values
+                show_result = subprocess.run(
+                    ["terraform", "show", "-no-color", "-json", "tfplan"],
+                    cwd=tf_dir, env=sub_env,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=300,
+                )
+                if show_result.returncode != 0:
+                    raise RuntimeError(f"terraform show failed:\n{_strip_ansi(show_result.stderr)[:800]}")
+                try:
+                    plan_json = json.loads(show_result.stdout)
+                except json.JSONDecodeError:
+                    raise RuntimeError("terraform show -json produced unparseable output")
+
+                for baseline in baselines:
+                    resource_id = baseline["resource_id"]
+                    changes = baseline.get("changes") or {}
+                    fields = list(changes.keys())
+                    if not fields:
+                        continue
+                    outcome, live_values = _extract_field_values(plan_json, resource_id, fields)
+                    if outcome in ("not_found", "no_diff"):
+                        continue  # same treatment as rollback_check.py
+                    for field in fields:
+                        expected = str(changes[field].get("before", ""))
+                        actual = live_values.get(field, "<missing>")
+                        if actual != expected:
+                            gate_failure = (
+                                f"rollback_check: stale field {resource_id}.{field} "
+                                f"(expected={expected[:60]} actual={actual[:60]})"
+                            )
+                            break
+                    if gate_failure:
+                        break
+
+        if gate_failure:
+            print(f"[apply] ⛔ Gate failed: {gate_failure}")
+            self_status = _revert_on_gate_failure(
+                tf_dir, pr_number, scope, gate_failure, env_dict,
+            )
+            _finish(self_status["status"], self_status["result"])
+            return
+
+        print(f"[apply] terraform apply -auto-approve …")
+        apply_result = subprocess.run(
+            ["terraform", "apply", "-no-color", "-auto-approve", "-input=false", "-lock-timeout=30s", "tfplan"],
+            cwd=tf_dir, env=sub_env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=900,
+        )
+        if apply_result.returncode != 0:
+            raise RuntimeError(f"terraform apply failed:\n{_strip_ansi(apply_result.stderr)[:800]}")
+
+        tail = _strip_ansi(apply_result.stdout)[-2000:]
+        print(f"[apply] ✓ Applied PR #{pr_number} for {scope}")
+        _finish("applied", {"output": tail})
+    except subprocess.TimeoutExpired as exc:
+        print(f"[apply] timed out: {exc}")
+        _finish("failed", {"error": f"timed out: {exc}"})
+    except Exception as exc:
+        print(f"[apply] failed: {exc}")
+        _finish("failed", {"error": humanize_terraform_error(str(exc))})
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Terraform drift detection and reconciliation agent."
@@ -1389,6 +1643,12 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Dry-run: show what a rollback would change without patching files or creating a PR",
+    )
+    parser.add_argument(
+        "--apply-pr",
+        type=int,
+        default=None,
+        help="PR number of an approved drift fix to terraform apply (server-side apply trigger)",
     )
     parser.add_argument(
         "--trends",
@@ -1577,6 +1837,12 @@ if __name__ == "__main__":
             except Exception:
                 pass
             sys.exit(1)
+        sys.exit(0)
+
+    if args.apply_pr:
+        # Server-side apply of an approved drift fix — _run_apply writes
+        # the pending_applies row itself in both success and error paths.
+        _run_apply(tf_dir, args.apply_pr, args.account_label, run_id=args.run_id)
         sys.exit(0)
 
     try:

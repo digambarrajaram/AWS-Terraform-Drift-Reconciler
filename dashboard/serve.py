@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import hmac
 import http.server
 import json
@@ -499,6 +500,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
         elif path == "/api/environments":
             self._serve_environments()
+        elif path == "/api/pending-applies":
+            self._serve_pending_applies()
         elif path == "/api/notification-settings":
             self._serve_notification_settings()
         elif path == "/api/github-settings":
@@ -515,12 +518,20 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
 
+        # GitHub webhook — authenticated by X-Hub-Signature-256, not the
+        # dashboard API token.  Must run BEFORE the _check_auth() gate.
+        if path == "/api/webhooks/github":
+            self._handle_github_webhook()
+            return
+
         if not self._check_auth():
             self._unauthorized()
             return
 
         if path.startswith("/api/scan/") and path.endswith("/cancel"):
             self._cancel_run(path, "scan_runs")
+        elif path.startswith("/api/pending-applies/") and path.endswith("/decision"):
+            self._handle_pending_apply_decision(path)
         elif path.startswith("/api/rollback/") and path.endswith("/cancel"):
             self._cancel_run(path, "rollback_runs")
         elif path == "/api/scan/trivy-only":
@@ -1568,6 +1579,290 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    # ── Pending applies (dashboard approval gate) ────────────────────
+    def _serve_pending_applies(self):
+        """GET /api/pending-applies?status=awaiting_approval&scope=scope-a
+
+        Lists pending_applies rows.  *status* defaults to
+        ``awaiting_approval``; pass ``status=all`` for every row.
+        Optional *scope* filter."""
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        status = params.get("status", ["awaiting_approval"])[0]
+        scope = params.get("scope", [None])[0]
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+
+        filters = []
+        if status and status != "all":
+            filters.append(f"status=eq.{status}")
+        if scope:
+            filters.append(f"scope=eq.{scope}")
+        query = f"{url}/rest/v1/pending_applies"
+        if filters:
+            query += "?" + "&".join(filters)
+        query += ("&" if filters else "?") + "order=created_at.desc"
+
+        try:
+            resp = requests.get(query, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                self._json_error(502, f"Supabase query failed ({resp.status_code})")
+                return
+            rows = resp.json() if resp.text else []
+        except requests.RequestException as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+
+        data = json.dumps(rows).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_pending_apply_decision(self, path):
+        """POST /api/pending-applies/{id}/decision
+
+        Body: ``{"decision": "approved"|"rejected", "approved_by": "..."}``.
+        Only valid while the row is still ``awaiting_approval`` — a second
+        decision on the same row returns 409.  Flips the row's state and
+        records who decided; triggers nothing else."""
+        pending_id = path.split("/")[3]  # /api/pending-applies/{id}/decision
+
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json_error(400, "Invalid or empty JSON body")
+            return
+
+        decision = body.get("decision", "")
+        if decision not in ("approved", "rejected"):
+            self._json_error(400, "decision must be 'approved' or 'rejected'.")
+            return
+        approved_by = (body.get("approved_by") or "").strip()
+        if not approved_by:
+            self._json_error(400, "approved_by is required.")
+            return
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json", "Prefer": "return=representation"}
+        table_url = f"{url}/rest/v1/pending_applies"
+
+        # PATCH with a status=eq.awaiting_approval filter — no rows matched
+        # means the row was already decided (or doesn't exist): 409.
+        payload = {
+            "status": decision,
+            "approved_by": approved_by,
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            resp = requests.patch(
+                f"{table_url}?id=eq.{pending_id}&status=eq.awaiting_approval",
+                headers=headers, json=payload, timeout=10,
+            )
+            patched = resp.json() if resp.text and resp.status_code == 200 else []
+            if not patched:
+                self._json_error(409, "No awaiting_approval row matched — already decided or not found.")
+                return
+        except requests.RequestException as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+
+        # ── Approved → spawn the apply job asynchronously ─────────────
+        # Reuses the same fire-and-forget subprocess + log-capture pattern
+        # as scan_runs/rollback_runs.  agent.py's --apply-pr path builds
+        # its own AWS session from the environment row and writes the
+        # terminal 'applied'/'failed' status back to this row itself.
+        if decision == "approved":
+            row = patched[0] if isinstance(patched, list) else patched
+            pr_number = row.get("pr_number")
+            scope = row.get("scope")
+            if pr_number and scope:
+                # Reuse the pending_applies row id as the log run_id so
+                # the log viewer can be pointed at it later if desired.
+                apply_run_id = row.get("id") or f"apply-{pr_number}-{int(datetime.now().timestamp())}"
+                try:
+                    tf_dir = _tf_dir_for(scope)
+                except RuntimeError as exc:
+                    print(f"  ⚠ Apply spawn aborted for {scope}: {exc}", file=sys.stderr)
+                    # Row is already 'approved' at this point — the operator
+                    # must fix the environment's repo config and then reset
+                    # the row back to 'awaiting_approval' (or re-trigger via
+                    # a manual DB edit) to retry.  Surface the error clearly.
+                    data = json.dumps({"ok": True, "apply_started": False,
+                                       "error": str(exc)}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+
+                cmd = [
+                    _sys.executable,
+                    str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
+                    "--tf-dir", tf_dir,
+                    "--account-label", scope,
+                    "--apply-pr", str(pr_number),
+                ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+                _configure_aws_env(env, scope)
+                _spawn_with_capture(cmd, apply_run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+                print(f"  [apply] Spawned apply for PR #{pr_number} ({scope})", file=sys.stderr)
+
+        data = json.dumps({"ok": True}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    # ── GitHub webhook receiver ──────────────────────────────────────
+    def _handle_github_webhook(self):
+        """POST /api/webhooks/github
+
+        Receives pull_request events from GitHub.  A PR that was merged
+        (action=closed, merged=true) and matches the 'Drift fix' title
+        convention inserts a pending_applies row for dashboard-side
+        approval.  Everything else is a silent 204 no-op.
+
+        Authenticated by X-Hub-Signature-256 (HMAC-SHA256 over the raw
+        body with the GitHub token as the secret) — same secret used for
+        the API token, via env GITHUB_TOKEN or app_settings.
+        """
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+
+        # ── Verify signature ─────────────────────────────────────────
+        sig_header = self.headers.get("X-Hub-Signature-256", "")
+        if not sig_header.startswith("sha256="):
+            self._json_error(401, "Unauthorized")
+            return
+
+        # Resolve the secret the same way the PR-creation path does:
+        # env GITHUB_TOKEN first, app_settings row as fallback.
+        secret = os.environ.get("GITHUB_TOKEN", "").strip()
+        if not secret:
+            try:
+                from drift_reconciler.github_settings import get_github_token
+                secret = (get_github_token() or "").strip()
+            except Exception:
+                secret = ""
+        if not secret:
+            print("  [webhook] no GitHub secret configured — rejecting", file=sys.stderr)
+            self._json_error(401, "Unauthorized")
+            return
+
+        expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        received = sig_header[len("sha256="):].strip()
+        if not hmac.compare_digest(expected, received):
+            self._json_error(401, "Unauthorized")
+            return
+
+        # ── Parse payload ────────────────────────────────────────────
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json_error(400, "Invalid JSON body")
+            return
+
+        if payload.get("action") != "closed":
+            self._send_no_content()
+            return
+
+        pr = payload.get("pull_request") or {}
+        if not pr.get("merged"):
+            self._send_no_content()
+            return
+
+        title = pr.get("title", "")
+        # Same convention drift-reconciler.yml gates on.
+        if "Drift fix" not in title:
+            self._send_no_content()
+            return
+
+        scope_match = re.search(r"\[(scope-[a-z0-9][a-z0-9-]*)\]", title)
+        if not scope_match:
+            self._send_no_content()
+            return
+        scope = scope_match.group(1)
+        if scope not in _get_valid_scopes():
+            self._send_no_content()
+            return
+
+        pr_number = pr.get("number")
+        merged_at = pr.get("merged_at")
+        merge_commit_sha = pr.get("merge_commit_sha") or ""
+        if not pr_number:
+            self._send_no_content()
+            return
+
+        # ── Insert pending_applies row ────────────────────────────────
+        # Skip if an awaiting_approval row already exists for this PR
+        # (GitHub redelivers webhooks on failure).
+        url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url_base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json", "Prefer": "return=representation"}
+        try:
+            existing = requests.get(
+                f"{url_base}/rest/v1/pending_applies"
+                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&status=eq.awaiting_approval&limit=1",
+                headers=headers, timeout=10,
+            )
+            if existing.status_code == 200 and existing.json():
+                self._send_no_content()
+                return
+
+            resp = requests.post(
+                f"{url_base}/rest/v1/pending_applies",
+                headers=headers,
+                json={
+                    "pr_number": pr_number,
+                    "scope": scope,
+                    "status": "awaiting_approval",
+                    "merged_at": merged_at,
+                    "merge_commit_sha": merge_commit_sha or None,
+                },
+                timeout=10,
+            )
+            if resp.status_code not in (200, 201):
+                print(f"  [webhook] pending_applies insert failed ({resp.status_code}): "
+                      f"{resp.text[:200]}", file=sys.stderr)
+                self._json_error(502, "Failed to record pending apply")
+                return
+        except requests.RequestException as exc:
+            print(f"  [webhook] Supabase unreachable: {exc}", file=sys.stderr)
+            self._json_error(502, "Supabase unreachable")
+            return
+
+        data = json.dumps({"ok": True}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_no_content(self):
+        self.send_response(204)
+        self.end_headers()
 
     # ── Live log streaming ──────────────────────────────────────────
     def _serve_run_logs(self):

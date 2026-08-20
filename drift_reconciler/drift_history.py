@@ -16,7 +16,10 @@ from typing import Any
 
 import requests
 
-from env_loader import load_env
+try:
+    from .env_loader import load_env
+except ImportError:
+    from env_loader import load_env
 load_env()
 
 _URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -131,16 +134,40 @@ def append_entry(
         "pr_number": pr_number,
         "pr_type": pr_type,
         "status": status,
-        "fields_changed": json.dumps(fields_changed or []),
+        # jsonb columns take dicts/lists natively — passing json.dumps'd
+        # text would store a jsonb *string*, breaking Object.entries() and
+        # attribute access in every consumer (see
+        # migrations/backfill_changes_jsonb_parsed.sql for the repair).
+        "fields_changed": fields_changed or [],
         "drift_summary": drift_summary,
         "unmanaged": unmanaged,
-        "changes_jsonb": json.dumps(changes_jsonb) if changes_jsonb else None,
+        "changes_jsonb": changes_jsonb or None,
         "file_path": file_path,
-        "cost_impact": json.dumps(cost_impact) if cost_impact else None,
+        "cost_impact": cost_impact or None,
         "trivy_passed": trivy_passed,
+        # trivy_summary is a plain-text blob — a jsonb string is its shape.
         "trivy_summary": json.dumps(trivy_summary) if trivy_summary else None,
         "rolled_back_from_pr": rolled_back_from_pr,
     })
+
+
+def mark_reverted(pr_number: int, account: str, status: str = "reverted",
+                  resolution: str = "PR rejected — AWS reverted to match original code") -> None:
+    """Mark the open entry for *pr_number* as *status* (reject path: PR
+    never merged; 'reverted' only when AWS was actually reverted to match
+    pre-drift code, 'manual_revert_required' when a gate blocked it)."""
+    ok = _patch(
+        {"pr_number": pr_number, "status": "open"},
+        {
+            "status": status,
+            "resolution": resolution,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    if ok:
+        print(f"  [history] PR #{pr_number} marked {status}")
+    else:
+        print(f"  [history] Failed to mark PR #{pr_number} {status}")
 
 
 def resolve_entry(pr_number: int, account: str, resolution: str = "") -> None:
@@ -247,7 +274,7 @@ def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -
     if not pr_number:
         return row  # no PR number — can't verify, trust local status
 
-    if _pr_is_actually_open(pr_number):
+    if _pr_is_actually_open(pr_number, account):
         return row
 
     # PR is closed on GitHub — fix the stale local status so we don't
@@ -261,10 +288,14 @@ def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -
     return None
 
 
-def _pr_is_actually_open(pr_number: int) -> bool:
-    """Return True if GitHub PR *pr_number* is still open (not closed/merged)."""
-    repo = os.environ.get("GITHUB_REPO", "").strip()
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
+def _pr_is_actually_open(pr_number: int, account_label: str | None = None) -> bool:
+    """Return True if GitHub PR *pr_number* is still open (not closed/merged).
+
+    Resolves repo + token per-environment when *account_label* is given
+    (environment row repo_url + environment_secrets.github_token),
+    falling back to the global GITHUB_REPO/GITHUB_TOKEN env vars."""
+    from drift_reconciler.github_client_utils import resolve_repo_target
+    repo, token, _branch = resolve_repo_target(account_label)
     if not repo or not token:
         return True  # can't verify — assume open (safe default)
 
@@ -355,9 +386,10 @@ if __name__ == "__main__":
         try:
             pr_number = int(sys.argv[2])
         except (ValueError, TypeError):
-            # workflow_dispatch — no PR number.  Log a standalone entry.
-            account = sys.argv[3] if len(sys.argv) >= 4 else sys.argv[2]
-            resolution = sys.argv[4] if len(sys.argv) >= 5 else "Manual workflow run"
+            # workflow_dispatch — no PR number.  The workflow's empty PR arg
+            # collapses, so argv here is [resolve, scope, resolution].
+            account = sys.argv[2]
+            resolution = sys.argv[3] if len(sys.argv) >= 4 else "Manual workflow run"
             print(f"  [history] No PR number — logging manual entry for {account}")
             log_manual_entry(account, resolution)
             sys.exit(0)

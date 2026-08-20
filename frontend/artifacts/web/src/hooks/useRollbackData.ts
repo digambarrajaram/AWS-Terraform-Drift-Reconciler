@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useAppConfig } from '@/api/config';
 import { getSupabaseClient } from '@/api/supabaseClient';
+import { normalizeDriftEvent } from '@/lib/drift';
 import type { DriftEvent } from '@/types';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -56,7 +57,9 @@ export function useEligiblePRs(scope: string | null) {
         .not('changes_jsonb', 'is', null)
         .order('created_at', { ascending: false });
       if (error) throw error;
-      return (data ?? []).filter((e: DriftEvent) => e.pr_number != null) as DriftEvent[];
+      return (data ?? [])
+        .filter((e: DriftEvent) => e.pr_number != null)
+        .map(normalizeDriftEvent) as DriftEvent[];
     },
   });
 }

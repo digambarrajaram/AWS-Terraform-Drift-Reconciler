@@ -349,7 +349,15 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope:
             tail = list(buf)[-15:] if buf else []
         error_summary = "\n".join(tail)[:2000]
 
-        for table, result_col in (("scan_runs", "result_summary"), ("rollback_runs", "result")):
+        # pending_applies is here too: apply/revert jobs use the row id as
+        # their run_id, and a hard-killed job (agent.py exception paths all
+        # _finish(), but e.g. SIGKILL doesn't) must still become 'failed' so
+        # the log poller stops.
+        for table, result_col in (
+            ("scan_runs", "result_summary"),
+            ("rollback_runs", "result"),
+            ("pending_applies", "result"),
+        ):
             try:
                 resp = requests.get(
                     f"{url_base}/rest/v1/{table}?select=status&id=eq.{run_id}",
@@ -358,7 +366,10 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope:
                 if resp.status_code != 200 or not resp.json():
                     continue
                 row = resp.json()[0]
-                if row["status"] in ("complete", "failed", "cancelled"):
+                if row["status"] in (
+                    "complete", "failed", "cancelled",
+                    "applied", "reverted_gate_blocked", "manual_revert_required",
+                ):
                     return
                 requests.patch(
                     f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
@@ -497,11 +508,17 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._serve_injected()
         elif path == "/favicon.ico":
             self.send_response(204)
+        elif path == "/api/config":
+            self._serve_config()
             self.end_headers()
         elif path == "/api/environments":
             self._serve_environments()
         elif path == "/api/pending-applies":
             self._serve_pending_applies()
+        elif path.startswith("/api/pending-applies/") and path.endswith("/pr-details"):
+            self._serve_pr_details()
+        elif path.startswith("/api/pending-applies/"):
+            self._serve_pending_apply_single()
         elif path == "/api/notification-settings":
             self._serve_notification_settings()
         elif path == "/api/github-settings":
@@ -509,6 +526,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith("/api/exceptions"):
             self._serve_api_exceptions()
         elif path.startswith("/api/scan/") and path.endswith("/logs"):
+            self._serve_run_logs()
+        elif path.startswith("/api/pending-applies/") and path.endswith("/logs"):
             self._serve_run_logs()
         elif path.endswith((".js", ".css", ".png")):
             self._serve_static(path)
@@ -532,6 +551,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._cancel_run(path, "scan_runs")
         elif path.startswith("/api/pending-applies/") and path.endswith("/decision"):
             self._handle_pending_apply_decision(path)
+        elif path.startswith("/api/pending-applies/") and path.endswith("/cancel"):
+            self._cancel_run(path, "pending_applies")
         elif path.startswith("/api/rollback/") and path.endswith("/cancel"):
             self._cancel_run(path, "rollback_runs")
         elif path == "/api/scan/trivy-only":
@@ -815,7 +836,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def _upsert_env_secret(self, env_id, updates):
         """PATCH or POST to environment_secrets for *env_id*.
-        *updates* is a dict of column→value pairs (e.g. ``{"github_token": "..."}``)."""
+        *updates* is a dict of column→value pairs (e.g. ``{"github_token": "..."}``).
+
+        Raises RuntimeError on ANY failed write (non-200 PATCH, failed
+        INSERT, or failed value-PATCH) — a silent half-write leaves a row
+        with NULL keys, which later breaks auth_type='keys' with no trace."""
         secrets_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=representation"}
@@ -827,16 +852,26 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         # row was updated (HTTP 200).  Both are HTTP 200 — the body
         # distinguishes them.
         resp = requests.patch(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, json=payload, timeout=10)
-        patched_rows = resp.json() if resp.text and resp.status_code == 200 else None
+        if resp.status_code != 200:
+            raise RuntimeError(f"environment_secrets PATCH failed ({resp.status_code}): {resp.text[:200]}")
+        patched_rows = resp.json() if resp.text else None
         if not patched_rows:
             # No row yet — INSERT, then PATCH to set the values.
             post_resp = requests.post(secrets_url, headers=headers, json={"environment_id": env_id}, timeout=10)
-            if post_resp.status_code in (200, 201):
-                requests.patch(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, json=payload, timeout=10)
-            else:
-                # INSERT failed — try PATCH with the full payload just in case.
-                payload["environment_id"] = env_id
-                requests.post(secrets_url, headers=headers, json=payload, timeout=10)
+            if post_resp.status_code not in (200, 201):
+                raise RuntimeError(f"environment_secrets INSERT failed ({post_resp.status_code}): {post_resp.text[:200]}")
+            patch_resp = requests.patch(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, json=payload, timeout=10)
+            if patch_resp.status_code != 200:
+                # Clean up the just-inserted empty row — leaving it behind
+                # is exactly the NULL-keys state that breaks keys auth.
+                try:
+                    requests.delete(f"{secrets_url}?environment_id=eq.{env_id}", headers=headers, timeout=10)
+                except requests.RequestException:
+                    pass
+                raise RuntimeError(
+                    f"environment_secrets value PATCH after INSERT failed "
+                    f"({patch_resp.status_code}): {patch_resp.text[:200]}"
+                )
 
     def _serve_environments(self):
         table_url, headers = self._env_table()
@@ -858,7 +893,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     s_headers = {"apikey": s_key, "Authorization": f"Bearer {s_key}"}
                     try:
                         s_resp = requests.get(
-                            f"{s_url}?select=environment_id,github_token,aws_access_key_id,aws_secret_access_key&environment_id=in.({ids})",
+                            f"{s_url}?select=environment_id,github_token,aws_access_key_id,aws_secret_access_key,webhook_secret&environment_id=in.({ids})",
                             headers=s_headers, timeout=10,
                         )
                         if s_resp.status_code == 200:
@@ -872,12 +907,15 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     tok = sec.get("github_token", "") if isinstance(sec, dict) else ""
                     access_key = sec.get("aws_access_key_id", "") if isinstance(sec, dict) else ""
                     secret_key = sec.get("aws_secret_access_key", "") if isinstance(sec, dict) else ""
+                    webhook_sec = sec.get("webhook_secret", "") if isinstance(sec, dict) else ""
                     e["github_token_configured"] = bool(tok)
                     e["github_token_masked"] = _mask(tok)
                     e["aws_access_key_configured"] = bool(access_key)
                     e["aws_access_key_masked"] = _mask(access_key)
                     e["aws_secret_key_configured"] = bool(secret_key)
                     e["aws_secret_key_masked"] = _mask(secret_key)
+                    e["webhook_secret_configured"] = bool(webhook_sec)
+                    e["webhook_secret_masked"] = _mask(webhook_sec)
 
                 data = json.dumps(envs).encode("utf-8")
                 self.send_response(200)
@@ -942,15 +980,26 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 env_id = new_row.get("id")
                 # Write secrets to environment_secrets if provided.
                 secrets_to_write = {}
-                for k in ("_github_token", "_aws_access_key_id", "_aws_secret_access_key"):
+                for k in ("_github_token", "_aws_access_key_id", "_aws_secret_access_key", "_webhook_secret"):
                     val = (body.get(k) or "").strip()
                     if val:
                         secrets_to_write[k.lstrip("_")] = val
                 if secrets_to_write and env_id:
                     try:
                         self._upsert_env_secret(env_id, secrets_to_write)
-                    except Exception:
-                        pass  # non-fatal
+                    except Exception as exc:
+                        import traceback
+                        print(
+                            f"  ✗ environment_secrets write FAILED for env_id={env_id} "
+                            f"(slug={row.get('slug')}, keys={sorted(secrets_to_write)}) — "
+                            f"the environment row exists but its secrets were NOT saved: {exc}",
+                            file=sys.stderr,
+                        )
+                        traceback.print_exc()
+                        self._json_error(502,
+                            f"Environment created, but secret write failed for "
+                            f"{', '.join(sorted(secrets_to_write))}: {exc}")
+                        return
                 data = json.dumps(new_row).encode("utf-8")
                 self.send_response(201)
                 self.send_header("Content-Type", "application/json")
@@ -993,6 +1042,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         github_token_val = None
         aws_access_key_val = None
         aws_secret_key_val = None
+        webhook_secret_val = None
         for k, v in body.items():
             if k == "_github_token":
                 github_token_val = (str(v).strip() or None)
@@ -1000,9 +1050,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 aws_access_key_val = (str(v).strip() or None)
             elif k == "_aws_secret_access_key":
                 aws_secret_key_val = (str(v).strip() or None)
+            elif k == "_webhook_secret":
+                webhook_secret_val = (str(v).strip() or None)
             elif k in allowed:
                 updates[k] = v
-        if not updates and not github_token_val and not aws_access_key_val and not aws_secret_key_val:
+        if not updates and not github_token_val and not aws_access_key_val and not aws_secret_key_val and not webhook_secret_val:
             self._json_error(400, "No valid fields to update.")
             return
 
@@ -1038,14 +1090,25 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             resp = requests.patch(f"{table_url}?id=eq.{env_id}", headers=headers, json=updates, timeout=10)
             if resp.status_code in (200, 204):
                 secrets_to_write = {}
-                for k, var in [("github_token", github_token_val), ("aws_access_key_id", aws_access_key_val), ("aws_secret_access_key", aws_secret_key_val)]:
+                for k, var in [("github_token", github_token_val), ("aws_access_key_id", aws_access_key_val), ("aws_secret_access_key", aws_secret_key_val), ("webhook_secret", webhook_secret_val)]:
                     if var:
                         secrets_to_write[k] = var
                 if secrets_to_write:
                     try:
                         self._upsert_env_secret(env_id, secrets_to_write)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        import traceback
+                        print(
+                            f"  ✗ environment_secrets write FAILED for env_id={env_id} "
+                            f"(keys={sorted(secrets_to_write)}) — environment updated, "
+                            f"secrets NOT saved: {exc}",
+                            file=sys.stderr,
+                        )
+                        traceback.print_exc()
+                        self._json_error(502,
+                            f"Environment updated, but secret write failed for "
+                            f"{', '.join(sorted(secrets_to_write))}: {exc}")
+                        return
                 if resp.status_code == 200 and resp.text:
                     data = json.dumps(resp.json()).encode("utf-8")
                 else:
@@ -1626,6 +1689,115 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_pending_apply_single(self):
+        """GET /api/pending-applies/{id} — one row, for live status polling."""
+        pending_id = self.path.split("/")[3]
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/pending_applies?select=*&id=eq.{pending_id}&limit=1",
+                headers=headers, timeout=10,
+            )
+            rows = resp.json() if resp.text and resp.status_code == 200 else []
+            if not rows:
+                self._json_error(404, "Pending apply row not found.")
+                return
+            data = json.dumps(rows[0]).encode("utf-8")
+        except requests.RequestException as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_pr_details(self):
+        """GET /api/pending-applies/{id}/pr-details
+
+        Fetches the GitHub PR (title, body, commits, files, checks,
+        mergeable/conflict state) for the pending row's PR via the
+        environment's repo + token — the same info a human reviewer
+        sees on GitHub, so Approve/Reject can be decided in-dashboard."""
+        pending_id = self.path.split("/")[3]
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/pending_applies"
+                f"?select=pr_number,scope&id=eq.{pending_id}&limit=1",
+                headers=headers, timeout=10,
+            )
+            rows = resp.json() if resp.text and resp.status_code == 200 else []
+            if not rows:
+                self._json_error(404, "Pending apply row not found.")
+                return
+            pr_number = rows[0].get("pr_number")
+            scope = rows[0].get("scope")
+        except requests.RequestException as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+
+        try:
+            from drift_reconciler.github_client_utils import resolve_repo_target
+            from github import Github, Auth
+            repo_slug, token, _branch = resolve_repo_target(scope)
+            if not repo_slug or not token:
+                self._json_error(502, f"No GitHub client resolved for scope '{scope}'.")
+                return
+            g = Github(auth=Auth.Token(token))
+            pr = g.get_repo(repo_slug).get_pull(pr_number)
+
+            commits = [{"sha": c.sha[:7], "message": (c.commit.message or "").split("\n")[0]}
+                       for c in pr.get_commits()]
+            files = [{"name": f.filename, "additions": f.additions,
+                      "deletions": f.deletions, "status": f.status}
+                     for f in pr.get_files()]
+            checks = []
+            try:
+                head_commit = pr.get_commit(pr.head.sha)
+                for run in head_commit.get_check_runs():
+                    checks.append({"name": run.name, "conclusion": run.conclusion or "pending"})
+            except Exception:
+                checks = []
+
+            payload = {
+                "number": pr.number,
+                "title": pr.title,
+                "body": pr.body or "",
+                "state": pr.state,
+                "merged": pr.merged,
+                "mergeable": pr.mergeable,
+                "mergeable_state": pr.mergeable_state,
+                "additions": pr.additions,
+                "deletions": pr.deletions,
+                "changed_files": pr.changed_files,
+                "commits": commits,
+                "files": files,
+                "checks": checks,
+                "html_url": pr.html_url,
+            }
+        except Exception as exc:
+            self._json_error(502, f"Failed to fetch PR details: {exc}")
+            return
+
+        data = json.dumps(payload, default=str).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _handle_pending_apply_decision(self, path):
         """POST /api/pending-applies/{id}/decision
 
@@ -1661,8 +1833,10 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                    "Content-Type": "application/json", "Prefer": "return=representation"}
         table_url = f"{url}/rest/v1/pending_applies"
 
-        # PATCH with a status=eq.awaiting_approval filter — no rows matched
-        # means the row was already decided (or doesn't exist): 409.
+        # ── Atomically claim the row first (compare-and-set) ────────────
+        # The conditional UPDATE is the single source of truth for who
+        # decided: a concurrent decision on the same row loses here and
+        # 409s, so the GitHub merge/close below can only ever run once.
         payload = {
             "status": decision,
             "approved_by": approved_by,
@@ -1673,58 +1847,145 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 f"{table_url}?id=eq.{pending_id}&status=eq.awaiting_approval",
                 headers=headers, json=payload, timeout=10,
             )
-            patched = resp.json() if resp.text and resp.status_code == 200 else []
-            if not patched:
+            claimed = resp.json() if resp.text and resp.status_code == 200 else []
+            if not claimed:
                 self._json_error(409, "No awaiting_approval row matched — already decided or not found.")
                 return
         except requests.RequestException as exc:
             self._json_error(502, f"Supabase unreachable: {exc}")
             return
 
-        # ── Approved → spawn the apply job asynchronously ─────────────
-        # Reuses the same fire-and-forget subprocess + log-capture pattern
-        # as scan_runs/rollback_runs.  agent.py's --apply-pr path builds
-        # its own AWS session from the environment row and writes the
-        # terminal 'applied'/'failed' status back to this row itself.
+        row = claimed[0] if isinstance(claimed, list) else claimed
+        pr_number = row.get("pr_number")
+        scope = row.get("scope")
+        if not pr_number or not scope:
+            self._json_error(409, "Pending apply row is missing pr_number or scope.")
+            return
+
+        def _rollback(reason: str) -> None:
+            # GitHub call failed after the row was claimed — restore
+            # awaiting_approval so the decision is retryable.
+            print(f"  ⚠ Rolling back claim for PR #{pr_number} ({scope}): {reason}", file=sys.stderr)
+            try:
+                resp = requests.patch(
+                    f"{table_url}?id=eq.{pending_id}",
+                    headers=headers,
+                    json={"status": "awaiting_approval", "approved_by": None, "approved_at": None},
+                    timeout=10,
+                )
+                if resp.status_code >= 300:
+                    # Rollback failed — the row stays approved/rejected
+                    # with no job behind it.  Loud log; the operator must
+                    # reset the row by hand.
+                    print(f"  ❌ ROLLBACK FAILED ({resp.status_code}): {resp.text[:300]} — "
+                          f"row {pending_id} is stuck in '{decision}'; reset manually", file=sys.stderr)
+            except requests.RequestException as exc:
+                print(f"  ❌ ROLLBACK FAILED: {exc} — row {pending_id} is stuck in "
+                      f"'{decision}'; reset manually", file=sys.stderr)
+
+        # ── Approved → merge the PR via the GitHub API ─────────────────
+        # Row already claimed (status=approved); a merge failure rolls
+        # the status back so the decision is retryable.
         if decision == "approved":
-            row = patched[0] if isinstance(patched, list) else patched
-            pr_number = row.get("pr_number")
-            scope = row.get("scope")
-            if pr_number and scope:
-                # Reuse the pending_applies row id as the log run_id so
-                # the log viewer can be pointed at it later if desired.
-                apply_run_id = row.get("id") or f"apply-{pr_number}-{int(datetime.now().timestamp())}"
+            try:
+                from drift_reconciler.github_integration import merge_pr
+                merge_result = merge_pr(scope, pr_number, commit_message=f"Merge drift fix PR #{pr_number}")
+            except RuntimeError as exc:
+                # Merge refused (conflict, branch protection, bad token, ...)
+                _rollback(f"merge failed: {exc}")
+                self._json_error(409, f"GitHub merge failed: {exc}")
+                return
+
+            if not (merge_result or {}).get("merged"):
+                # merge_pr only raises on API errors; a non-merged result
+                # (e.g. "already merged") must not proceed as approved.
+                _rollback("GitHub did not merge the PR")
+                self._json_error(409, "GitHub did not merge the PR.")
+                return
+
+            # Record merge info on the pending row so the gate-failure
+            # revert path has the merge commit SHA available.
+            merge_sha = (merge_result or {}).get("sha")
+            if merge_sha:
                 try:
-                    tf_dir = _tf_dir_for(scope)
-                except RuntimeError as exc:
-                    print(f"  ⚠ Apply spawn aborted for {scope}: {exc}", file=sys.stderr)
-                    # Row is already 'approved' at this point — the operator
-                    # must fix the environment's repo config and then reset
-                    # the row back to 'awaiting_approval' (or re-trigger via
-                    # a manual DB edit) to retry.  Surface the error clearly.
-                    data = json.dumps({"ok": True, "apply_started": False,
-                                       "error": str(exc)}).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
-                    return
+                    requests.patch(
+                        f"{table_url}?pr_number=eq.{pr_number}&scope=eq.{scope}",
+                        headers=headers,
+                        json={
+                            "merged_at": datetime.now(timezone.utc).isoformat(),
+                            "merge_commit_sha": merge_sha,
+                        },
+                        timeout=10,
+                    )
+                except requests.RequestException as exc:
+                    print(f"  ⚠ pending row merge-info update failed: {exc}", file=sys.stderr)
 
-                cmd = [
-                    _sys.executable,
-                    str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
-                    "--tf-dir", tf_dir,
-                    "--account-label", scope,
-                    "--apply-pr", str(pr_number),
-                ]
-                env = os.environ.copy()
-                env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-                _configure_aws_env(env, scope)
-                _spawn_with_capture(cmd, apply_run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
-                print(f"  [apply] Spawned apply for PR #{pr_number} ({scope})", file=sys.stderr)
+            # NOTE: drift_events resolution is deliberately NOT done here.
+            # agent.py resolves (approve) / marks reverted (reject) only
+            # after the terraform apply itself succeeds, so a failed apply
+            # leaves the events open.  Resolving pre-apply here would show
+            # drift as fixed while AWS still differs from code.
 
-        data = json.dumps({"ok": True}).encode("utf-8")
+        # ── Rejected → close the PR (no merge) ─────────────────────────
+        # close_pr failure is BLOCKING: the PR stays open, so we must not
+        # spawn the revert against a PR GitHub still tracks as open.  The
+        # claim is rolled back so the row is retryable.
+        elif decision == "rejected":
+            try:
+                from drift_reconciler.github_integration import close_pr
+                close_pr(scope, pr_number)
+            except RuntimeError as exc:
+                _rollback(f"close failed: {exc}")
+                self._json_error(409, f"GitHub close failed: {exc}")
+                return
+
+        # ── Spawn the apply/revert job asynchronously ─────────────────
+        # Approve → --apply-pr against post-merge main.
+        # Reject  → --revert-pr against pre-drift main (PR never merged),
+        #           so the apply reverts AWS to match code.
+        # (row/pr_number/scope come from the claim above.)
+        if pr_number and scope:
+            # Reuse the pending_applies row id as the log run_id so
+            # the log viewer can be pointed at it later if desired.
+            apply_run_id = row.get("id") or f"apply-{pr_number}-{int(datetime.now().timestamp())}"
+            try:
+                tf_dir = _tf_dir_for(scope)
+            except RuntimeError as exc:
+                print(f"  ⚠ Apply spawn aborted for {scope}: {exc}", file=sys.stderr)
+                # Mark the row failed so the dashboard shows the true
+                # state — the operator fixes the environment's repo
+                # config and resets the row to retry.  Non-2xx so the
+                # frontend never toasts success for an unstarted job.
+                try:
+                    requests.patch(
+                        f"{table_url}?id=eq.{pending_id}",
+                        headers=headers,
+                        json={
+                            "status": "failed",
+                            "result": {"error": str(exc), "apply_started": False},
+                        },
+                        timeout=10,
+                    )
+                except requests.RequestException as patch_exc:
+                    print(f"  ⚠ failed-row PATCH error: {patch_exc}", file=sys.stderr)
+                self._json_error(500, f"Apply could not start: {exc}")
+                return
+
+            mode_flag = "--revert-pr" if decision == "rejected" else "--apply-pr"
+            cmd = [
+                _sys.executable,
+                str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
+                "--tf-dir", tf_dir,
+                "--account-label", scope,
+                mode_flag, str(pr_number),
+            ]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            _configure_aws_env(env, scope)
+            _spawn_with_capture(cmd, apply_run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            print(f"  [apply] Spawned {decision} apply for PR #{pr_number} ({scope})", file=sys.stderr)
+
+        data = json.dumps({"ok": True, "apply_started": True}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -1736,50 +1997,123 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         """POST /api/webhooks/github
 
         Receives pull_request events from GitHub.  A PR that was merged
-        (action=closed, merged=true) and matches the 'Drift fix' title
-        convention inserts a pending_applies row for dashboard-side
+        (action=closed, merged=true) and has "Drift fix" in the title is
+        resolved to an environment by matching the webhook's repository
+        full_name against each environment's repo_url.  A matching
+        environment's pending_applies row is inserted for dashboard-side
         approval.  Everything else is a silent 204 no-op.
 
         Authenticated by X-Hub-Signature-256 (HMAC-SHA256 over the raw
-        body with the GitHub token as the secret) — same secret used for
-        the API token, via env GITHUB_TOKEN or app_settings.
+        body) using the environment's webhook_secret, or the global GitHub
+        token (GITHUB_TOKEN env or app_settings.github_token) as fallback.
+
+        If no environment matches the repo, or signature verification fails,
+        returns 401 Unauthorized (same response for both, to avoid leaking
+        which repos are configured).
+
+        NOTE: this is a FALLBACK path.  The primary flow is the dashboard
+        Approve button calling merge_pr() directly (which spawns apply and
+        resolves drift_events itself).  This webhook only matters for
+        out-of-band merges done manually on GitHub; in the common dashboard
+        case the dedup-guarded pending_applies insert below is a no-op
+        because the approve flow already transitioned the row.
         """
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length > 0 else b""
 
-        # ── Verify signature ─────────────────────────────────────────
-        sig_header = self.headers.get("X-Hub-Signature-256", "")
-        if not sig_header.startswith("sha256="):
-            self._json_error(401, "Unauthorized")
-            return
-
-        # Resolve the secret the same way the PR-creation path does:
-        # env GITHUB_TOKEN first, app_settings row as fallback.
-        secret = os.environ.get("GITHUB_TOKEN", "").strip()
-        if not secret:
-            try:
-                from drift_reconciler.github_settings import get_github_token
-                secret = (get_github_token() or "").strip()
-            except Exception:
-                secret = ""
-        if not secret:
-            print("  [webhook] no GitHub secret configured — rejecting", file=sys.stderr)
-            self._json_error(401, "Unauthorized")
-            return
-
-        expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
-        received = sig_header[len("sha256="):].strip()
-        if not hmac.compare_digest(expected, received):
-            self._json_error(401, "Unauthorized")
-            return
-
-        # ── Parse payload ────────────────────────────────────────────
+        # ── Parse payload (unverified — only reads repo full_name) ─────
         try:
             payload = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             self._json_error(400, "Invalid JSON body")
             return
 
+        # Extract the unverified repo full_name (e.g. "owner/repo")
+        repo_full_name = (payload.get("repository") or {}).get("full_name", "").strip()
+        if not repo_full_name:
+            self._json_error(401, "Unauthorized")  # No repo info = invalid webhook
+            return
+
+        # ── Resolve environment by repo_url match ──────────────────────
+        # Fetch all active environments with repo_url set.
+        url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url_base or not key:
+            self._json_error(401, "Unauthorized")  # Supabase unavailable
+            return
+
+        headers_auth = {"apikey": key, "Authorization": f"Bearer {key}"}
+        resolved_env = None
+        resolved_env_id = None
+        try:
+            resp = requests.get(
+                f"{url_base}/rest/v1/environments"
+                f"?select=id,slug,repo_url&is_active=eq.true&repo_url=not.is.null",
+                headers=headers_auth,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                envs = resp.json() if resp.text else []
+                # Match repo_full_name against each environment's repo_url
+                from drift_reconciler.github_client_utils import _parse_repo_url
+                for env in envs:
+                    parsed = _parse_repo_url(env.get("repo_url", ""))
+                    if parsed and parsed.lower() == repo_full_name.lower():
+                        resolved_env = env
+                        resolved_env_id = env.get("id")
+                        break
+        except requests.RequestException:
+            pass
+
+        if not resolved_env:
+            # No environment found for this repo — return 401 (don't leak)
+            self._json_error(401, "Unauthorized")
+            return
+
+        # ── Fetch webhook_secret from environment_secrets (or fall back) ─
+        webhook_secret = None
+        try:
+            resp = requests.get(
+                f"{url_base}/rest/v1/environment_secrets"
+                f"?select=webhook_secret&environment_id=eq.{resolved_env_id}",
+                headers=headers_auth,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                rows = resp.json() if resp.text else []
+                if rows:
+                    webhook_secret = (rows[0].get("webhook_secret") or "").strip() or None
+        except requests.RequestException:
+            pass
+
+        # Fall back to global GITHUB_TOKEN if no webhook_secret set
+        if not webhook_secret:
+            webhook_secret = os.environ.get("GITHUB_TOKEN", "").strip()
+            if not webhook_secret:
+                try:
+                    from drift_reconciler.github_settings import get_github_token
+                    webhook_secret = (get_github_token() or "").strip()
+                except Exception:
+                    webhook_secret = ""
+        
+        if not webhook_secret:
+            # No secret available for verification
+            self._json_error(401, "Unauthorized")
+            return
+
+        # ── Verify signature using the resolved secret ──────────────────
+        sig_header = self.headers.get("X-Hub-Signature-256", "")
+        if not sig_header.startswith("sha256="):
+            self._json_error(401, "Unauthorized")
+            return
+
+        expected = hmac.new(webhook_secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        received = sig_header[len("sha256="):].strip()
+        if not hmac.compare_digest(expected, received):
+            self._json_error(401, "Unauthorized")
+            return
+
+        # ── Validate payload and extract PR details ─────────────────────
         if payload.get("action") != "closed":
             self._send_no_content()
             return
@@ -1790,17 +2124,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         title = pr.get("title", "")
-        # Same convention drift-reconciler.yml gates on.
+        # Guard: title must contain "Drift fix" (confirms reconciler-created PR)
         if "Drift fix" not in title:
-            self._send_no_content()
-            return
-
-        scope_match = re.search(r"\[(scope-[a-z0-9][a-z0-9-]*)\]", title)
-        if not scope_match:
-            self._send_no_content()
-            return
-        scope = scope_match.group(1)
-        if scope not in _get_valid_scopes():
             self._send_no_content()
             return
 
@@ -1811,21 +2136,26 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._send_no_content()
             return
 
-        # ── Insert pending_applies row ────────────────────────────────
-        # Skip if an awaiting_approval row already exists for this PR
-        # (GitHub redelivers webhooks on failure).
-        url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        if not url_base or not key:
-            self._json_error(502, "Supabase not configured")
+        # Use the resolved environment's slug as the scope
+        scope = resolved_env.get("slug")
+        if not scope:
+            self._send_no_content()
             return
-        headers = {"apikey": key, "Authorization": f"Bearer {key}",
-                   "Content-Type": "application/json", "Prefer": "return=representation"}
+
+        # ── Insert pending_applies row ──────────────────────────────────
+        # Skip if a row already exists for this (pr_number, scope) in ANY
+        # status: the dashboard claim flips awaiting_approval → approved/
+        # rejected BEFORE the merged webhook is delivered, so checking only
+        # awaiting_approval would let a redelivery insert a duplicate.
+        # A (pr_number, scope) unique index backs this up for concurrent
+        # deliveries (see migrations/add_unique_pr_scope_to_pending_applies.sql).
+        headers_body = {"apikey": key, "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json", "Prefer": "return=representation"}
         try:
             existing = requests.get(
                 f"{url_base}/rest/v1/pending_applies"
-                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&status=eq.awaiting_approval&limit=1",
-                headers=headers, timeout=10,
+                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
+                headers=headers_body, timeout=10,
             )
             if existing.status_code == 200 and existing.json():
                 self._send_no_content()
@@ -1833,7 +2163,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
             resp = requests.post(
                 f"{url_base}/rest/v1/pending_applies",
-                headers=headers,
+                headers=headers_body,
                 json={
                     "pr_number": pr_number,
                     "scope": scope,
@@ -1843,6 +2173,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 },
                 timeout=10,
             )
+            if resp.status_code == 409:
+                # Unique (pr_number, scope) violation — a concurrent
+                # delivery inserted the row first.  Same as a dedup hit.
+                self._send_no_content()
+                return
             if resp.status_code not in (200, 201):
                 print(f"  [webhook] pending_applies insert failed ({resp.status_code}): "
                       f"{resp.text[:200]}", file=sys.stderr)
@@ -1922,7 +2257,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
             if url_base and key:
                 headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-                for table in ("scan_runs", "rollback_runs"):
+                for table in ("scan_runs", "rollback_runs", "pending_applies"):
                     try:
                         resp = requests.get(
                             f"{url_base}/rest/v1/{table}?select=status&id=eq.{run_id}",
@@ -1930,7 +2265,17 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                         )
                         if resp.status_code == 200 and resp.json():
                             row = resp.json()[0]
-                            complete = row["status"] in ("complete", "failed")
+                            status = row["status"]
+                            if table == "pending_applies":
+                                # Apply jobs: terminal states are applied /
+                                # failed / cancelled / reverted_gate_blocked /
+                                # manual_revert_required.
+                                complete = status in (
+                                    "applied", "failed", "cancelled",
+                                    "reverted_gate_blocked", "manual_revert_required",
+                                )
+                            else:
+                                complete = status in ("complete", "failed", "cancelled")
                             break
                     except requests.RequestException:
                         continue
@@ -1948,6 +2293,29 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _serve_config(self):
+        """GET /api/config — Supabase connection details for the frontend's
+        direct supabase-js queries (PrQueue/Explorer/Rollback read
+        drift_events straight from Supabase; Approvals alone proxies through
+        serve.py, which is why it kept working).  Mirrors the Express
+        api-server's route; serve.py must serve it in production, where that
+        server isn't in the deploy."""
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        anon = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+        if not url or not anon:
+            self._json_error(503, "Backend not configured — set SUPABASE_URL and SUPABASE_ANON_KEY")
+            return
+        payload = {"supabaseUrl": url, "supabaseAnonKey": anon}
+        repo = os.environ.get("GITHUB_REPO", "").strip()
+        if repo:
+            payload["githubRepo"] = repo
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _serve_injected(self):
         try:

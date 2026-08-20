@@ -24,7 +24,7 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 import pagerduty_alert as pga
 import slack_notify as slack
-from drift_reconciler.environment_credentials import get_aws_session
+from drift_reconciler.environment_credentials import get_aws_session, _resolve_env_credentials
 import drift_reconciler.drift_history as drift_history
 import github_integration as gi
 import json
@@ -167,18 +167,154 @@ def humanize_rollback_error(raw_error: str) -> dict:
 # ==========================================
 # 1. RUN TERRAFORM & DRIFT SCRIPTS
 # ==========================================
+def _terraform_sub_env_for_scope(scope: str) -> dict:
+    """Return a subprocess env with *scope*'s AWS credentials injected
+    (role/keys via ``_resolve_env_credentials``), or a plain os.environ
+    copy when the environment row can't be fetched — falling back to the
+    server's ambient credentials exactly like before."""
+    import requests as _requests
+
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    env_dict = {}
+    if url and key:
+        try:
+            resp = _requests.get(
+                f"{url}/rest/v1/environments?select=*&slug=eq.{scope}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                env_dict = resp.json()[0]
+        except _requests.RequestException:
+            env_dict = {}
+    if not env_dict:
+        return os.environ.copy()
+    return _resolve_env_credentials(env_dict)
+
+
+def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config: dict | None = None) -> str:
+    """Run ``terraform init`` in *tf_dir* only when it isn't already
+    initialized (same detection as trivy_agent's ``_is_terraform_initialized``:
+    ``.terraform/modules/modules.json`` present).  Returns "" on success or
+    when init was skipped, or an error string on failure — the caller must
+    not proceed to plan when non-empty.
+    
+    If *backend_config* is provided (a dict with keys like 'bucket', 
+    'dynamodb_table', 'region'), appends -backend-config flags for each 
+    non-empty value to override the static backend block.
+    
+    If .terraform is already initialized but the cached backend differs 
+    (detected via .terraform/terraform.tfstate bucket mismatch), forces 
+    -reconfigure to re-initialize against the new backend."""
+    modules_json = os.path.join(tf_dir, ".terraform", "modules", "modules.json")
+    tfstate_file = os.path.join(tf_dir, ".terraform", "terraform.tfstate")
+    
+    # Check if already initialized and whether backend needs reconfiguration
+    force_reconfigure = False
+    if os.path.isfile(modules_json):
+        # Backend mismatch detection: compare cached bucket against new backend_config
+        if backend_config and backend_config.get("bucket"):
+            new_bucket = backend_config["bucket"]
+            if os.path.isfile(tfstate_file):
+                try:
+                    with open(tfstate_file, "r", encoding="utf-8") as f:
+                        tfstate = json.load(f)
+                        cached_bucket = tfstate.get("backend", {}).get("config", {}).get("bucket")
+                        if cached_bucket and cached_bucket != new_bucket:
+                            force_reconfigure = True
+                            print(f"Backend bucket mismatch: cached={cached_bucket} new={new_bucket} — forcing -reconfigure")
+                except (json.JSONDecodeError, IOError):
+                    pass  # If we can't read tfstate, proceed without forcing reconfigure
+        
+        if not force_reconfigure:
+            return ""  # already initialized with matching backend — skip re-init cost
+
+    print(f"Step 0: Running 'terraform init' inside: {tf_dir}...")
+    try:
+        cmd = ["terraform", "init", "-no-color", "-input=false"]
+        
+        # Add -reconfigure if backend mismatch detected OR if backend_config is being passed
+        # (backend_config overrides require -reconfigure to accept the new backend config)
+        if force_reconfigure or (backend_config and any(backend_config.values())):
+            cmd.append("-reconfigure")
+        
+        # Append -backend-config flags for each non-empty field in backend_config
+        if backend_config:
+            for key, value in backend_config.items():
+                if value:  # Only include non-empty values
+                    cmd.append(f"-backend-config={key}={value}")
+        
+        # Log the actual terraform command being executed
+        print(f"  Terraform command: {' '.join(cmd)}")
+        
+        subprocess.run(
+            cmd,
+            cwd=tf_dir,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
+        return ""
+    except subprocess.CalledProcessError as e:
+        return f"Terraform Init Failed:\n{e.stderr}"
+    except subprocess.TimeoutExpired as e:
+        return f"Terraform Init Failed:\n{e}"
+
+
 def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     """Executes CLI commands using the supplied terraform directory and
     drift-formatting script path."""
+    import requests as _requests
 
     if not os.path.exists(tf_dir):
         return f"Error: The Terraform directory '{tf_dir}' does not exist."
+
+    sub_env = _terraform_sub_env_for_scope(_account_label)
+    
+    # Fetch environment row to extract backend config (tf_state_bucket, tf_lock_table, region)
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    env_dict = {}
+    if url and key:
+        try:
+            resp = _requests.get(
+                f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                env_dict = resp.json()[0]
+        except _requests.RequestException:
+            pass  # Fall back to empty backend_config if fetch fails
+    
+    # Build backend_config dict from environment row
+    backend_config = {}
+    if env_dict:
+        if env_dict.get("tf_state_bucket"):
+            backend_config["bucket"] = env_dict["tf_state_bucket"]
+        if env_dict.get("tf_lock_table"):
+            backend_config["dynamodb_table"] = env_dict["tf_lock_table"]
+        if env_dict.get("region"):
+            backend_config["region"] = env_dict["region"]
+        print(f"Backend config loaded from environment row: {backend_config}")
+    else:
+        print(f"No environment row found for slug '{_account_label}' (SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY may be missing)")
+
+    init_error = _ensure_terraform_init(tf_dir, env=sub_env, backend_config=backend_config)
+    if init_error:
+        return init_error
 
     print(f"Step 1: Running 'terraform plan' inside: {tf_dir}...")
     try:
         subprocess.run(
             ["terraform", "plan", "-no-color", "-out=tfplan"],
             cwd=tf_dir,
+            env=sub_env,
             check=True,
             capture_output=True,
             text=True,
@@ -659,6 +795,10 @@ def drift_pr_from_finding(state: State):
             # Findings with file_path are always drift fixes (unmanaged
             # findings have file_path=None and land in report_only).
             pr_urls.append({"url": pr.html_url, "type": "drift"})
+            # Primary Approve/Reject trigger: every created PR lands in the
+            # Approvals page immediately (not waiting for a merge webhook).
+            from drift_reconciler.pending_applies import create_pending_apply
+            create_pending_apply(pr.number, _account_label)
 
     for finding in report_only:
         existing = _already_open(finding, "unmanaged")
@@ -670,6 +810,8 @@ def drift_pr_from_finding(state: State):
         if pr is not None:
             is_unmanaged = finding.get("status") in ("unmanaged", "unmanaged_tagged")
             pr_urls.append({"url": pr.html_url, "type": "unmanaged" if is_unmanaged else "drift"})
+            from drift_reconciler.pending_applies import create_pending_apply
+            create_pending_apply(pr.number, _account_label)
 
     return {"pr_urls": pr_urls}
 
@@ -711,7 +853,7 @@ def unmanaged_scan_node(state: State):
         print("  (no live resources found)")
         return {"messages": []}
 
-    managed = unmanaged_scanner.load_managed_resources(_tf_dir)
+    managed = unmanaged_scanner.load_managed_resources(_tf_dir, env=_resolve_env_credentials(env_dict))
     findings = unmanaged_scanner.diff_unmanaged(live, managed, region=_region, tf_dir=_tf_dir, scope=_account_label)
 
     if not findings:
@@ -1056,7 +1198,7 @@ def _load_rollback_baselines(pr_number: int, scope: str) -> list[dict]:
     return drift_history.load_baselines(pr_number, scope)
 
 
-def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str]) -> tuple[str, dict[str, str]]:
+def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str], env: dict | None = None) -> tuple[str, dict[str, str]]:
     """Run terraform plan in *tf_dir* and extract live field values for
     *resource_id* from the plan JSON.  Returns (outcome, live_values)
     where outcome is ``"present"``, ``"no_diff"``, or ``"not_found"``."""
@@ -1064,6 +1206,7 @@ def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str]) -> tuple
         plan_result = subprocess.run(
             ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
             cwd=tf_dir,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1078,6 +1221,7 @@ def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str]) -> tuple
     show_result = subprocess.run(
         ["terraform", "show", "-no-color", "-json", "tfplan"],
         cwd=tf_dir,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1104,14 +1248,17 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
         if not baselines:
             raise RuntimeError(f"No baselines found for PR #{pr_number} ({scope})")
 
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Resolve the AWS subprocess env once — every baseline in this run
+        # targets the same scope.
+        sub_env = _terraform_sub_env_for_scope(scope)
+
         diff: list[dict] = []
 
         for baseline in baselines:
             resource_id = baseline["resource_id"]
             original_changes = baseline["changes"]
             rel_path = baseline.get("file_path", "")
-            file_path = os.path.join(repo_root, rel_path) if rel_path else ""
+            file_path = gi.resolve_repo_relative_path(tf_dir, rel_path)
             if not file_path or not os.path.isfile(file_path):
                 print(f"  [rollback-preview] SKIP {resource_id}: file not found — {file_path}")
                 diff.append({
@@ -1138,7 +1285,9 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
             print(f"  [rollback-preview] CHECK {resource_id}: {len(fields)} field(s) — {list(fields)[:5]}...")
             try:
                 _report_rollback_stage(run_id, "fetching_live_state")
-                outcome, live_values = _fetch_live_state(tf_dir, resource_id, fields)
+                outcome, live_values = _fetch_live_state(
+                    tf_dir, resource_id, fields, env=sub_env,
+                )
                 print(f"  [rollback-preview] RESULT {resource_id}: outcome={outcome}")
             except Exception as exc:
                 import traceback
@@ -1214,7 +1363,10 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
     if not baselines:
         raise RuntimeError(f"No baselines found in Supabase for PR #{pr_number} ({_account_label})")
 
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Resolve the AWS subprocess env once — every baseline in this run
+    # targets the same scope.
+    sub_env = _terraform_sub_env_for_scope(_account_label)
+
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 
     rollback_ready: list[dict] = []
@@ -1222,7 +1374,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
         resource_id = baseline["resource_id"]
         original_changes = baseline["changes"]
         rel_path = baseline.get("file_path", "")
-        file_path = os.path.join(repo_root, rel_path) if rel_path else ""
+        file_path = gi.resolve_repo_relative_path(tf_dir, rel_path)
         if not file_path or not os.path.isfile(file_path):
             print(f"  ⚠ {resource_id}: source file not found — {file_path}")
             continue
@@ -1253,7 +1405,9 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
         _report_rollback_stage(run_id, "fetching_live_state")
         fields = list(original_changes.keys())
         try:
-            outcome, live_values = _fetch_live_state(tf_dir, resource_id, fields)
+            outcome, live_values = _fetch_live_state(
+                tf_dir, resource_id, fields, env=sub_env,
+            )
         except RuntimeError as exc:
             print(f"  ✗ {resource_id}: {exc}")
             continue
@@ -1434,8 +1588,9 @@ def _revert_on_gate_failure(
         })
 
 
-def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = None) -> None:
-    """Apply an approved drift fix for *pr_number* in *scope*.
+def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = None, is_revert: bool = False) -> None:
+    """Apply an approved drift fix for *pr_number* in *scope*, or revert
+    AWS for a REJECTED fix when *is_revert* is True.
 
     Mirrors the GitHub Actions ACCEPT path (terraform init + apply) but
     runs on the server: builds an AWS session via ``get_aws_session``
@@ -1444,9 +1599,10 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
 
     Writes the pending_applies row to 'applied' on success and 'failed'
     on error — the write happens in BOTH branches, so an exception can't
-    leave the row stuck on 'approved' forever."""
+    leave the row stuck on 'approved' forever.  For reverts (PR never
+    merged, main still pre-drift) the drift_events rows are marked
+    'reverted' instead of 'resolved' on success."""
     import requests as _requests
-    from drift_reconciler.environment_credentials import get_aws_session
     from drift_reconciler.pending_applies import update_pending_apply
     from datetime import datetime as _dt, timezone as _tz
 
@@ -1476,25 +1632,30 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         if not env_dict:
             raise RuntimeError(f"No environment found for slug '{scope}' — check the environments table.")
 
-        session = get_aws_session(env_dict)
-        creds = session.get_credentials()
-        if creds is None:
-            raise RuntimeError(f"get_aws_session returned no credentials for '{scope}'.")
+        sub_env = _resolve_env_credentials(env_dict)
 
-        sub_env = os.environ.copy()
-        sub_env["AWS_ACCESS_KEY_ID"] = creds.access_key
-        sub_env["AWS_SECRET_ACCESS_KEY"] = creds.secret_key
-        if creds.token:
-            sub_env["AWS_SESSION_TOKEN"] = creds.token
-        sub_env["AWS_REGION"] = env_dict.get("region") or sub_env.get("AWS_REGION", "us-east-1")
-        # Clear any profile hint so terraform uses the injected keys,
-        # not a stale named profile on the server.
-        sub_env.pop("AWS_PROFILE", None)
-
-        print(f"\n--- Apply approved fix for PR #{pr_number} ({scope}) ---")
-        print(f"[apply] terraform init in {tf_dir} …")
+        mode_label = "reverting drift" if is_revert else "applying accepted drift"
+        print(f"\n--- {mode_label} for PR #{pr_number} ({scope}) ---")
+        
+        # Build backend_config dict from environment row
+        backend_config = {}
+        if env_dict:
+            if env_dict.get("tf_state_bucket"):
+                backend_config["bucket"] = env_dict["tf_state_bucket"]
+            if env_dict.get("tf_lock_table"):
+                backend_config["dynamodb_table"] = env_dict["tf_lock_table"]
+            if env_dict.get("region"):
+                backend_config["region"] = env_dict["region"]
+        
+        print(f"[apply] ({mode_label}) terraform init in {tf_dir} …")
+        cmd = ["terraform", "init", "-no-color", "-input=false"]
+        if backend_config:
+            for key, value in backend_config.items():
+                if value:
+                    cmd.append(f"-backend-config={key}={value}")
+        
         init = subprocess.run(
-            ["terraform", "init", "-no-color", "-input=false"],
+            cmd,
             cwd=tf_dir, env=sub_env,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=300,
@@ -1502,7 +1663,7 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         if init.returncode != 0:
             raise RuntimeError(f"terraform init failed:\n{_strip_ansi(init.stderr)[:800]}")
 
-        print(f"[apply] terraform plan …")
+        print(f"[apply] ({mode_label}) terraform plan …")
         plan = subprocess.run(
             ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
             cwd=tf_dir, env=sub_env,
@@ -1515,13 +1676,16 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # ── Safety gates (mirror drift-reconciler.yml ACCEPT path) ────
         gate_failure: str | None = None
 
-        # Gate A: pre-apply drift gate.  Excludes this PR's own rows (they
-        # stay 'open' until the post-apply resolve step — including them
-        # would fail every apply).
+        # Gate A: pre-apply drift gate.  Only meaningful for normal applies
+        # — a revert's whole purpose is fixing existing drift, so open rows
+        # are expected and must not block it (Gate B below is the
+        # revert-specific check: the plan must match the stored baseline).
+        # Excludes this PR's own rows (they stay 'open' until the
+        # post-apply resolve step — including them would fail every apply).
         from drift_reconciler.drift_history import (
             has_unresolved_drift_except, load_baselines,
         )
-        if has_unresolved_drift_except(scope, pr_number):
+        if not is_revert and has_unresolved_drift_except(scope, pr_number):
             gate_failure = "pre_apply_check: unresolved drift exists in scope"
 
         # Gate B: rollback freshness gate — compare live values from the
@@ -1530,7 +1694,18 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # and drift_history.load_baselines().
         if not gate_failure:
             baselines = load_baselines(pr_number, scope)
-            if baselines:
+            if not baselines:
+                # Fail closed: load_baselines returns [] when the PR has no
+                # changes_jsonb rows, when every row's changes_jsonb is
+                # NULL, or when the baseline fetch itself failed — in all
+                # three the plan can't be verified against recorded state,
+                # so the revert must not apply unverified.  (Previously
+                # `if baselines:` silently skipped the entire gate.)
+                gate_failure = (
+                    "rollback_check: no usable baseline for this PR — "
+                    "cannot verify revert safety"
+                )
+            else:
                 from rollback_check import _extract_field_values
                 show_result = subprocess.run(
                     ["terraform", "show", "-no-color", "-json", "tfplan"],
@@ -1550,10 +1725,31 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                     changes = baseline.get("changes") or {}
                     fields = list(changes.keys())
                     if not fields:
-                        continue
+                        # Fail closed too: a baseline with no recorded field
+                        # changes verifies nothing — don't skip the check.
+                        gate_failure = (
+                            f"rollback_check: baseline for {resource_id} has "
+                            f"no recorded field changes — cannot verify revert safety"
+                        )
+                        break
                     outcome, live_values = _extract_field_values(plan_json, resource_id, fields)
-                    if outcome in ("not_found", "no_diff"):
-                        continue  # same treatment as rollback_check.py
+                    if outcome == "not_found":
+                        # Fail closed: the resource this baseline was recorded
+                        # for isn't in the plan at all (absent from state, or
+                        # being created) — there are no live values to verify
+                        # against, so its baseline fields went unchecked.
+                        gate_failure = (
+                            f"rollback_check: baseline for {resource_id} not "
+                            f"found in current plan — cannot verify revert safety"
+                        )
+                        break
+                    if outcome == "no_diff":
+                        # Legitimate skip: the resource IS in the plan with
+                        # live state already equal to the rollback target —
+                        # nothing to revert, nothing unverified.  Mirrors
+                        # rollback_check.py's "already matches rollback
+                        # target — nothing to apply" no-op.
+                        continue
                     for field in fields:
                         expected = str(changes[field].get("before", ""))
                         actual = live_values.get(field, "<missing>")
@@ -1568,13 +1764,43 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
 
         if gate_failure:
             print(f"[apply] ⛔ Gate failed: {gate_failure}")
+            if is_revert:
+                # Reject path: the PR was never merged, so there is no
+                # merge commit to un-merge — git revert is impossible and
+                # pointless.  Mark manual action required with the real
+                # reason (the gate), not the misleading "no merge SHA" error.
+                _finish("manual_revert_required", {
+                    "reason": gate_failure,
+                    "reverted": False,
+                    "error": "safety gate blocked the revert apply",
+                    "message": (
+                        f"Revert apply blocked by safety gate ({gate_failure}). "
+                        f"The PR was closed without merging — manual AWS revert "
+                        f"to match main's code is required."
+                    ),
+                })
+                # The decision is final — close out this PR's drift_events
+                # rows so future scans/approvals don't re-block on them
+                # (the cascade that kept rejecting every later PR).  The
+                # AWS resource was NOT reverted, so the status must say
+                # manual_revert_required — 'reverted' would be a lie.
+                import drift_history as _dh
+                _dh.mark_reverted(
+                    pr_number, scope,
+                    status="manual_revert_required",
+                    resolution=(
+                        f"Revert blocked by safety gate ({gate_failure}) — "
+                        f"AWS NOT reverted; manual AWS revert required"
+                    ),
+                )
+                return
             self_status = _revert_on_gate_failure(
                 tf_dir, pr_number, scope, gate_failure, env_dict,
             )
             _finish(self_status["status"], self_status["result"])
             return
 
-        print(f"[apply] terraform apply -auto-approve …")
+        print(f"[apply] ({mode_label}) terraform apply -auto-approve …")
         apply_result = subprocess.run(
             ["terraform", "apply", "-no-color", "-auto-approve", "-input=false", "-lock-timeout=30s", "tfplan"],
             cwd=tf_dir, env=sub_env,
@@ -1585,8 +1811,18 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             raise RuntimeError(f"terraform apply failed:\n{_strip_ansi(apply_result.stderr)[:800]}")
 
         tail = _strip_ansi(apply_result.stdout)[-2000:]
-        print(f"[apply] ✓ Applied PR #{pr_number} for {scope}")
+        print(f"[apply] ✓ {mode_label} complete for PR #{pr_number} ({scope})")
         _finish("applied", {"output": tail})
+
+        # Update drift_events to match the outcome.  Approve → resolved
+        # (code now matches live AWS).  Revert → reverted (AWS reverted
+        # to match pre-drift code; PR was never merged).
+        if is_revert:
+            import drift_history as _dh
+            _dh.mark_reverted(pr_number, scope)
+        else:
+            import drift_history as _dh
+            _dh.resolve_entry(pr_number, scope, "PR merged via dashboard — code updated to match live AWS state")
     except subprocess.TimeoutExpired as exc:
         print(f"[apply] timed out: {exc}")
         _finish("failed", {"error": f"timed out: {exc}"})
@@ -1649,6 +1885,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="PR number of an approved drift fix to terraform apply (server-side apply trigger)",
+    )
+    parser.add_argument(
+        "--revert-pr",
+        type=int,
+        default=None,
+        help="PR number of a REJECTED drift fix — apply pre-drift main to revert AWS to match code",
     )
     parser.add_argument(
         "--trends",
@@ -1842,7 +2084,14 @@ if __name__ == "__main__":
     if args.apply_pr:
         # Server-side apply of an approved drift fix — _run_apply writes
         # the pending_applies row itself in both success and error paths.
-        _run_apply(tf_dir, args.apply_pr, args.account_label, run_id=args.run_id)
+        _run_apply(tf_dir, args.apply_pr, args.account_label, run_id=args.run_id, is_revert=False)
+        sys.exit(0)
+
+    if args.revert_pr:
+        # Server-side revert of a REJECTED drift fix — the PR was never
+        # merged, so origin/main is still pre-drift code; this apply
+        # reverts AWS to match code.  Same _run_apply path as approve.
+        _run_apply(tf_dir, args.revert_pr, args.account_label, run_id=args.run_id, is_revert=True)
         sys.exit(0)
 
     try:
@@ -1920,7 +2169,11 @@ if __name__ == "__main__":
             "   and never suggest re-adding, restoring, or recreating a deleted_externally resource.\n"
             "7. For findings that include a ``cost_impact`` field, include the estimated\n"
             "   monthly cost in your analysis and flag any resource costing more than\n"
-            "   $50/mo with ⚠️ COST WARNING.\n\n"
+            "   $50/mo with ⚠️ COST WARNING.\n"
+            "8. Be concise: at most 2-3 sentences per drifted resource, one short\n"
+            "   header line per resource, and no preamble, closing summary, or\n"
+            "   restatement of these rules. Output length must stay the same\n"
+            "   regardless of which model generates it.\n\n"
         )
 
         user_query = f"Here is the processed drift report data:\n\n{drift_report}\n\nProvide a plan to resolve this drift."

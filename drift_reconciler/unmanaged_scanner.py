@@ -103,14 +103,17 @@ def _walk_state_resources(module: dict, resources: list[dict]) -> None:
         _walk_state_resources(child, resources)
 
 
-def load_managed_resources(tf_dir: str) -> list[dict[str, Any]]:
+def load_managed_resources(tf_dir: str, env: dict | None = None) -> list[dict[str, Any]]:
     """Return every resource tracked in the Terraform state for *tf_dir*.
 
     Runs ``terraform show -json`` which works for both local and remote
-    (S3) backends — no need to parse backend.tf manually."""
+    (S3) backends — no need to parse backend.tf manually.  *env* is the
+    subprocess environment; when None the caller inherits the ambient
+    environment."""
     result = subprocess.run(
         ["terraform", "show", "-no-color", "-json"],
         cwd=tf_dir,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",

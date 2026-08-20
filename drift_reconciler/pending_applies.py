@@ -27,20 +27,59 @@ _HEADERS = {
 }
 
 
+def create_pending_apply(pr_number: int, scope: str) -> bool:
+    """Insert an awaiting_approval row for a newly-created PR.
+
+    This is the PRIMARY trigger for the dashboard Approve/Reject flow:
+    every drift-fix PR appears in the Approvals page as soon as it's
+    created.  Dedup-guarded on (pr_number, scope) so re-runs don't
+    double-insert."""
+    if not _URL or not _KEY:
+        print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
+        return False
+    try:
+        existing = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
+            headers=_HEADERS,
+            timeout=10,
+        )
+        if existing.status_code == 200 and existing.json():
+            return False  # already tracked
+
+        resp = requests.post(
+            f"{_URL}/rest/v1/{_TABLE}",
+            headers=_HEADERS,
+            json={
+                "pr_number": pr_number,
+                "scope": scope,
+                "status": "awaiting_approval",
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return True
+        print(f"  [pending_applies] POST failed ({resp.status_code}): {resp.text[:200]}")
+        return False
+    except requests.RequestException as exc:
+        print(f"  [pending_applies] POST request failed: {exc}")
+        return False
+
+
 def update_pending_apply(pr_number: int, scope: str, **fields) -> bool:
-    """Update the approved pending_applies row for *pr_number* + *scope*.
+    """Update the decided (approved OR rejected) pending_applies row for
+    *pr_number* + *scope*.
 
     Terminal statuses: ``applied``, ``failed``, ``reverted_gate_blocked``,
     ``manual_revert_required``.  Returns True if a row was updated, False
-    otherwise (no approved row — already in a terminal state, rejected,
-    or missing)."""
+    otherwise (still awaiting_approval, already terminal, or missing)."""
     if not _URL or not _KEY:
         print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
     try:
         resp = requests.patch(
             f"{_URL}/rest/v1/{_TABLE}"
-            f"?pr_number=eq.{pr_number}&scope=eq.{scope}&status=eq.approved",
+            f"?pr_number=eq.{pr_number}&scope=eq.{scope}&status=in.(approved,rejected)",
             headers=_HEADERS,
             json=fields,
             timeout=10,

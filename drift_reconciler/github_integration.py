@@ -13,15 +13,105 @@ import time
 import requests
 
 import drift_reconciler.drift_history as drift_history
+from drift_reconciler.github_client_utils import resolve_repo_target
 
-from env_loader import load_env
+try:
+    from .env_loader import load_env
+except ImportError:
+    from env_loader import load_env
 load_env()
 
 REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
+
+def _resolve_github_client(account_label: str):
+    """Return (github_client, repo, base_branch) for *account_label*.
+
+    Prefers the environment row's repo_url + environment_secrets.github_token
+    when both resolve; falls back to the global GITHUB_TOKEN/GITHUB_REPO env
+    vars (legacy / default environments).  Returns (None, None, "main") when
+    nothing resolves."""
+    repo_slug, token, branch = resolve_repo_target(account_label)
+    if token and repo_slug:
+        auth = Auth.Token(token)
+        g = Github(auth=auth)
+        return g, g.get_repo(repo_slug), branch
+    return None, None, "main"
+
 UNPATCHABLE_BLOCK_FIELDS = {
     "aws_security_group": {"ingress", "egress"},
 }
+
+
+def merge_pr(account_label: str, pr_number: int, commit_message: str | None = None) -> dict:
+    """Merge PR *pr_number* in *account_label*'s repo via the GitHub API.
+
+    Uses the same per-environment resolution as PR creation
+    (``resolve_repo_target`` → environment repo_url + github_token).
+    The merge method follows the repo's configured default (no squash/
+    rebase override — PR creation doesn't specify one either).
+
+    Returns the merge result dict (``{"sha", "merged", "message"}``).
+    Raises RuntimeError with GitHub's error message on failure
+    (conflict, already merged, branch protection, etc.)."""
+    repo_slug, token, _branch = resolve_repo_target(account_label)
+    if not repo_slug or not token:
+        raise RuntimeError(
+            f"No GitHub client could be resolved for account_label='{account_label}' — "
+            f"neither the environment row nor the global GITHUB_TOKEN/GITHUB_REPO "
+            f"env vars are configured."
+        )
+
+    auth = Auth.Token(token)
+    g = Github(auth=auth)
+    try:
+        # Whole operation in the try: get_repo/get_pull can raise
+        # GithubException too (bad token, repo/PR not found, rate limit),
+        # and callers only catch RuntimeError — anything else would leave
+        # the pending row stuck in a decided state.
+        repo = g.get_repo(repo_slug)
+        pr = repo.get_pull(pr_number)
+        merge_kwargs: dict = {}
+        if commit_message:
+            merge_kwargs["commit_message"] = commit_message
+        result = pr.merge(**merge_kwargs)
+    except GithubException as exc:
+        raise RuntimeError(
+            f"GitHub merge failed for PR #{pr_number} in {repo_slug}: {exc}"
+        ) from exc
+
+    return {
+        "sha": getattr(result, "sha", None),
+        "merged": bool(getattr(result, "merged", False)),
+        "message": getattr(result, "message", ""),
+    }
+
+
+def close_pr(account_label: str, pr_number: int) -> None:
+    """Close PR *pr_number* in *account_label*'s repo WITHOUT merging.
+
+    Same per-environment resolution as ``merge_pr``.  Raises RuntimeError
+    with GitHub's error message on failure."""
+    repo_slug, token, _branch = resolve_repo_target(account_label)
+    if not repo_slug or not token:
+        raise RuntimeError(
+            f"No GitHub client could be resolved for account_label='{account_label}' — "
+            f"neither the environment row nor the global GITHUB_TOKEN/GITHUB_REPO "
+            f"env vars are configured."
+        )
+
+    auth = Auth.Token(token)
+    g = Github(auth=auth)
+    try:
+        # Same rationale as merge_pr: the whole operation raises
+        # RuntimeError so the dashboard handler can roll the row back.
+        repo = g.get_repo(repo_slug)
+        pr = repo.get_pull(pr_number)
+        pr.edit(state="closed")
+    except GithubException as exc:
+        raise RuntimeError(
+            f"GitHub close failed for PR #{pr_number} in {repo_slug}: {exc}"
+        ) from exc
 
 
 def is_unpatchable_finding(resource_id: str, changes: dict) -> bool:
@@ -32,9 +122,41 @@ def is_unpatchable_finding(resource_id: str, changes: dict) -> bool:
     return bool(changes) and all(field in unpatchable for field in changes)
 
 
+def _find_git_root(path: str) -> str | None:
+    """Walk up from *path* to find the nearest ancestor containing a .git
+    directory. Returns None if no .git is found before hitting the filesystem
+    root."""
+    current = os.path.abspath(path)
+    if os.path.isfile(current):
+        current = os.path.dirname(current)
+    while True:
+        if os.path.isdir(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:  # reached filesystem root
+            return None
+        current = parent
+
+
 def to_repo_relative_path(local_path: str) -> str:
-    rel = os.path.relpath(local_path, REPO_ROOT)
+    """Return *local_path* relative to whichever repo it actually lives in —
+    the nearest ancestor .git root, falling back to this project's REPO_ROOT
+    if no .git is found (preserves legacy behavior for any edge case)."""
+    git_root = _find_git_root(local_path)
+    base = git_root or REPO_ROOT
+    rel = os.path.relpath(local_path, base)
     return rel.replace("\\", "/")
+
+
+def resolve_repo_relative_path(tf_dir: str, rel_path: str) -> str:
+    """Reconstruct an absolute path from a repo-relative *rel_path*,
+    resolving against *tf_dir*'s own git root (mirrors
+    ``to_repo_relative_path``'s forward logic).  Falls back to this
+    project's REPO_ROOT if *tf_dir* isn't inside a git repo at all."""
+    if not rel_path:
+        return ""
+    git_root = _find_git_root(tf_dir) or REPO_ROOT
+    return os.path.join(git_root, rel_path)
 
 
 def _safe_label(account_label: str) -> str:
@@ -89,13 +211,16 @@ def create_drift_pr(
         trivy_passed: bool | None = None,
         trivy_summary: dict | None = None,
         rolled_back_from_pr: int | None = None):
-    token = os.getenv("GITHUB_TOKEN")
-    repo_name = os.getenv("GITHUB_REPO")
-    auth = Auth.Token(token)
-    g = Github(auth=auth)
-    repo = g.get_repo(repo_name)
+    g, repo, env_branch = _resolve_github_client(account_label)
+    if g is None or repo is None:
+        raise RuntimeError(
+            "No GitHub client could be resolved for "
+            f"account_label='{account_label}' — neither the environment row "
+            "(repo_url + environment_secrets.github_token) nor the global "
+            "GITHUB_TOKEN/GITHUB_REPO env vars are configured."
+        )
 
-    base_branch = base_branch or os.getenv("GITHUB_BASE_BRANCH", "main")
+    base_branch = base_branch or env_branch
 
     safe_account = _safe_label(account_label)
 
@@ -152,12 +277,15 @@ def create_drift_pr(
 _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without review._
 """
 
+    # Never draft: the dashboard Approvals page is the review gate now,
+    # and GitHub refuses to merge drafts (405) — a HIGH-risk PR created
+    # as a draft would block the dashboard-driven approve flow.
     pr = repo.create_pull(
         title=pr_title,
         body=pr_body,
         head=head_branch,
         base=base_branch,
-        draft=(risk_level == "HIGH"),
+        draft=False,
     )
 
     try:

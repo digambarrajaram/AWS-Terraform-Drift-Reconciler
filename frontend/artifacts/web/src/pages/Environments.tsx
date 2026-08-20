@@ -129,8 +129,8 @@ function SecretField({
 
 // ── AuthBadge / ActiveBadge ─────────────────────────────────────────────────
 
-function AuthBadge({ type }: { type: Environment['auth_type'] }) {
-  const styles: Record<Environment['auth_type'], string> = {
+function AuthBadge({ type }: { type: Exclude<Environment['auth_type'], null> }) {
+  const styles: Record<Exclude<Environment['auth_type'], null>, string> = {
     profile: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400',
     role:    'bg-sky-100    text-sky-700    dark:bg-sky-900/30    dark:text-sky-400',
     keys:    'bg-amber-100  text-amber-700  dark:bg-amber-900/30  dark:text-amber-400',
@@ -198,7 +198,7 @@ function envToForm(e: Environment): FormState {
     region:                 e.region,
     tf_state_bucket:        e.tf_state_bucket,
     tf_directory_path:      e.tf_directory_path,
-    auth_type:              e.auth_type,
+    auth_type:              e.auth_type ?? 'role',
     aws_profile:            e.aws_profile            ?? '',
     aws_role_arn:           e.aws_role_arn            ?? '',
     scan_role_arn:          e.scan_role_arn           ?? '',
@@ -207,7 +207,7 @@ function envToForm(e: Environment): FormState {
     apply_environment_name: e.apply_environment_name  ?? '',
     repo_url:               e.repo_url                ?? '',
     repo_branch:            e.repo_branch             ?? '',
-    git_auth_type:          e.git_auth_type,
+    git_auth_type:          e.git_auth_type ?? 'none',
     _github_token:          '',
     _aws_access_key_id:     '',
     _aws_secret_access_key: '',
@@ -395,7 +395,7 @@ function EnvForm({
               <div className="flex gap-3">
                 {((isEdit && env?.auth_type === 'profile'
                   ? ['profile', 'role', 'keys']
-                  : ['role', 'keys']) as const).map((t) => (
+                  : ['role', 'keys']) as ('profile' | 'role' | 'keys')[]).map((t) => (
                   <label key={t} className="flex items-center gap-1.5 cursor-pointer select-none text-xs">
                     <input
                       type="radio"

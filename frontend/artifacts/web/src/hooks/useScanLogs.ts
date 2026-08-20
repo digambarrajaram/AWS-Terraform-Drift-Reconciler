@@ -7,7 +7,7 @@ export interface LogLine {
   text: string;
 }
 
-const POLL_MS = 1500;
+const POLL_MS = 800;
 
 /**
  * Polls GET /api/scan/{runId}/logs?offset=N every ~1.5 s.
@@ -30,7 +30,7 @@ export function useScanLogs(runId: string | null) {
   const seenRef       = useRef(new Set<number>());
   const offsetRef     = useRef(0);
   const completeRef   = useRef(false);
-  const timerRef      = useRef<ReturnType<typeof setInterval> | undefined>();
+  const timerRef      = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   // ── Reset when the run changes ──────────────────────────────────────
   useEffect(() => {

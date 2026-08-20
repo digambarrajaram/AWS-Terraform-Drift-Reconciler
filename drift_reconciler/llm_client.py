@@ -39,6 +39,11 @@ def _get_llm():
             model="openai/gpt-oss-120b",
             temperature=0.1,
             api_key=groq_key,
+            # Hard cap — gpt-oss-120b's default verbosity produced
+            # multi-section narratives; 1500 tokens is enough for the
+            # 2-3-sentence-per-resource analysis AND a full HCL block
+            # rewrite in the trivy fix-agent (shared client).
+            max_tokens=1500,
         )
         return _llm
 

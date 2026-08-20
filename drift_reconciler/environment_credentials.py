@@ -29,6 +29,37 @@ _HEADERS = {
 }
 
 
+def _resolve_env_credentials(environment: dict) -> dict:
+    """Return a subprocess env dict with *environment*'s AWS credentials
+    injected, for terraform-CLI subprocess calls.
+
+    auth_type 'role'/'keys' → ``get_aws_session()`` credentials injected as
+    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN, with
+    AWS_PROFILE removed (a stale named profile would break session auth).
+    auth_type 'profile'/unset → plain ``os.environ`` copy — AWS_PROFILE
+    passthrough (serve.py's ``_configure_aws_env`` already set it at spawn).
+
+    Raises RuntimeError when get_aws_session fails for role/keys auth."""
+    env = os.environ.copy()
+    auth_type = (environment.get("auth_type") or "").strip()
+    if auth_type in ("role", "keys"):
+        session = get_aws_session(environment)
+        creds = session.get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                f"get_aws_session returned no credentials for "
+                f"environment '{environment.get('slug', 'unknown')}'."
+            )
+        env["AWS_ACCESS_KEY_ID"] = creds.access_key
+        env["AWS_SECRET_ACCESS_KEY"] = creds.secret_key
+        if creds.token:
+            env["AWS_SESSION_TOKEN"] = creds.token
+        env.pop("AWS_PROFILE", None)
+    if environment.get("region"):
+        env["AWS_REGION"] = environment["region"]
+    return env
+
+
 def _fetch_environment_secrets(environment_id: str) -> dict[str, Any]:
     """Read the ``environment_secrets`` row for *environment_id* via
     service-role GET.  Returns an empty dict if the table is unreachable

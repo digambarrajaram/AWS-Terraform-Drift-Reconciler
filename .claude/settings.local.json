@@ -83,7 +83,8 @@
       "Bash(echo \"grep exit: $?\")",
       "Bash(echo \"tsc Approvals check exit: $?\")",
       "Bash(echo \"grep exit: $? \\(1 = no Approvals errors\\)\")",
-      "Bash(echo \"grep exit: $? \\(1 = no Environments errors\\)\")"
+      "Bash(echo \"grep exit: $? \\(1 = no Environments errors\\)\")",
+      "Bash(PYTHONPATH=/mnt/d/aws-terraform-drift-reconciler/drift_reconciler:/mnt/d/aws-terraform-drift-reconciler python3 *)"
     ]
   }
 }

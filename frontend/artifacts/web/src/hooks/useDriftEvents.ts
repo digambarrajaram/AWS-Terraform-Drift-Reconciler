@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { keepPreviousData } from '@tanstack/react-query';
 import { useAppConfig } from '@/api/config';
 import { getSupabaseClient } from '@/api/supabaseClient';
+import { normalizeDriftEvent } from '@/lib/drift';
 import type { DriftEvent } from '@/types';
 
 export type SortColumn = 'created_at' | 'severity' | 'resource_id';
@@ -77,7 +78,7 @@ export function useDriftEvents(
       const { data, count, error } = await q;
       if (error) throw error;
 
-      let events = (data ?? []) as DriftEvent[];
+      let events = (data ?? []).map(normalizeDriftEvent) as DriftEvent[];
 
       if (sortBySeverityClient) {
         const SEV_RANK: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };

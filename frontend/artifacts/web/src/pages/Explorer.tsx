@@ -24,10 +24,14 @@ const SEV_CLS: Record<string, string> = {
   MEDIUM: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   LOW:    'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
 };
-const STATUS_CLS: Record<string, string> = {
+// Keyed on the DriftEvent status union so tsc flags a missing entry when a
+// new status is added (was Record<string, string> — silently partial).
+const STATUS_CLS: Record<DriftEvent['status'], string> = {
   open:       'bg-amber-100  text-amber-700  dark:bg-amber-900/30  dark:text-amber-400',
   resolved:   'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
   suppressed: 'bg-zinc-100   text-zinc-600   dark:bg-zinc-800      dark:text-zinc-400',
+  reverted:   'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
+  manual_revert_required: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400',
 };
 
 // ── Shared UI atoms ─────────────────────────────────────────────────────────

@@ -39,7 +39,7 @@ export interface DriftEvent {
   severity: 'HIGH' | 'MEDIUM' | 'LOW';
   pr_number: number | null;
   pr_type: 'fix' | 'batch' | 'rollback' | 'unmanaged' | 'manual' | null;
-  status: 'open' | 'resolved' | 'suppressed';
+  status: 'open' | 'resolved' | 'suppressed' | 'reverted' | 'manual_revert_required';
   resolution: string | null;
   fields_changed: string[] | null;
   drift_summary: string | null;

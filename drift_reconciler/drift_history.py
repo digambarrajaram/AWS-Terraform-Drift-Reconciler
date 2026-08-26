@@ -189,6 +189,31 @@ def resolve_entry(pr_number: int, account: str, resolution: str = "") -> None:
         print(f"  [history] Failed to resolve PR #{pr_number}")
 
 
+def get_pr_type(pr_number: int, account: str) -> str | None:
+    """Return the pr_type of the drift_events row(s) for *pr_number*, or
+    None when the PR has no rows or the fetch fails.
+
+    Used by the apply/reject dispatcher to distinguish file-only PRs
+    (unmanaged / security_only — no terraform action) from drift/fix PRs
+    (full gate/apply/revert path)."""
+    if not _URL or not _KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=pr_type&pr_number=eq.{pr_number}&account=eq.{account}&limit=1",
+            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            rows = resp.json() if resp.text else []
+            if rows and rows[0].get("pr_type"):
+                return rows[0]["pr_type"]
+    except requests.RequestException:
+        return None
+    return None
+
+
 def load_baselines(pr_number: int, account: str) -> list[dict[str, Any]]:
     """Return rollback baselines for *pr_number* from Supabase.
 
@@ -274,7 +299,13 @@ def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -
     if not pr_number:
         return row  # no PR number — can't verify, trust local status
 
-    if _pr_is_actually_open(pr_number, account):
+    # Live GitHub check — the DB status is never trusted on its own.
+    # Log the state actually seen so a blocked PR is diagnosable (None =
+    # no repo/token or network error; the safe default blocks).
+    gh_state = _fetch_pr_state(pr_number, account)
+    print(f"  [dedup] {resource_id} ({account}): DB row #{pr_number} open — "
+          f"GitHub state: {gh_state!r}")
+    if gh_state in (None, "open"):
         return row
 
     # PR is closed on GitHub — fix the stale local status so we don't
@@ -288,17 +319,21 @@ def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -
     return None
 
 
-def _pr_is_actually_open(pr_number: int, account_label: str | None = None) -> bool:
-    """Return True if GitHub PR *pr_number* is still open (not closed/merged).
+def _fetch_pr_state(pr_number: int, account_label: str | None = None) -> str | None:
+    """Return GitHub's state for PR *pr_number*: 'open', 'closed', or
+    'merged' (a merged PR reports state='closed' plus merged=true).
 
     Resolves repo + token per-environment when *account_label* is given
     (environment row repo_url + environment_secrets.github_token),
-    falling back to the global GITHUB_REPO/GITHUB_TOKEN env vars."""
+    falling back to the global GITHUB_REPO/GITHUB_TOKEN env vars.
+
+    Returns None when the state can't be determined (no repo/token,
+    network error) — callers treat None as "unknown".  A 404 (PR
+    deleted) or 401 (bad token) counts as closed."""
     from drift_reconciler.github_client_utils import resolve_repo_target
     repo, token, _branch = resolve_repo_target(account_label)
     if not repo or not token:
-        return True  # can't verify — assume open (safe default)
-
+        return None
     try:
         resp = requests.get(
             f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
@@ -307,53 +342,80 @@ def _pr_is_actually_open(pr_number: int, account_label: str | None = None) -> bo
             timeout=10,
         )
         if resp.status_code == 200:
-            state = (resp.json() or {}).get("state", "open")
-            return state == "open"
+            data = resp.json() or {}
+            return "merged" if data.get("merged") else data.get("state", "open")
         # 404 = PR doesn't exist, 401 = bad token — treat as closed
-        return False
+        return "closed"
     except requests.RequestException:
-        return True  # network error — assume open (safe default)
+        return None
 
 
-def has_unresolved_drift_except(account: str, pr_number: int) -> bool:
-    """Return ``True`` if *account* has open drift entries from any PR other
-    than *pr_number*.  The applied PR's own rows stay 'open' until the
-    post-apply resolve step, so the plain ``has_unresolved_drift`` would
-    always report True at gate time."""
+def _pr_is_actually_open(pr_number: int, account_label: str | None = None) -> bool:
+    """Return True if GitHub PR *pr_number* is still open (not closed/merged).
+
+    Unknown state (no repo/token, network error) is treated as open —
+    the safe default: the guard must not unblock a new PR it can't verify."""
+    return _fetch_pr_state(pr_number, account_label) in (None, "open")
+
+
+def sync_pr_state(pr_number: int, account: str) -> str | None:
+    """Reconcile the open drift_events rows for *pr_number* with the PR's
+    actual GitHub state (open/closed/merged).
+
+    Called by the GitHub webhook (closed-unmerged events) and by
+    serve.py's periodic stale sweep, so a row is never left 'open' once
+    GitHub has closed or merged the PR and the backend is done with it.
+
+    Merged → rows resolve (the merged code now matches live AWS).
+    Closed unmerged → rows become 'manual_revert_required' (the drift
+    remains; someone must act — the same label the revert-gate path uses).
+
+    Returns the state synced, or None when GitHub couldn't be queried
+    (the row is left for the next sweep)."""
+    state = _fetch_pr_state(pr_number, account)
+    if state is None:
+        return None
+    if state == "merged":
+        resolve_entry(
+            pr_number, account,
+            "PR merged on GitHub — state synced from GitHub",
+        )
+    elif state == "closed":
+        mark_reverted(
+            pr_number, account, status="manual_revert_required",
+            resolution=("PR closed on GitHub without merging — drift "
+                        "remains; manual action required"),
+        )
+    return state
+
+
+def get_open_resources(
+    account: str, except_pr_number: int | None = None
+) -> list[dict]:
+    """Return the open drift rows for *account* as ``{resource_id, unmanaged}``
+    dicts — optionally excluding one PR's rows (the applied PR's own rows stay
+    'open' until the post-apply resolve step).
+
+    These rows are detection-time state, not current reality: callers
+    (pre-apply gates) are expected to re-verify them against a live plan."""
     if not _URL or not _KEY:
-        return False
+        return []
+    filters = f"account=eq.{account}&status=eq.open"
+    if except_pr_number is not None:
+        filters += f"&pr_number=neq.{except_pr_number}"
     try:
         resp = requests.get(
             f"{_URL}/rest/v1/{_TABLE}"
-            f"?select=id&account=eq.{account}&status=eq.open&pr_number=neq.{pr_number}&limit=1",
+            f"?select=resource_id,unmanaged&{filters}&limit=100",
             headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
             timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json() if resp.text else []
-            return len(data) > 0 if isinstance(data, list) else False
-        return False
+            return data if isinstance(data, list) else []
+        return []
     except requests.RequestException:
-        return False
-
-
-def has_unresolved_drift(account: str) -> bool:
-    """Return ``True`` if *account* has any open (unresolved) drift entries."""
-    if not _URL or not _KEY:
-        return False
-    try:
-        resp = requests.get(
-            f"{_URL}/rest/v1/{_TABLE}"
-            f"?select=id&account=eq.{account}&status=eq.open&limit=1",
-            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json() if resp.text else []
-            return len(data) > 0 if isinstance(data, list) else False
-        return False
-    except requests.RequestException:
-        return False
+        return []
 
 
 def log_manual_entry(account: str, resolution: str) -> None:

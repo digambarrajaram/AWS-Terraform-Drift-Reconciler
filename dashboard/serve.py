@@ -368,7 +368,7 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope:
                 row = resp.json()[0]
                 if row["status"] in (
                     "complete", "failed", "cancelled",
-                    "applied", "reverted_gate_blocked", "manual_revert_required",
+                    "applied", "reverted", "reverted_gate_blocked", "manual_revert_required",
                 ):
                     return
                 requests.patch(
@@ -466,6 +466,121 @@ def _load_env() -> None:
                 os.environ[key.strip()] = val.strip()
 
 
+def auto_add_exceptions_on_merge(
+    pr_number: int, scope: str, pr_type: str | None, approved_by: str
+) -> None:
+    """Policy: merging an unmanaged/security PR auto-adds the covered
+    resources/rules to the exception registry — no separate manual
+    exception entry.  Fail-soft: the merge is already final on GitHub,
+    so a registry write failure only means the next scan may re-flag
+    (the old behavior); never fail the merge over it."""
+    if pr_type not in ("unmanaged", "security_only"):
+        return
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not key:
+        print("  ⚠ auto exception add skipped — Supabase not configured", file=sys.stderr)
+        return
+
+    read_headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    write_headers = {**read_headers, "Content-Type": "application/json"}
+    base = f"{url}/rest/v1/drift_exception_registry"
+
+    def _already_exists(exception_type: str, **filters) -> bool:
+        q = "&".join(f"{k}=eq.{v}" for k, v in filters.items())
+        try:
+            resp = requests.get(
+                f"{base}?select=id&scope=eq.{scope}&exception_type=eq.{exception_type}"
+                f"&{q}&active=eq.true&limit=1",
+                headers=read_headers, timeout=10,
+            )
+            return bool(resp.json()) if resp.text and resp.status_code == 200 else False
+        except requests.RequestException:
+            return True  # can't check — skip the insert, fail soft
+
+    def _insert(row: dict) -> None:
+        try:
+            resp = requests.post(base, headers=write_headers, json=row, timeout=10)
+            if resp.status_code >= 300:
+                print(f"  ⚠ auto exception add failed ({resp.status_code}): "
+                      f"{resp.text[:200]}", file=sys.stderr)
+        except requests.RequestException as exc:
+            print(f"  ⚠ auto exception add failed: {exc}", file=sys.stderr)
+
+    if pr_type == "unmanaged":
+        # The unmanaged PR's drift_events rows carry the resource_ids to
+        # exception.  No status filter: the merged-PR webhook resolves
+        # these rows at merge time, racing this query — an exception is
+        # owed for the resource regardless of its event's resolution.
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/drift_events"
+                f"?select=resource_id&pr_number=eq.{pr_number}&account=eq.{scope}"
+                f"&limit=100",
+                headers=read_headers, timeout=10,
+            )
+            rows = resp.json() if resp.text and resp.status_code == 200 else []
+        except requests.RequestException as exc:
+            print(f"  ⚠ auto exception add: drift_events read failed: {exc}", file=sys.stderr)
+            return
+        print(f"  [exceptions] drift_events rows for pr={pr_number}: "
+              f"{[r.get('resource_id') for r in rows]}", file=sys.stderr)
+        for row in rows:
+            rid = row.get("resource_id") or ""
+            if "." not in rid:
+                continue
+            resource_type, pattern = rid.split(".", 1)
+            if not resource_type or not pattern:
+                continue
+            if _already_exists("unmanaged",
+                               resource_type=resource_type,
+                               resource_id_pattern=pattern):
+                continue
+            _insert({
+                "scope": scope,
+                "exception_type": "unmanaged",
+                "resource_type": resource_type,
+                "resource_id_pattern": pattern,
+                "reason": f"Auto-added on merge of unmanaged PR #{pr_number}",
+                "approved_by": approved_by,
+                "auto": True,
+            })
+    elif pr_type == "security_only":
+        # The (resource_address, rule_id) pairs this PR fixed were
+        # recorded on its pending_applies row at scan time.
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/pending_applies"
+                f"?select=fixes_jsonb&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
+                headers=read_headers, timeout=10,
+            )
+            rows = resp.json() if resp.text and resp.status_code == 200 else []
+        except requests.RequestException as exc:
+            print(f"  ⚠ auto exception add: pending_applies read failed: {exc}", file=sys.stderr)
+            return
+        fixes = (rows[0].get("fixes_jsonb") or []) if rows else []
+        if not fixes:
+            print(f"  ⚠ security PR #{pr_number} has no recorded fixes — "
+                  f"skipping auto exception (add manually)", file=sys.stderr)
+            return
+        for fix in fixes:
+            ra = fix.get("resource_address") or ""
+            rid = fix.get("rule_id") or ""
+            if not ra or not rid:
+                continue
+            if _already_exists("security", resource_address=ra, rule_id=rid):
+                continue
+            _insert({
+                "scope": scope,
+                "exception_type": "security",
+                "resource_address": ra,
+                "rule_id": rid,
+                "reason": f"Auto-added on merge of security PR #{pr_number}",
+                "approved_by": approved_by,
+                "auto": True,
+            })
+
+
 class _Handler(http.server.SimpleHTTPRequestHandler):
     _CACHEABLE = {".js", ".css", ".png", ".svg", ".woff2"}
 
@@ -517,6 +632,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._serve_pending_applies()
         elif path.startswith("/api/pending-applies/") and path.endswith("/pr-details"):
             self._serve_pr_details()
+        elif path.startswith("/api/pending-applies/") and path.endswith("/logs"):
+            # Must be before the bare /{id} handler — otherwise logs requests
+            # are served as a pending_applies row (status=applied, no lines)
+            # and the drawer spins on "Waiting for output…" forever.
+            self._serve_run_logs()
         elif path.startswith("/api/pending-applies/"):
             self._serve_pending_apply_single()
         elif path == "/api/notification-settings":
@@ -526,8 +646,6 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith("/api/exceptions"):
             self._serve_api_exceptions()
         elif path.startswith("/api/scan/") and path.endswith("/logs"):
-            self._serve_run_logs()
-        elif path.startswith("/api/pending-applies/") and path.endswith("/logs"):
             self._serve_run_logs()
         elif path.endswith((".js", ".css", ".png")):
             self._serve_static(path)
@@ -1523,29 +1641,43 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self._do_exception_update(scope, exception_type, entry, headers, table_url, {"active": False})
 
     def _do_exception_update(self, scope, exception_type, entry, headers, table_url, updates):
-        filter_parts = [f"scope=eq.{scope}", f"exception_type=eq.{exception_type}", "active=eq.true"]
-        if exception_type == "drift":
-            addr = (entry.get("resource_address") or "").strip()
-            if not addr:
-                self._json_error(400, "resource_address is required.")
-                return
-            filter_parts.append(f"resource_address=eq.{addr}")
-        elif exception_type == "security":
-            addr = (entry.get("resource_address") or "").strip()
-            rule_id = (entry.get("rule_id") or "").strip()
-            if not addr or not rule_id:
-                self._json_error(400, "resource_address and rule_id are required.")
-                return
-            filter_parts.append(f"resource_address=eq.{addr}")
-            filter_parts.append(f"rule_id=eq.{rule_id}")
+        """Soft-update (expire / deactivate) one exception row.
+
+        Prefer ``entry.id`` when the dashboard sends it (all three tabs do).
+        Fall back to the composite natural key for older clients / scripts.
+        """
+        row_id = entry.get("id")
+        if row_id is not None and str(row_id).strip():
+            filter_parts = [
+                f"id=eq.{row_id}",
+                f"scope=eq.{scope}",
+                f"exception_type=eq.{exception_type}",
+                "active=eq.true",
+            ]
         else:
-            rt = (entry.get("resource_type") or "").strip()
-            pat = (entry.get("resource_id_pattern") or "").strip()
-            if not rt or not pat:
-                self._json_error(400, "resource_type and resource_id_pattern are required.")
-                return
-            filter_parts.append(f"resource_type=eq.{rt}")
-            filter_parts.append(f"resource_id_pattern=eq.{pat}")
+            filter_parts = [f"scope=eq.{scope}", f"exception_type=eq.{exception_type}", "active=eq.true"]
+            if exception_type == "drift":
+                addr = (entry.get("resource_address") or "").strip()
+                if not addr:
+                    self._json_error(400, "resource_address is required.")
+                    return
+                filter_parts.append(f"resource_address=eq.{addr}")
+            elif exception_type == "security":
+                addr = (entry.get("resource_address") or "").strip()
+                rule_id = (entry.get("rule_id") or "").strip()
+                if not addr or not rule_id:
+                    self._json_error(400, "resource_address and rule_id are required.")
+                    return
+                filter_parts.append(f"resource_address=eq.{addr}")
+                filter_parts.append(f"rule_id=eq.{rule_id}")
+            else:
+                rt = (entry.get("resource_type") or "").strip()
+                pat = (entry.get("resource_id_pattern") or "").strip()
+                if not rt or not pat:
+                    self._json_error(400, "resource_type and resource_id_pattern are required.")
+                    return
+                filter_parts.append(f"resource_type=eq.{rt}")
+                filter_parts.append(f"resource_id_pattern=eq.{pat}")
 
         filter_str = "&".join(filter_parts)
         try:
@@ -1836,31 +1968,31 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         # ── Atomically claim the row first (compare-and-set) ────────────
         # The conditional UPDATE is the single source of truth for who
         # decided: a concurrent decision on the same row loses here and
-        # 409s, so the GitHub merge/close below can only ever run once.
-        payload = {
-            "status": decision,
-            "approved_by": approved_by,
-            "approved_at": datetime.now(timezone.utc).isoformat(),
-        }
-        try:
-            resp = requests.patch(
-                f"{table_url}?id=eq.{pending_id}&status=eq.awaiting_approval",
-                headers=headers, json=payload, timeout=10,
-            )
-            claimed = resp.json() if resp.text and resp.status_code == 200 else []
-            if not claimed:
-                self._json_error(409, "No awaiting_approval row matched — already decided or not found.")
-                return
-        except requests.RequestException as exc:
-            self._json_error(502, f"Supabase unreachable: {exc}")
+        # 409s with a clear "Already handled" message, so the GitHub
+        # merge/close below can only ever run once.
+        from drift_reconciler.pending_applies import claim_decision
+        claim = claim_decision(pending_id, decision, approved_by)
+        if not claim.get("ok"):
+            extra = {k: v for k, v in claim.items()
+                     if k not in ("ok", "http_status", "error")}
+            self._json_error(claim.get("http_status", 409),
+                             claim.get("error", "Decision failed."),
+                             **extra)
             return
 
-        row = claimed[0] if isinstance(claimed, list) else claimed
+        row = claim["row"]
         pr_number = row.get("pr_number")
         scope = row.get("scope")
         if not pr_number or not scope:
             self._json_error(409, "Pending apply row is missing pr_number or scope.")
             return
+
+        # Handler-entry trace: pr_number + pr_type as read from the DB
+        # row (the claim PATCH returns representation), so every merge
+        # run is auditable end to end.
+        print(f"  [approve] decision handler: decision={decision} "
+              f"pr={pr_number} scope={scope} pr_type={row.get('pr_type')}",
+              file=sys.stderr)
 
         def _rollback(reason: str) -> None:
             # GitHub call failed after the row was claimed — restore
@@ -1919,6 +2051,22 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     )
                 except requests.RequestException as exc:
                     print(f"  ⚠ pending row merge-info update failed: {exc}", file=sys.stderr)
+
+            # Policy: merging an unmanaged/security PR auto-adds its
+            # resources/rules to the exception registry so future scans
+            # skip them — no separate manual exception entry.  Fail-soft
+            # (logged inside); the merge itself is already final.
+            print(f"  [approve] auto_add_exceptions_on_merge reached — "
+                  f"pr={pr_number} pr_type={row.get('pr_type')}", file=sys.stderr)
+            try:
+                auto_add_exceptions_on_merge(
+                    pr_number, scope, row.get("pr_type"), approved_by=approved_by,
+                )
+                print("  [approve] auto_add_exceptions_on_merge returned "
+                      "without exception", file=sys.stderr)
+            except Exception as exc:
+                print(f"  [approve] auto_add_exceptions_on_merge raised: {exc}",
+                      file=sys.stderr)
 
             # NOTE: drift_events resolution is deliberately NOT done here.
             # agent.py resolves (approve) / marks reverted (reject) only
@@ -2119,28 +2267,47 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         pr = payload.get("pull_request") or {}
-        if not pr.get("merged"):
-            self._send_no_content()
-            return
-
         title = pr.get("title", "")
-        # Guard: title must contain "Drift fix" (confirms reconciler-created PR)
-        if "Drift fix" not in title:
+        # Guard: title must identify a reconciler-created PR (drift fix,
+        # batch, unmanaged, or security — created by github_integration.py).
+        if not any(s in title for s in ("Drift fix", "Security fix", "Unmanaged resource")):
             self._send_no_content()
             return
 
         pr_number = pr.get("number")
-        merged_at = pr.get("merged_at")
-        merge_commit_sha = pr.get("merge_commit_sha") or ""
-        if not pr_number:
+        # Use the resolved environment's slug as the scope
+        scope = resolved_env.get("slug")
+        if not pr_number or not scope:
             self._send_no_content()
             return
 
-        # Use the resolved environment's slug as the scope
-        scope = resolved_env.get("slug")
-        if not scope:
+        if not pr.get("merged"):
+            # Closed without merging (dashboard reject, or an out-of-band
+            # close): sync GitHub's PR state into drift_events so its rows
+            # never stay open waiting for a job that won't run.  The
+            # revert job spawned by a dashboard reject overwrites with
+            # 'reverted' when it succeeds.
+            try:
+                from drift_reconciler.drift_history import sync_pr_state
+                sync_pr_state(pr_number, scope)
+            except Exception as exc:
+                print(f"  [webhook] drift_events sync failed for PR #{pr_number}: {exc}",
+                      file=sys.stderr)
             self._send_no_content()
             return
+
+        merged_at = pr.get("merged_at")
+        merge_commit_sha = pr.get("merge_commit_sha") or ""
+        # Infer pr_type from the title so the queue keeps its type label on
+        # out-of-band merges too (matches the drift_events vocabulary).
+        if "Security fix" in title:
+            pr_type = "security_only"
+        elif "Unmanaged resource" in title:
+            pr_type = "unmanaged"
+        elif "resource(s)" in title:
+            pr_type = "batch"
+        else:
+            pr_type = "fix"
 
         # ── Insert pending_applies row ──────────────────────────────────
         # Skip if a row already exists for this (pr_number, scope) in ANY
@@ -2168,6 +2335,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     "pr_number": pr_number,
                     "scope": scope,
                     "status": "awaiting_approval",
+                    "pr_type": pr_type,
                     "merged_at": merged_at,
                     "merge_commit_sha": merge_commit_sha or None,
                 },
@@ -2187,6 +2355,16 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             print(f"  [webhook] Supabase unreachable: {exc}", file=sys.stderr)
             self._json_error(502, "Supabase unreachable")
             return
+
+        # Out-of-band merges follow the same policy as the Approve path:
+        # merging an unmanaged/security PR auto-adds its resources/rules
+        # to the exception registry.  (Approval-flow merges already did
+        # this in the decision handler; the dedup here catches this PR's
+        # rows only if no exception exists yet.)
+        auto_add_exceptions_on_merge(
+            pr_number, scope, pr_type,
+            approved_by=(payload.get("sender") or {}).get("login") or "webhook",
+        )
 
         data = json.dumps({"ok": True}).encode("utf-8")
         self.send_response(200)
@@ -2252,15 +2430,30 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
         # ── Determine completeness from the database ──
         complete = False
+        status = None
+        result_output = None
         try:
             url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
             key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
             if url_base and key:
                 headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-                for table in ("scan_runs", "rollback_runs", "pending_applies"):
+                # Route by path: the Approvals drawer polls pending-apply
+                # ids via /api/pending-applies/, Scan/Rollback ids via
+                # /api/scan/.  Probing every table per poll is 2-3
+                # Supabase round-trips a request — fine once, but the
+                # drawer polls every 800 ms, so scope the probe to the
+                # table the id actually lives in.
+                tables = ("pending_applies",) if "/api/pending-applies/" in parsed.path else ("scan_runs", "rollback_runs")
+                for table in tables:
                     try:
+                        # The drawer renders status from this same payload,
+                        # so it has exactly one poller per row — the log
+                        # poll.  select=status,result is pending-only: scan/
+                        # rollback tables don't have a result column, and
+                        # PostgREST 400s on unknown columns.
+                        sel = "status,result" if table == "pending_applies" else "status"
                         resp = requests.get(
-                            f"{url_base}/rest/v1/{table}?select=status&id=eq.{run_id}",
+                            f"{url_base}/rest/v1/{table}?select={sel}&id=eq.{run_id}",
                             headers=headers, timeout=5,
                         )
                         if resp.status_code == 200 and resp.json():
@@ -2268,12 +2461,16 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                             status = row["status"]
                             if table == "pending_applies":
                                 # Apply jobs: terminal states are applied /
-                                # failed / cancelled / reverted_gate_blocked /
-                                # manual_revert_required.
+                                # failed / cancelled / reverted (file-only
+                                # revert) / reverted_gate_blocked /
+                                # manual_revert_required.  The claim states
+                                # 'approved'/'rejected' are NOT terminal.
                                 complete = status in (
-                                    "applied", "failed", "cancelled",
+                                    "applied", "failed", "cancelled", "reverted",
                                     "reverted_gate_blocked", "manual_revert_required",
                                 )
+                                result = row.get("result") or {}
+                                result_output = result.get("output") if isinstance(result, dict) else None
                             else:
                                 complete = status in ("complete", "failed", "cancelled")
                             break
@@ -2284,8 +2481,16 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             # caller will keep polling.
             pass
 
+        # The log file dies with the process (startup purge, restart) while
+        # the row's result lives in the DB — a finished file-only apply that
+        # wrote its whole log as one output line must still render something
+        # after a dashboard restart.  Only when the file is gone AND the row
+        # is terminal, so this never masks live-but-empty logs.
+        if not result_lines and complete and result_output:
+            result_lines.append({"n": 0, "ts": "", "text": result_output})
+
         payload = json.dumps(
-            {"lines": result_lines, "complete": complete},
+            {"lines": result_lines, "complete": complete, "status": status},
             ensure_ascii=False,
         ).encode("utf-8")
         self.send_response(200)
@@ -2456,11 +2661,52 @@ def main() -> int:
 
         return touched
 
+    def _reconcile_stale_drift_events() -> int:
+        """Sync open drift_events rows that carry a PR number against the
+        PR's actual GitHub state (open/closed/merged).
+
+        Backstop for every close/merge action: an out-of-band close, a
+        dead apply job, or a missed webhook must not leave a row 'open'
+        once GitHub has resolved the PR.  Rows whose state is already
+        terminal, or whose PR is still open, are no-ops.  Returns the
+        number of rows synced."""
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        headers = _supabase_headers()
+        if not base or not headers.get("apikey"):
+            return 0
+        try:
+            resp = requests.get(
+                f"{base}/rest/v1/drift_events"
+                f"?select=pr_number,account"
+                f"&status=eq.open"
+                f"&not.pr_number=is.null"
+                f"&limit=50",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code != 200:
+                return 0
+            rows = resp.json() if resp.text else []
+        except (requests.RequestException, ValueError):
+            return 0
+        from drift_reconciler.drift_history import sync_pr_state
+        synced = 0
+        for row in rows:
+            try:
+                state = sync_pr_state(row["pr_number"], row["account"])
+                if state in ("closed", "merged"):
+                    synced += 1
+            except Exception:
+                continue
+        return synced
+
     # Run once at startup.
     try:
         n = _reconcile_stale_runs()
         if n > 0:
             print(f"[stale-reconciler] Startup sweep: {n} stale row(s) reconciled")
+        dn = _reconcile_stale_drift_events()
+        if dn > 0:
+            print(f"[stale-reconciler] Startup sweep: {dn} drift event(s) synced to GitHub PR state")
     except Exception:
         pass
 
@@ -2473,6 +2719,9 @@ def main() -> int:
                 n = _reconcile_stale_runs()
                 if n > 0:
                     print(f"[stale-reconciler] Periodic sweep: {n} stale row(s) reconciled")
+                dn = _reconcile_stale_drift_events()
+                if dn > 0:
+                    print(f"[stale-reconciler] Periodic sweep: {dn} drift event(s) synced to GitHub PR state")
             except Exception:
                 pass
 

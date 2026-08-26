@@ -13,6 +13,7 @@ import time
 import requests
 
 import drift_reconciler.drift_history as drift_history
+import drift_reconciler.unmanaged_scanner as unmanaged_scanner
 from drift_reconciler.github_client_utils import resolve_repo_target
 
 try:
@@ -22,6 +23,12 @@ except ImportError:
 load_env()
 
 REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+class DriftPRError(RuntimeError):
+    """Raised for handled GitHub API failures during PR creation — carries
+    the HTTP status and response data so callers get a diagnosable error
+    instead of a raw PyGithub crash."""
 
 
 def _resolve_github_client(account_label: str):
@@ -163,6 +170,30 @@ def _safe_label(account_label: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "-", account_label)
 
 
+def drift_report_repo_path(account_label: str, resource_id: str) -> str:
+    """Per-scope path for an unmanaged/report-only markdown file.
+
+    Environments often share one GitHub repo; without the account segment,
+    a report written by vpc for ``aws_security_group.launch-wizard-1`` would
+    make a first-time ``dev`` scan skip PR creation (identical-content
+    short-circuit) even though that environment has never reported it.
+    """
+    return (
+        f"drift-reports/{_safe_label(account_label)}/"
+        f"{resource_id.replace('.', '-')}.md"
+    )
+
+
+def _is_report_path(file_path: str) -> bool:
+    """True for markdown drift-reports (safe to stamp for re-review).
+
+    HCL patches must not get an HTML stamp — identical .tf content still
+    skips so we never open an empty terraform PR.
+    """
+    norm = file_path.replace("\\", "/")
+    return norm.startswith("drift-reports/") or norm.endswith(".md")
+
+
 def is_hcledit_available() -> bool:
     return shutil.which("hcledit") is not None
 
@@ -207,10 +238,12 @@ def create_drift_pr(
         is_rollback: bool = False,
         unmanaged: bool = False,
         security: bool = False,
+        review_only: bool = False,
         cost_impact: dict | None = None,
         trivy_passed: bool | None = None,
         trivy_summary: dict | None = None,
-        rolled_back_from_pr: int | None = None):
+        rolled_back_from_pr: int | None = None,
+        append_history: bool = True):
     g, repo, env_branch = _resolve_github_client(account_label)
     if g is None or repo is None:
         raise RuntimeError(
@@ -234,35 +267,97 @@ def create_drift_pr(
     base_ref = repo.get_git_ref(f"heads/{base_branch}")
     repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_ref.object.sha)
 
-    if file_path.startswith("drift-reports/"):
-        # Always a new file — skip the get_contents round-trip.
-        repo.create_file(
-            path=file_path,
-            message=pr_title,
-            content=file_content,
-            branch=head_branch,
-        )
-    else:
+    def _delete_head_branch() -> None:
         try:
-            existing = repo.get_contents(file_path, ref=head_branch)
-            repo.update_file(
-                path=file_path,
-                message=pr_title,
-                content=file_content,
-                sha=existing.sha,
-                branch=head_branch,
-            )
-        except UnknownObjectException:
-            repo.create_file(
-                path=file_path,
-                message=pr_title,
-                content=file_content,
-                branch=head_branch,
-            )
-        except GithubException as e:
-            raise
+            repo.get_git_ref(f"heads/{head_branch}").delete()
+        except GithubException as cleanup_exc:
+            print(f"  ⚠ Failed to delete unused branch {head_branch}: {cleanup_exc}")
 
-    pr_body = f"""## Drift detected: `{resource_id}`
+    # Write the file change on the head branch.  get_contents first: the
+    # path may already exist on the branch (a previously merged drift
+    # report, or a re-run against the same path) — then update it with the
+    # existing blob's sha.  Only when it's genuinely new (404) create it.
+    # Identical blob vs *file_content*: GitHub's Contents API still creates
+    # a commit whose tree SHA is unchanged → PR with changed_files=0
+    # (vpc #93/#94).  For report-only paths (drift-reports/*.md) we still
+    # need a PR when the resource was un-excepted — bump a re-review stamp
+    # so the commit is non-empty and Approvals gets a fresh queue entry.
+    # Routine post-merge noise never reaches here: the active-exception
+    # filter and open-PR dedup sit upstream.  review_only PRs carry NO
+    # file change — the branch stays identical to base on purpose.
+    if not review_only:
+        try:
+            try:
+                existing = repo.get_contents(file_path, ref=head_branch)
+                existing_text = existing.decoded_content.decode("utf-8")
+                if existing_text == file_content:
+                    if _is_report_path(file_path):
+                        stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                        file_content = (
+                            file_content.rstrip()
+                            + f"\n\n<!-- drift-reconciler: re-review {stamp} -->\n"
+                        )
+                        print(
+                            f"  ↻  {resource_id}: {file_path} unchanged on base — "
+                            f"stamping re-review so a new PR can re-enter Approvals"
+                        )
+                    else:
+                        print(
+                            f"  ⏭  {resource_id}: {file_path} already matches "
+                            f"base — skipping empty PR"
+                        )
+                        _delete_head_branch()
+                        return None
+                repo.update_file(
+                    path=file_path,
+                    message=pr_title,
+                    content=file_content,
+                    sha=existing.sha,
+                    branch=head_branch,
+                )
+            except UnknownObjectException:
+                repo.create_file(
+                    path=file_path,
+                    message=pr_title,
+                    content=file_content,
+                    branch=head_branch,
+                )
+        except GithubException as exc:
+            print(f"  ⚠ GitHub file write failed for {file_path} "
+                  f"({exc.status}): {exc.data}")
+            _delete_head_branch()
+            raise DriftPRError(
+                f"GitHub API error writing {file_path} on {head_branch}: "
+                f"{exc.status} {exc.data}"
+            ) from exc
+
+    if review_only:
+        pr_body = f"""## Security finding — manual review requested: `{resource_id}`
+
+Automated fix was **not applied** — these findings need a human decision.
+
+### Findings
+{drift_summary}
+
+### Why no fix was applied
+```text
+{plan_output}
+```
+
+Merge this PR to acknowledge and suppress the findings; close it to keep scanning.
+_Opened automatically by AWS Terraform Drift Reconciler. Do not merge without review._
+"""
+    else:
+        # The body heading must reflect what kind of PR this is — a
+        # security or unmanaged PR that says "Drift detected" misleads
+        # the reviewer.  fix/rollback/batch keep the drift wording.
+        if security:
+            heading = f"## Security issue detected: `{resource_id}`"
+        elif unmanaged:
+            heading = f"## Unmanaged resource detected: `{resource_id}`"
+        else:
+            heading = f"## Drift detected: `{resource_id}`"
+        pr_body = f"""{heading}
 
 **Risk level:** {risk_level}
 
@@ -295,27 +390,30 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
 
     # Append to the per-account drift history (Supabase) for trend
     # reporting and rollback.  The changes_jsonb column stores the full
-    # {field: {before, after}} dict.
-    try:
-        drift_history.append_entry(
-            resource_id=resource_id,
-            account_label=account_label,
-            region=os.environ.get("AWS_REGION", "unknown"),
-            pr_number=pr.number,
-            pr_type="rollback" if is_rollback else "security_only" if security else "unmanaged" if unmanaged else "fix",
-            severity=risk_level,
-            fields_changed=list(changes.keys()) if changes else [],
-            drift_summary=drift_summary,
-            changes_jsonb=changes,
-            file_path=file_path,
-            cost_impact=cost_impact,
-            trivy_passed=trivy_passed,
-            trivy_summary=trivy_summary,
-            rolled_back_from_pr=rolled_back_from_pr,
-            unmanaged=unmanaged,
-        )
-    except Exception as exc:
-        print(f"  ⚠ Failed to append drift history: {exc}")
+    # {field: {before, after}} dict.  Batch PRs pass append_history=False —
+    # create_drift_pr_for_file writes one "batch" row per finding itself,
+    # so the synthetic branch_id row would otherwise be typed "fix".
+    if append_history:
+        try:
+            drift_history.append_entry(
+                resource_id=resource_id,
+                account_label=account_label,
+                region=os.environ.get("AWS_REGION", "unknown"),
+                pr_number=pr.number,
+                pr_type="rollback" if is_rollback else "security_only" if security else "unmanaged" if unmanaged else "fix",
+                severity=risk_level,
+                fields_changed=list(changes.keys()) if changes else [],
+                drift_summary=drift_summary,
+                changes_jsonb=changes,
+                file_path=file_path,
+                cost_impact=cost_impact,
+                trivy_passed=trivy_passed,
+                trivy_summary=trivy_summary,
+                rolled_back_from_pr=rolled_back_from_pr,
+                unmanaged=unmanaged,
+            )
+        except Exception as exc:
+            print(f"  ⚠ Failed to append drift history: {exc}")
 
     print(f"🎉 PR Created: {pr.html_url}")
     return pr
@@ -340,7 +438,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         pr_title = f"Drift fix: {resource_id} [{risk_level}]"
         content = patched_file_content
         target_path = to_repo_relative_path(file_path)
-    elif finding.get("status") in ("unmanaged", "unmanaged_tagged"):
+    elif finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
         pr_title = f"Unmanaged resource: {resource_id} [{risk_level}]"
         content = (
             f"# Unmanaged resource: {resource_id}\n\n"
@@ -350,13 +448,13 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
             f"the corresponding `.tf` resource block, then re-run the "
             f"drift reconciler to track it."
         )
-        target_path = f"drift-reports/{resource_id.replace('.', '-')}.md"
+        target_path = drift_report_repo_path(account_label, resource_id)
     else:
         pr_title = f"Drift fix: {resource_id} [{risk_level}] (report only)"
         content = (f"# Drift report: {resource_id}\n\n{finding['drift_summary']}\n\n"
                    f"```\n{finding['plan_output']}\n```\n\n"
                    f"Merging is a no-op on code — run `terraform apply` to revert AWS.")
-        target_path = f"drift-reports/{resource_id.replace('.', '-')}.md"
+        target_path = drift_report_repo_path(account_label, resource_id)
 
     cost = finding.get("cost_impact")
     if cost:
@@ -373,7 +471,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
             f"{runtime_line}\n"
         )
 
-    is_unmanaged = finding.get("status") in ("unmanaged", "unmanaged_tagged")
+    is_unmanaged = finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES
     return create_drift_pr(
         resource_id=resource_id,
         pr_title=pr_title,
@@ -523,6 +621,7 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
         account_label=account_label,
         trivy_passed=any(f.get("trivy_passed") for f in actionable),
         trivy_summary=_build_batch_trivy_summary(actionable),
+        append_history=False,
     )
     if pr is None:
         return None

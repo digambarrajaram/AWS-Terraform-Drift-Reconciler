@@ -60,12 +60,15 @@ export default defineConfig({
     fs: {
       strict: true,
     },
-    // Proxy /api requests to the Express API server.
-    // In production (Replit), the platform router handles this instead and
-    // the Vite dev server is not used (static files are served directly).
+    // Proxy /api to the Python dashboard backend (serve.py on :8080).
+    // Override with API_SERVER_URL=http://localhost:3000 if you run the
+    // optional Express api-server in front of serve.py.
+    // A wrong/missing target surfaces as HTTP 500 on every /api/* call in
+    // the browser (ECONNREFUSED from http-proxy) — that is what made
+    // Approvals show "0 records" and the sidebar "No active environments."
     proxy: {
       '/api': {
-        target: process.env.API_SERVER_URL || 'http://localhost:3000',
+        target: process.env.API_SERVER_URL || 'http://localhost:8080',
         changeOrigin: true,
       },
     },

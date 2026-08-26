@@ -84,6 +84,35 @@ def _extract_field_values(
     return ("not_found", {})
 
 
+def changed_resource_addresses(plan_json: dict) -> set[str]:
+    """Return the addresses of resources whose planned change is not a
+    no-op — i.e. resources that still differ between live state and the
+    code at plan time.  A resource absent from this set was either never
+    in the plan or matches the code: its recorded drift is resolved."""
+    changed: set[str] = set()
+    for rc in plan_json.get("resource_changes", []):
+        actions = set(rc.get("change", {}).get("actions", []))
+        if actions - {"no-op"}:
+            address = rc.get("address")
+            if address:
+                changed.add(address)
+    return changed
+
+
+def live_drift_rows(rows: list[dict], plan_json: dict) -> list[dict]:
+    """Filter open drift rows down to the ones still drifted *right now*.
+
+    Rows are detection-time state; the plan JSON is live reality.  A
+    managed row counts only if its resource still appears in the plan
+    with a change.  Unmanaged resources have no plan representation and
+    can't be live-verified — they always count."""
+    changed = changed_resource_addresses(plan_json)
+    return [
+        r for r in rows
+        if r.get("unmanaged") or r.get("resource_id") in changed
+    ]
+
+
 # ── Main ──
 
 def main() -> int:

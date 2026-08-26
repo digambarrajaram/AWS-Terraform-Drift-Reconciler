@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import {
@@ -11,6 +11,7 @@ import { LogViewer } from '@/components/shared/LogViewer';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { apiFetch } from '@/api/apiFetch';
 import { useScope } from '@/hooks/useScope';
+import { runningLabel, decisionToast, isJobDone } from './approval-labels';
 import { useScanLogs } from '@/hooks/useScanLogs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '@/lib/errorUtils';
@@ -22,7 +23,8 @@ interface PendingApply {
   pr_number: number;
   scope: string;
   status: 'awaiting_approval' | 'approved' | 'rejected' | 'applied' | 'failed'
-    | 'cancelled' | 'reverted_gate_blocked' | 'manual_revert_required';
+    | 'cancelled' | 'reverted' | 'reverted_gate_blocked' | 'manual_revert_required';
+  pr_type: string | null;
   merged_at: string | null;
   approved_by: string | null;
   approved_at: string | null;
@@ -48,11 +50,30 @@ interface PrDetails {
   html_url: string;
 }
 
+const PR_TYPE_LABEL: Record<string, string> = {
+  fix: 'Fix', batch: 'Batch', unmanaged: 'Unmanaged',
+  security_only: 'Security', rollback: 'Rollback', manual: 'Manual',
+};
+
+// approved/rejected are the backend's *claim* states — the job is still
+// running, so they must never render as a terminal-looking status.  The
+// list shows a running badge instead; the final status (applied/failed/
+// …) is only displayed once the backend job writes it.
+const RUNNING_STYLE = 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse';
+
+function displayStatus(status: PendingApply['status'], prType: PendingApply['pr_type']): { label: string; style: string } {
+  const running = runningLabel(status, prType);
+  return running
+    ? { label: running, style: RUNNING_STYLE }
+    : { label: status.replace(/_/g, ' '), style: STATUS_STYLE[status] };
+}
+
 const STATUS_STYLE: Record<PendingApply['status'], string> = {
   awaiting_approval:      'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   approved:               'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
   rejected:               'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400',
   applied:                'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
+  reverted:               'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
   failed:                 'bg-zinc-100   text-zinc-600   dark:bg-zinc-800  dark:text-zinc-400',
   cancelled:              'bg-slate-100  text-slate-700  dark:bg-slate-900/30 dark:text-slate-400',
   reverted_gate_blocked:  'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
@@ -104,11 +125,12 @@ function MarkdownBody({ body }: { body: string }) {
 // ── Detail drawer ──────────────────────────────────────────────────────────
 
 function DetailDrawer({
-  row, onClose, onDecide,
+  row, onClose, onDecide, deciding,
 }: {
   row: PendingApply | null;
   onClose: () => void;
   onDecide: (row: PendingApply, decision: 'approved' | 'rejected') => void;
+  deciding: boolean;
 }) {
   const open = !!row;
 
@@ -118,32 +140,73 @@ function DetailDrawer({
     queryFn: () => apiFetch<PrDetails>(`/pending-applies/${row!.id}/pr-details`),
   });
 
-  // Poll the live row while the drawer is open — the list query only
-  // refetches every 30s, which made the badge look stuck after a decision.
-  const { data: liveRow } = useQuery<PendingApply>({
-    queryKey: ['pendingApply', row?.id],
-    enabled: !!row,
-    refetchInterval: 3000,
-    queryFn: () => apiFetch<PendingApply>(`/pending-applies/${row!.id}`),
-  });
-  const current = liveRow ?? row;
-
+  // One poller per open drawer: the serialized log poll (useScanLogs)
+  // doubles as the live-status feed — the endpoint returns the row's
+  // status in the same page it computes `complete` from, so the badge
+  // updates at poll cadence (800 ms) without a second /pending-applies/
+  // {id} query running alongside.  The list query still refreshes rows
+  // with no job (awaiting_approval polls nothing).
+  //
   // Apply/revert job logs are keyed by the pending row id.  Keep the id
   // even after the status turns terminal (applied/failed/…) so the final
   // logs persist in the drawer — nulling it there would reset the hook's
   // accumulated lines exactly when "Job finished" is about to render.
-  // Only awaiting_approval polls nothing (no job has ever run for it).
-  const { lines, complete } = useScanLogs(
-    current && current.status !== 'awaiting_approval' ? current.id : null,
-  );
-
   // Backend run state for the indicator:
-  //   approved/rejected  → job spawned, still running
-  //   applied/failed/manual_revert_required/reverted_gate_blocked → done
+  //   approved/rejected  → job spawned, still running (claim state)
+  //   applied/failed/reverted/manual_revert_required/
+  //   reverted_gate_blocked → done (terminal; 'reverted' = file-only reject)
   //   cancelled → stopped by user
-  const jobRunning = current && ['approved', 'rejected'].includes(current.status);
-  const jobDone = current && ['applied', 'failed', 'manual_revert_required',
-    'reverted_gate_blocked', 'cancelled'].includes(current.status);
+  const jobRunning = row && ['approved', 'rejected'].includes(row.status);
+
+  // complete lags one render behind the hook's fetch — read it through a
+  // ref so the active gate below can reference it without a circular
+  // dependency on the hook call it feeds.
+  const completeRef = useRef(false);
+  // Sticky run id: once this drawer has left awaiting_approval, keep polling
+  // that id even across status flips.  Nulling runId on a brief status blip
+  // would clear useScanLogs' buffer exactly when "Job finished" renders.
+  const logRunIdRef = useRef<string | null>(null);
+  const openId = row?.id ?? null;
+  const prevOpenIdRef = useRef<string | null>(null);
+  if (!row) {
+    logRunIdRef.current = null;
+  } else if (row.status !== 'awaiting_approval') {
+    logRunIdRef.current = row.id;
+  }
+  const logRunId = logRunIdRef.current;
+  // Reset the gate before useScanLogs so a prior PR's complete:true doesn't
+  // force active=false on the first render of the next row.  Don't mirror
+  // ``complete`` on that same render — useScanLogs still returns the previous
+  // run's flag until its reset effect runs.
+  const openIdChanged = prevOpenIdRef.current !== openId;
+  if (openIdChanged) {
+    prevOpenIdRef.current = openId;
+    completeRef.current = false;
+  }
+
+  // Only awaiting_approval polls nothing (no job has ever run for it).
+  // Poll the pending-applies endpoint (single-table completeness probe),
+  // stay armed while the job runs, and stop once the row is terminal AND
+  // the backend has confirmed complete:true — within one interval of the
+  // terminal status being set, never indefinitely.  The active gate reads
+  // row.status (list query) — one render behind the log feed, which is
+  // exactly the lag completeRef already bridges; serialPoll stops on
+  // complete:true regardless.
+  const { lines, complete, status: logStatus } = useScanLogs(
+    logRunId,
+    !!(row && (jobRunning || (isJobDone(row.status) && !completeRef.current))),
+    'pending',
+  );
+  if (!openIdChanged) {
+    completeRef.current = complete;
+  }
+
+  // Live status comes from the log poll; the list row is the fallback for
+  // rows that never had a job (awaiting_approval polls nothing).
+  const current = row && logStatus
+    ? { ...row, status: logStatus as PendingApply['status'] }
+    : row;
+  const jobDone = current && isJobDone(current.status);
 
   const [cancelling, setCancelling] = useState(false);
   const cancel = useCallback(async () => {
@@ -172,8 +235,8 @@ function DetailDrawer({
             <SheetHeader className="mb-4">
               <SheetTitle className="text-base break-all flex items-center gap-2">
                 PR #{row.pr_number}
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLE[current.status]}`}>
-                  {current.status.replace(/_/g, ' ')}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${displayStatus(current.status, current.pr_type).style}`}>
+                  {displayStatus(current.status, current.pr_type).label}
                 </span>
               </SheetTitle>
             </SheetHeader>
@@ -183,7 +246,7 @@ function DetailDrawer({
               <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-100/50 dark:bg-amber-900/20 px-3 py-2">
                 <Loader2 size={14} className="animate-spin text-amber-600 dark:text-amber-400" />
                 <span className="text-xs text-amber-800 dark:text-amber-300">
-                  {current.status === 'approved' ? 'Applying accepted drift…' : 'Reverting drift…'} — job in progress
+                  {runningLabel(current.status, current.pr_type) || 'Working…'} — job in progress
                 </span>
               </div>
             )}
@@ -295,15 +358,17 @@ function DetailDrawer({
               <div className="flex items-center gap-2 mt-5">
                 <button
                   type="button"
-                  onClick={() => onDecide(row, 'approved')}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                  disabled={deciding}
+                  onClick={() => onDecide(current, 'approved')}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
-                  <CheckCircle size={13} /> Approve & Merge
+                  <CheckCircle size={13} /> {deciding ? 'Working…' : 'Approve & Merge'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => onDecide(row, 'rejected')}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90"
+                  disabled={deciding}
+                  onClick={() => onDecide(current, 'rejected')}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   <XCircle size={13} /> Reject & Close
                 </button>
@@ -311,11 +376,15 @@ function DetailDrawer({
             )}
 
             {/* ── Apply logs + cancel (running) / final logs (done) ──── */}
-            {(jobRunning || (jobDone && complete)) && (
+            {/* Show whenever we have lines or a job in flight/finished —
+                do not wait for complete:true.  Gating on complete hid the
+                panel in the gap between status=applied and the log poll's
+                final page, which looked like the buffer was wiped. */}
+            {(jobRunning || jobDone || lines.length > 0) && (
               <div className="mt-5 space-y-2">
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-medium text-foreground">
-                    {current.status === 'approved' ? 'Applying accepted drift…' : 'Reverting drift…'}
+                    {runningLabel(current.status, current.pr_type) || (complete ? 'Log complete' : jobDone ? 'Finishing…' : 'Working…')}
                   </p>
                   {jobRunning && (
                     <button
@@ -345,15 +414,43 @@ export default function Approvals() {
   const queryClient = useQueryClient();
 
   const [selected, setSelected] = useState<PendingApply | null>(null);
+  const [deciding, setDeciding] = useState(false);
 
   const { data, isLoading, error, isFetching } = useQuery<PendingApply[]>({
     queryKey: ['pendingApplies', scope],
     enabled: !!scope,
-    refetchInterval: 30_000,
+    // Poll fast while any row's job is still running (approved/rejected
+    // claim state); slow back down once everything is terminal.  The
+    // backend writes the final status (applied/failed/…) itself, so the
+    // displayed status only flips when the job confirms.
+    refetchInterval: (query) =>
+      (query.state.data as PendingApply[] | undefined)?.some(
+        (r) => r.status === 'approved' || r.status === 'rejected',
+      )
+        ? 3000
+        : 30_000,
     queryFn: () => apiFetch<PendingApply[]>(`/pending-applies?status=all${scope ? `&scope=${encodeURIComponent(scope)}` : ''}`),
   });
 
+  // Keep the open drawer in sync with list polls.  Without this, a
+  // successful Approve leaves `selected.status` stuck on awaiting_approval
+  // so the buttons stay clickable and a second POST 409s ("already handled").
+  useEffect(() => {
+    if (!selected || !data) return;
+    const fresh = data.find((r) => r.id === selected.id);
+    if (!fresh) return;
+    if (
+      fresh.status !== selected.status
+      || fresh.approved_at !== selected.approved_at
+      || fresh.merged_at !== selected.merged_at
+    ) {
+      setSelected(fresh);
+    }
+  }, [data, selected]);
+
   const decide = useCallback(async (row: PendingApply, decision: 'approved' | 'rejected') => {
+    if (deciding) return;
+    setDeciding(true);
     try {
       const res = await apiFetch<{ apply_started?: boolean; error?: string }>(
         `/pending-applies/${row.id}/decision`,
@@ -375,22 +472,37 @@ export default function Approvals() {
         });
         return;
       }
-      toast.success(decision === 'approved'
-        ? `PR #${row.pr_number} approved — merge + apply started`
-        : `PR #${row.pr_number} rejected — close + revert started`);
+      toast.success(decisionToast(row.pr_number, decision, row.pr_type));
+      // Show the running state instantly — the claim lands in the backend
+      // before this toast, so mirror it in the cache *and* the open drawer
+      // without waiting for the next poll.  The final status still only
+      // comes from the backend.
+      const claimed = { ...row, status: decision as PendingApply['status'] };
+      setSelected((prev) => (prev?.id === row.id ? claimed : prev));
+      queryClient.setQueryData<PendingApply[]>(['pendingApplies', scope], (rows) =>
+        rows?.map((r) => (r.id === row.id ? { ...r, status: decision } : r)) ?? rows,
+      );
       queryClient.invalidateQueries({ queryKey: ['pendingApplies'] });
       queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
       // Refetch the drawer's live row immediately — otherwise the log
       // poller waits for the 3s refetchInterval before it even starts.
       queryClient.invalidateQueries({ queryKey: ['pendingApply', row.id] });
     } catch (err) {
-      // Backend surfaces merge/close failures as ApiError with a clear
-      // message (e.g. "GitHub merge failed: 405 Branch protection...").
-      toast.error(decision === 'approved' ? 'Failed to approve' : 'Failed to reject', {
-        description: err instanceof Error ? err.message : String(err),
-      });
+      // Backend surfaces merge/close failures and already-handled claims
+      // as ApiError with a clear message (e.g. "Already handled — …").
+      const msg = err instanceof Error ? err.message : String(err);
+      const already = /already handled/i.test(msg);
+      toast.error(
+        already
+          ? 'Already handled'
+          : (decision === 'approved' ? 'Failed to approve' : 'Failed to reject'),
+        { description: msg },
+      );
+      queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
+    } finally {
+      setDeciding(false);
     }
-  }, [queryClient, scope]);
+  }, [queryClient, scope, deciding]);
 
   const rows = data ?? [];
 
@@ -434,14 +546,14 @@ export default function Approvals() {
             <table className="w-full text-sm min-w-[760px]">
               <thead>
                 <tr className="border-b border-border bg-muted/40 text-left">
-                  {['PR', 'Scope', 'Merged', 'Status', 'Decided By', 'Decided At', ''].map((h) => (
+                  {['PR', 'Scope', 'Type', 'Merged', 'Status', 'Decided By', 'Decided At', ''].map((h) => (
                     <th key={h} className="px-4 py-2.5 text-xs font-medium text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {rows.map((row) => {
-                  const style = STATUS_STYLE[row.status];
+                  const shown = displayStatus(row.status, row.pr_type);
                   const awaiting = row.status === 'awaiting_approval';
                   return (
                     <tr
@@ -455,11 +567,14 @@ export default function Approvals() {
                       <td className="px-4 py-3 font-mono text-xs">#{row.pr_number}</td>
                       <td className="px-4 py-3 font-mono text-xs">{row.scope}</td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
+                        {row.pr_type ? (PR_TYPE_LABEL[row.pr_type] ?? row.pr_type) : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                         {fmtDate(row.merged_at)}
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style}`}>
-                          {row.status.replace(/_/g, ' ')}
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${shown.style}`}>
+                          {shown.label}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground">{row.approved_by ?? '—'}</td>
@@ -495,7 +610,7 @@ export default function Approvals() {
         </div>
       )}
 
-      <DetailDrawer row={selected} onClose={() => setSelected(null)} onDecide={decide} />
+      <DetailDrawer row={selected} onClose={() => setSelected(null)} onDecide={decide} deciding={deciding} />
     </div>
   );
 }

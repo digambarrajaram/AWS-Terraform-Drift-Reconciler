@@ -15,6 +15,12 @@ export interface ScanRun {
   result_summary: {
     mode?: string;
     report_path?: string;
+    /** Present when status=failed — from humanize_terraform_error. */
+    summary?: string;
+    detail?: string;
+    suggestion?: string;
+    notice?: string;
+    skipped_stages?: string[];
     drift?: {
       found: boolean;
       count: number;

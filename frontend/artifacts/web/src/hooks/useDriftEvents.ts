@@ -10,7 +10,7 @@ export type SortColumn = 'created_at' | 'severity' | 'resource_id';
 export interface DriftFilters {
   statusFilter:   string; // 'open' | 'resolved' | 'suppressed' | 'all'
   severityFilter: string; // 'HIGH' | 'MEDIUM' | 'LOW' | 'all'
-  typeFilter:     string; // 'fix' | 'batch' | 'rollback' | 'unmanaged' | 'manual' | 'all'
+  typeFilter:     string; // 'fix' | 'batch' | 'rollback' | 'unmanaged' | 'security_only' | 'manual' | 'all'
   search:         string; // resource_id ilike
   // Optional date range — used by Explorer; PrQueue leaves these undefined
   dateFrom?: string;      // ISO date string, inclusive

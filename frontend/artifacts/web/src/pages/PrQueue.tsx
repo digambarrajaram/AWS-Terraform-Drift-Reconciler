@@ -303,6 +303,7 @@ function FilterBar({
         <option value="resolved">Resolved</option>
         <option value="suppressed">Suppressed</option>
         <option value="reverted">Reverted</option>
+        <option value="manual_revert_required">Manual revert required</option>
       </select>
 
       {/* Severity */}

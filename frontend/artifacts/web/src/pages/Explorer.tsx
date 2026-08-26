@@ -423,6 +423,8 @@ function FilterBar({
           <option value="open">Open</option>
           <option value="resolved">Resolved</option>
           <option value="suppressed">Suppressed</option>
+          <option value="reverted">Reverted</option>
+          <option value="manual_revert_required">Manual revert required</option>
         </select>
 
         {/* Severity */}
@@ -442,6 +444,7 @@ function FilterBar({
           <option value="batch">Batch</option>
           <option value="rollback">Rollback</option>
           <option value="unmanaged">Unmanaged</option>
+          <option value="security_only">Security Only</option>
           <option value="manual">Manual</option>
         </select>
 

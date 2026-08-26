@@ -187,6 +187,42 @@ def _scrub_token(text: str) -> str:
     return _TOKEN_RE.sub("https://<redacted>@", text)
 
 
+def refresh_clone(clone_path: str, branch: str, slug: str = "") -> None:
+    """Fetch + hard-reset an existing clone so it matches ``origin/branch``.
+
+    Shared by ``resolve_tf_dir`` and agent.py's scan path — a direct CLI
+    run with an explicit ``--tf-dir`` skips ``resolve_tf_dir``, so the
+    scan path calls this itself when tf_dir lives inside the clone base.
+    No-op when the clone is already current (fetch finds nothing new,
+    reset is a no-op).  Raises ``RuntimeError`` on failure."""
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=clone_path,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=120,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "reset", "--hard", f"origin/{branch}"],
+            cwd=clone_path,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=60,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"git refresh failed for environment '{slug}': "
+            f"{_scrub_token(str(exc))[:300]}"
+        ) from exc
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"git refresh timed out for environment '{slug}'"
+        )
+
+
 def resolve_tf_dir(environment: dict) -> str:
     """Return the absolute local path to this environment's Terraform
     directory.  If the environment has a ``repo_url``, the repo is cloned
@@ -260,32 +296,7 @@ def resolve_tf_dir(environment: dict) -> str:
             ) from exc
     else:
         # Refresh existing clone — fetch + hard reset, no merge noise.
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", branch],
-                cwd=clone_path,
-                capture_output=True,
-                encoding="utf-8",
-                timeout=120,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "reset", "--hard", f"origin/{branch}"],
-                cwd=clone_path,
-                capture_output=True,
-                encoding="utf-8",
-                timeout=60,
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                f"git refresh failed for environment '{slug}': "
-                f"{_scrub_token(str(exc))[:300]}"
-            ) from exc
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"git refresh timed out for environment '{slug}'"
-            )
+        refresh_clone(clone_path, branch, slug)
 
     # Return clone_path + tf_directory_path subpath (or clone_path alone).
     sub = (environment.get("tf_directory_path") or "").strip().lstrip("/")

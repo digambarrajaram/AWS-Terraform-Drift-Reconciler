@@ -9,6 +9,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any
@@ -91,12 +92,15 @@ def _walk_state_resources(module: dict, resources: list[dict]) -> None:
     """Recurse into *module* and its child modules, appending every
     resource identity to *resources* in-place."""
     for res in module.get("resources", []):
-        arn = res.get("values", {}).get("arn")
+        values = res.get("values", {})
+        arn = values.get("arn")
+        tags = values.get("tags")
         resources.append(
             {
                 "type": res["type"],
                 "name": res["name"],
                 "arn": arn if isinstance(arn, str) else None,
+                "tags": tags if isinstance(tags, dict) else {},
             }
         )
     for child in module.get("child_modules", []):
@@ -109,7 +113,14 @@ def load_managed_resources(tf_dir: str, env: dict | None = None) -> list[dict[st
     Runs ``terraform show -json`` which works for both local and remote
     (S3) backends — no need to parse backend.tf manually.  *env* is the
     subprocess environment; when None the caller inherits the ambient
-    environment."""
+    environment.
+
+    Fail-soft via the terraform CLI itself: on an uninitialized dir
+    ``terraform show`` exits nonzero and we return [] (the unmanaged
+    diff is purely live-AWS data).  No modules.json probe — module-less
+    configs (prod-kyc's ``ec2_terraform_account_a/``) never get
+    ``.terraform/modules/modules.json`` written by init, so a probe
+    would skip show for a fully initialized dir."""
     result = subprocess.run(
         ["terraform", "show", "-no-color", "-json"],
         cwd=tf_dir,
@@ -154,7 +165,8 @@ def _load_exceptions(scope: str) -> list[dict[str, Any]]:
             return []
         resp = requests.get(
             f"{url}/rest/v1/drift_exception_registry"
-            f"?select=resource_type,resource_id_pattern,reason,approved_by,max_monthly_cost_usd"
+            f"?select=resource_type,resource_id_pattern,reason,approved_by,"
+            f"max_monthly_cost_usd,created_at"
             f"&scope=eq.{scope}&exception_type=eq.unmanaged&active=eq.true",
             headers={"apikey": key, "Authorization": f"Bearer {key}"},
             timeout=10,
@@ -164,6 +176,49 @@ def _load_exceptions(scope: str) -> list[dict[str, Any]]:
         return []
     except requests.RequestException:
         return []
+
+
+def format_exception_attribution(exc: dict[str, Any]) -> str:
+    """Plain-language 'added …' clause for skip messages, or '' if unknown."""
+    who = (exc.get("approved_by") or "").strip()
+    when_raw = (exc.get("created_at") or exc.get("approved_date") or "").strip()
+    when = when_raw[:10] if when_raw else ""
+    if who and when:
+        return f"added {when} by {who}"
+    if who:
+        return f"added by {who}"
+    if when:
+        return f"added {when}"
+    return ""
+
+
+def print_exceptions_lookup_summary(scope: str, exceptions: list[dict[str, Any]]) -> None:
+    """Human-readable CLI summary of active unmanaged exceptions for *scope*."""
+    n = len(exceptions)
+    if n == 0:
+        print(
+            f"  No resources are currently excepted for {scope} — "
+            f"all findings will be evaluated normally."
+        )
+        return
+    pairs = [
+        f"{exc.get('resource_type') or '?'}/"
+        f"{exc.get('resource_id_pattern') or '?'}"
+        for exc in exceptions
+    ]
+    print(
+        f"  {n} resource(s) excepted for {scope} — these will be skipped: "
+        f"{', '.join(pairs)}"
+    )
+
+
+def print_exception_skip(resource_label: str, exc: dict[str, Any] | None = None) -> None:
+    """Human-readable line when a finding is skipped due to an exception."""
+    attr = format_exception_attribution(exc) if exc else ""
+    if attr:
+        print(f"  Skipping {resource_label}: already excepted ({attr})")
+    else:
+        print(f"  Skipping {resource_label}: already excepted")
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +397,74 @@ def _make_resource_id(resource_type: str, raw_name: str, aws_id: str) -> str:
     return f"{resource_type}.{name}"
 
 
+# Statuses this module produces.  Downstream (agent.py, github_integration.py)
+# splits findings into "unmanaged-family" vs plain drift on this set — extend
+# here, not at every call site.
+UNMANAGED_STATUSES = frozenset({"unmanaged", "unmanaged_tagged", "possibly_renamed"})
+
+# Tag keys whose shared values make two resources plausibly the same
+# logical resource (used by the possibly-renamed matcher).
+_IDENTITY_TAG_KEYS = (
+    "Environment", "environment", "Project", "project", "Role", "role",
+    "Service", "service", "Application", "application", "Stack", "stack",
+    "Purpose", "purpose", "Team", "team",
+)
+
+
+def _strip_trailing_number(name: str) -> str:
+    """Strip a trailing numeric/separator suffix ("web-02" → "web")."""
+    return re.sub(r"[-_.]?\d+$", "", name)
+
+
+def _same_name_family(a: str, b: str) -> bool:
+    """True when names *a* and *b* are the same family — identical, one a
+    prefix of the other with only separator/digit suffixes ("prod-web" vs
+    "prod-web-2"), or the same base once trailing -N suffixes are
+    stripped ("web-01" vs "web-02").  The shared part must be ≥ 5 chars
+    so short generic names ("app") don't match everything."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True  # same Name tag, different AWS ID — replaced in place
+    if len(a) >= 5 and b.startswith(a) and not b[len(a):].strip("-_.0123456789"):
+        return True
+    if len(b) >= 5 and a.startswith(b) and not a[len(b):].strip("-_.0123456789"):
+        return True
+    base_a, base_b = _strip_trailing_number(a), _strip_trailing_number(b)
+    if base_a != base_b or base_a == a or base_b == b:
+        return False  # not a numbered pair, or one side has no suffix
+    return min(len(a), len(b)) >= 5  # real-name family, not "app"/"app-1"
+
+
+def _shared_identity_tag(live_tags: dict, managed_tags: dict) -> bool:
+    """True when both resource tag sets share a value on any identity key."""
+    for key in _IDENTITY_TAG_KEYS:
+        lv, mv = live_tags.get(key), managed_tags.get(key)
+        if lv and mv and str(lv) == str(mv):
+            return True
+    return False
+
+
+def _strong_managed_match(live: dict, managed_resources: list[dict]) -> dict | None:
+    """Return the managed resource *live* most likely replaced or renamed,
+    or ``None``.  Same resource type only; a match is strong when the
+    live resource's Name shares a family with the managed resource's
+    Name tag (or terraform name), or when both share an identity tag
+    value (Environment/Project/Role/Service/…)."""
+    live_tags = live.get("tags") or {}
+    live_name = live.get("raw_name") or ""
+    for m in managed_resources:
+        if m.get("type") != live.get("type"):
+            continue
+        m_tags = m.get("tags") or {}
+        m_name = str(m_tags.get("Name") or m.get("name") or "")
+        if _same_name_family(live_name, m_name):
+            return {**m, "match_reason": "name family"}
+        if _shared_identity_tag(live_tags, m_tags):
+            return {**m, "match_reason": "identity tags"}
+    return None
+
+
 def diff_unmanaged(
     live_resources: list[dict[str, Any]],
     managed_resources: list[dict[str, Any]],
@@ -369,6 +492,8 @@ def diff_unmanaged(
         managed_keys.add((r["type"], r["name"]))
 
     exceptions = _load_exceptions(scope) if scope else []
+    if scope:
+        print_exceptions_lookup_summary(scope, exceptions)
 
     findings: list[dict[str, Any]] = []
     for live in live_resources:
@@ -383,7 +508,7 @@ def diff_unmanaged(
 
         # ---- Match against exceptions ----
         resource_label = live.get("raw_name") or live.get("id")
-        suppressed = False
+        matched_exc: dict[str, Any] | None = None
         for exc in exceptions:
             if exc.get("resource_type") != live["type"]:
                 continue
@@ -399,9 +524,52 @@ def diff_unmanaged(
                 monthly = est["monthly_estimate_usd"] if est else 0
                 if monthly >= max_cost:
                     continue  # too expensive to suppress
-            suppressed = True
+            matched_exc = exc
             break
-        if suppressed:
+        if matched_exc is not None:
+            rid = _make_resource_id(live["type"], live.get("raw_name", ""), live["id"])
+            print_exception_skip(rid, matched_exc)
+            continue
+
+        # ---- Possibly renamed/replaced managed resource ----
+        # Unmatched by ARN/name, but still resembles a managed resource
+        # of the same type — same Name tag family (e.g. a replaced
+        # instance) or shared identity tags.  Flag for human review
+        # instead of reporting plain unmanaged: this may be a managed
+        # resource replaced or renamed outside IaC.
+        match = _strong_managed_match(live, managed_resources)
+        if match:
+            cost = _build_cost_impact(live, region)
+            summary = (
+                f"Resource exists in AWS and is not tracked in Terraform "
+                f"state, but closely matches managed resource "
+                f"{match['type']}.{match['name']} ({match['match_reason']}). "
+                f"It may be a renamed or replaced managed resource — "
+                f"review before treating it as unmanaged."
+            )
+            if cost:
+                summary += (
+                    f" Estimated cost: ${cost['monthly_estimate_usd']:.2f}/mo "
+                    f"(${cost['hourly_usd']:.4f}/hr). Accrued: ${cost['accrued_usd']:.2f}."
+                )
+            findings.append(
+                {
+                    "resource_id": _make_resource_id(live["type"], live.get("raw_name", ""), live["id"]),
+                    "risk_level": "MEDIUM",
+                    "drift_summary": summary,
+                    "plan_output": json.dumps(live, indent=2, default=str),
+                    "file_path": None,
+                    "changes": {},
+                    "status": "possibly_renamed",
+                    "cost_impact": cost,
+                    "possible_match": {
+                        "resource_id": f"{match['type']}.{match['name']}",
+                        "arn": match.get("arn"),
+                        "name_tag": (match.get("tags") or {}).get("Name"),
+                        "match_reason": match["match_reason"],
+                    },
+                }
+            )
             continue
 
         # ---- Classify ----

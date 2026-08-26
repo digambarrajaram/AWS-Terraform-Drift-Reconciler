@@ -60,6 +60,15 @@ def humanize_terraform_error(raw_error: str) -> dict:
     text = raw_error.lower() if raw_error else ""
 
     patterns = [
+        (("terraform init failed", "error installing", "failed to install provider",
+          "failed to query provider", "could not download", "provider registry"), {
+            "summary": "Terraform init failed — the unmanaged scan could not load state.",
+            "suggestion": (
+                "Check network access to the Terraform provider registry and "
+                "that the environment's state backend is reachable, then re-run "
+                "the scan. A green 'no findings' result is not valid until init succeeds."
+            ),
+        }),
         (("nosuchbucket", "does not exist"), {
             "summary": "The Terraform state backend for this scope isn't set up yet.",
             "suggestion": "Confirm the S3 state bucket exists for this account/region before scanning.",
@@ -72,7 +81,7 @@ def humanize_terraform_error(raw_error: str) -> dict:
             "summary": "The configured AWS credentials don't have permission to read this scope's infrastructure.",
             "suggestion": "Check IAM permissions for the scan role.",
         }),
-        (("connection refused", "timeout", "could not connect"), {
+        (("connection refused", "timeout", "could not connect", "i/o timeout", "context deadline"), {
             "summary": "Couldn't reach AWS or the Terraform backend — possible network issue.",
             "suggestion": "Check network connectivity and try again.",
         }),
@@ -195,10 +204,11 @@ def _terraform_sub_env_for_scope(scope: str) -> dict:
 
 def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config: dict | None = None) -> str:
     """Run ``terraform init`` in *tf_dir* only when it isn't already
-    initialized (same detection as trivy_agent's ``_is_terraform_initialized``:
-    ``.terraform/modules/modules.json`` present).  Returns "" on success or
-    when init was skipped, or an error string on failure — the caller must
-    not proceed to plan when non-empty.
+    initialized — detected via ``.terraform/terraform.tfstate``, the backend
+    cache ``terraform init`` writes for EVERY config, module-less included
+    (``modules.json`` only exists when the config has modules).  Returns "" on
+    success or when init was skipped, or an error string on failure — the
+    caller must not proceed to plan when non-empty.
     
     If *backend_config* is provided (a dict with keys like 'bucket', 
     'dynamodb_table', 'region'), appends -backend-config flags for each 
@@ -207,26 +217,33 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
     If .terraform is already initialized but the cached backend differs 
     (detected via .terraform/terraform.tfstate bucket mismatch), forces 
     -reconfigure to re-initialize against the new backend."""
-    modules_json = os.path.join(tf_dir, ".terraform", "modules", "modules.json")
     tfstate_file = os.path.join(tf_dir, ".terraform", "terraform.tfstate")
-    
-    # Check if already initialized and whether backend needs reconfiguration
+
+    # Check if already initialized and whether backend needs reconfiguration.
+    # Keyed off .terraform/terraform.tfstate (the backend cache init writes
+    # for ALL configs, module or not) — modules.json is NOT a reliable
+    # indicator: module-less configs (prod-kyc/prod-cra's ec2_terraform_account_a/)
+    # never get it written, so the old check re-ran init on every scan
+    # (measured ~21s warm against the real backend).  Verified empirically:
+    # real backend init on a module-less layout writes terraform.tfstate +
+    # lock.hcl + providers/ but no modules.json.  trivy_agent's
+    # _is_terraform_initialized keeps the modules.json probe — it only
+    # powers a CLI note, no gate.
     force_reconfigure = False
-    if os.path.isfile(modules_json):
+    if os.path.isfile(tfstate_file):
         # Backend mismatch detection: compare cached bucket against new backend_config
         if backend_config and backend_config.get("bucket"):
             new_bucket = backend_config["bucket"]
-            if os.path.isfile(tfstate_file):
-                try:
-                    with open(tfstate_file, "r", encoding="utf-8") as f:
-                        tfstate = json.load(f)
-                        cached_bucket = tfstate.get("backend", {}).get("config", {}).get("bucket")
-                        if cached_bucket and cached_bucket != new_bucket:
-                            force_reconfigure = True
-                            print(f"Backend bucket mismatch: cached={cached_bucket} new={new_bucket} — forcing -reconfigure")
-                except (json.JSONDecodeError, IOError):
-                    pass  # If we can't read tfstate, proceed without forcing reconfigure
-        
+            try:
+                with open(tfstate_file, "r", encoding="utf-8") as f:
+                    tfstate = json.load(f)
+                    cached_bucket = tfstate.get("backend", {}).get("config", {}).get("bucket")
+                    if cached_bucket and cached_bucket != new_bucket:
+                        force_reconfigure = True
+                        print(f"Backend bucket mismatch: cached={cached_bucket} new={new_bucket} — forcing -reconfigure")
+            except (json.JSONDecodeError, IOError):
+                pass  # If we can't read tfstate, proceed without forcing reconfigure
+
         if not force_reconfigure:
             return ""  # already initialized with matching backend — skip re-init cost
 
@@ -248,6 +265,10 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
         # Log the actual terraform command being executed
         print(f"  Terraform command: {' '.join(cmd)}")
         
+        # Cold-init detection: no cached providers yet → first-ever init for
+        # this clone (new environment) must download providers; give it 900s
+        # instead of the 300s that fits warm inits with a provider cache.
+        cold_init = not os.path.isdir(os.path.join(tf_dir, ".terraform", "providers"))
         subprocess.run(
             cmd,
             cwd=tf_dir,
@@ -257,13 +278,14 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=300,
+            timeout=900 if cold_init else 300,
         )
         return ""
     except subprocess.CalledProcessError as e:
         return f"Terraform Init Failed:\n{e.stderr}"
-    except subprocess.TimeoutExpired as e:
-        return f"Terraform Init Failed:\n{e}"
+    except subprocess.TimeoutExpired:
+        return ("Terraform Init timed out — likely cold provider download "
+                "for a new environment; retry or increase the init timeout")
 
 
 def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
@@ -727,7 +749,7 @@ def drift_alert(state: State):
     # PagerDuty → one page per finding.
     pd_sent = 0
     for finding in pd_findings:
-        if finding.get("status") in ("unmanaged", "unmanaged_tagged"):
+        if finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
             event_type = "Unmanaged resource"
         else:
             event_type = "Drift detected"
@@ -798,20 +820,54 @@ def drift_pr_from_finding(state: State):
             # Primary Approve/Reject trigger: every created PR lands in the
             # Approvals page immediately (not waiting for a merge webhook).
             from drift_reconciler.pending_applies import create_pending_apply
-            create_pending_apply(pr.number, _account_label)
+            create_pending_apply(pr.number, _account_label,
+                                 "fix" if len(group) == 1 else "batch")
+
+    # Active exceptions for this scope, loaded once before any unmanaged
+    # PR is created.  Rows are written by auto_add_exceptions_on_merge on
+    # merge (resource_type + resource_id_pattern, split from the
+    # resource_id) or by hand in the dashboard; the match below mirrors
+    # the scanner's suppression semantics (pattern is a substring of the
+    # resource name part).
+    except_rows = unmanaged_scanner._load_exceptions(_account_label)
+
+    def _matching_exception(finding: dict) -> dict | None:
+        rid = finding.get("resource_id") or ""
+        if "." not in rid:
+            return None
+        rtype, rname = rid.split(".", 1)
+        for exc in except_rows:
+            if exc.get("resource_type") != rtype:
+                continue
+            pattern = exc.get("resource_id_pattern") or ""
+            if pattern and pattern in rname:
+                return exc
+        return None
 
     for finding in report_only:
+        # Second exception guard at PR time: exceptions may have been
+        # added since the diff ran (the merge handler auto-adds one for
+        # every merged unmanaged PR) — an excepted resource must never
+        # generate a new PR.
+        matched_exc = _matching_exception(finding)
+        if matched_exc is not None:
+            unmanaged_scanner.print_exception_skip(
+                finding["resource_id"], matched_exc
+            )
+            continue
+        print(f"  {finding['resource_id']}: no exception on file — creating PR")
         existing = _already_open(finding, "unmanaged")
         if existing:
-            print(f"  ⏭  {finding['resource_id']}: open PR #{existing['pr_number']} "
-                  f"already exists — skipping")
+            print(f"  Skipping {finding['resource_id']}: open PR "
+                  f"#{existing['pr_number']} already exists")
             continue
         pr = gi.create_drift_pr_for_mode(finding, "code_to_reality", account_label=_account_label)
         if pr is not None:
-            is_unmanaged = finding.get("status") in ("unmanaged", "unmanaged_tagged")
+            is_unmanaged = finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES
             pr_urls.append({"url": pr.html_url, "type": "unmanaged" if is_unmanaged else "drift"})
             from drift_reconciler.pending_applies import create_pending_apply
-            create_pending_apply(pr.number, _account_label)
+            create_pending_apply(pr.number, _account_label,
+                                 "unmanaged" if is_unmanaged else "fix")
 
     return {"pr_urls": pr_urls}
 
@@ -853,7 +909,36 @@ def unmanaged_scan_node(state: State):
         print("  (no live resources found)")
         return {"messages": []}
 
-    managed = unmanaged_scanner.load_managed_resources(_tf_dir, env=_resolve_env_credentials(env_dict))
+    # Subtract tracked resources against an actually-initialized backend —
+    # same live-check as the drift path (_ensure_terraform_init keys off
+    # .terraform/terraform.tfstate and forces -reconfigure when the cached
+    # bucket no longer matches the environment row).  Without it, a fresh
+    # or stale clone makes `terraform show` fail with "Backend
+    # initialization required" and load_managed_resources fail-softs to
+    # [] — every live resource flagged unmanaged.  On init failure we
+    # report nothing rather than invent findings.
+    sub_env = _resolve_env_credentials(env_dict)
+    backend_config = {}
+    if env_dict.get("tf_state_bucket"):
+        backend_config["bucket"] = env_dict["tf_state_bucket"]
+    if env_dict.get("tf_lock_table"):
+        backend_config["dynamodb_table"] = env_dict["tf_lock_table"]
+    if env_dict.get("region"):
+        backend_config["region"] = env_dict["region"]
+    init_error = _ensure_terraform_init(_tf_dir, env=sub_env, backend_config=backend_config)
+    if init_error:
+        # Abort the run — returning empty findings would look identical to
+        # "scan ran fine, nothing unmanaged," which hides a real failure
+        # (provider timeout, backend unreachable, etc.).  Raising lets the
+        # outer scan_runs finalizer mark status=failed with the init error.
+        print(f"  ⚠ terraform init failed for {_account_label}: {init_error[:400]} — "
+              f"aborting unmanaged scan (diff skipped)")
+        raise RuntimeError(
+            f"terraform init failed for {_account_label} — unmanaged scan "
+            f"aborted (could not load state to subtract managed resources):\n"
+            f"{init_error[:800]}"
+        )
+    managed = unmanaged_scanner.load_managed_resources(_tf_dir, env=sub_env)
     findings = unmanaged_scanner.diff_unmanaged(live, managed, region=_region, tf_dir=_tf_dir, scope=_account_label)
 
     if not findings:
@@ -874,18 +959,85 @@ def unmanaged_scan_node(state: State):
     return {"drift_findings": existing + findings, "drift_detected": True}
 
 
+def _create_manual_review_prs(needs_review: list[dict], account_label: str,
+                              run_id: str | None) -> list[dict]:
+    """Turn unfixable trivy findings into review-only PRs (no file diff —
+    the body carries rule_id + resource + rejection reason) so they appear
+    in the dashboard Approvals queue instead of being silently dropped.
+
+    Reuses the security_only path end to end: merge auto-adds exceptions
+    for the (resource, rule_id) pairs via auto_add_exceptions_on_merge;
+    reject closes the PR and the finding resurfaces on the next scan."""
+    if not needs_review:
+        return []
+    from drift_reconciler.pending_applies import create_pending_apply, set_security_fixes
+
+    report_stage(run_id, "trivy_only_review")
+
+    by_resource: dict[str, list[dict]] = {}
+    for item in needs_review:
+        by_resource.setdefault(item.get("resource") or "unknown", []).append(item)
+
+    pr_urls: list[dict] = []
+    for resource_addr, items in by_resource.items():
+        # Dedup — one open review PR per resource, same guard as fix PRs.
+        existing = drift_history.get_open_event(resource_addr, account_label, "security_only")
+        if existing:
+            print(f"  ⏭  {resource_addr}: open review PR #{existing['pr_number']} "
+                  f"already exists — skipping")
+            continue
+
+        findings = "\n".join(
+            f"- **`{i['rule_id']}`** — {i.get('reason', 'needs review')}"
+            for i in items
+        )
+        reasons = "\n".join(
+            f"{i['rule_id']} ({i.get('resource')}): {i.get('resolution', '')[:200]}"
+            for i in items
+        )
+        count = len(items)
+        pr = gi.create_drift_pr(
+            resource_id=resource_addr,
+            pr_title=(f"Manual review: {resource_addr} "
+                      f"({count} finding{'s' if count != 1 else ''})"),
+            drift_summary=findings,
+            plan_output=reasons,
+            file_path="",
+            file_content="",
+            risk_level="LOW",
+            account_label=account_label,
+            security=True,
+            review_only=True,
+        )
+        if pr is None:
+            continue
+        pr_urls.append({"url": pr.html_url, "type": "manual"})
+        create_pending_apply(pr.number, account_label, "security_only")
+        # Persist the (resource, rule_id) pairs under review so a merge
+        # auto-adds security exceptions for exactly these findings.
+        pairs = sorted({(i.get("resource"), i["rule_id"]) for i in items if i.get("resource")})
+        if pairs:
+            set_security_fixes(
+                pr.number, account_label,
+                [{"resource_address": r, "rule_id": rid} for r, rid in pairs],
+            )
+    return pr_urls
+
+
 def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str | None = None) -> dict:
     """Standalone Trivy security scan — no drift detection, no reconcile agent.
 
     Copies ``.tf`` files to a temp directory, scans for misconfigurations,
     filters out suppressed issues via the exception registry, attempts
     automatic fixes, and creates one PR per modified file with
-    ``pr_type="security_only"``.
+    ``pr_type="security_only"`` — plus one review-only PR (no file diff)
+    per resource whose findings could not be auto-fixed, so they surface
+    in the approval queue instead of being silently dropped.
 
     Returns ``{"pr_urls": [...], "needs_review": [...]}`` — ``pr_urls`` is
-    a list of ``{"url": str, "type": "security_only"}`` dicts, and
-    ``needs_review`` lists findings that could not be auto-fixed so the
-    caller can surface them instead of silently dropping them.
+    a list of ``{"url": str, "type": "security_only"|"manual"}`` dicts, and
+    ``needs_review`` lists the findings that could not be auto-fixed (now
+    mirrored by the review-only PRs).
     """
     from formatting_drift_json import check_security_suppression
 
@@ -915,18 +1067,38 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         print(f"  [trivy-only] {len(issues)} issue(s) found")
 
         # ── Filter suppressed ─────────────────────────────────────────
-        before = len(issues)
-        issues = [
-            i for i in issues
-            if not (
-                i.get("resource") and i.get("rule_id")
-                and check_security_suppression(i["resource"], i["rule_id"], scope)
+        suppressed: list[tuple[str, dict]] = []
+        kept: list[dict] = []
+        for i in issues:
+            exc_row = None
+            if i.get("resource") and i.get("rule_id"):
+                exc_row = check_security_suppression(
+                    i["resource"], i["rule_id"], scope
+                )
+            if exc_row is not None:
+                suppressed.append(
+                    (f"{i['resource']} ({i['rule_id']})", exc_row)
+                )
+            else:
+                kept.append(i)
+        issues = kept
+        if suppressed:
+            labels = [label for label, _ in suppressed]
+            print(
+                f"  {len(suppressed)} security finding(s) excepted for "
+                f"{scope} — these will be skipped: {', '.join(labels)}"
             )
-        ]
-        if before > len(issues):
-            print(f"  [trivy-only] {before - len(issues)} suppressed, {len(issues)} remaining")
+            for label, exc_row in suppressed:
+                unmanaged_scanner.print_exception_skip(label, exc_row)
+            print(
+                f"  {len(issues)} security finding(s) have no exception on "
+                f"file — continuing evaluation"
+            )
         else:
-            print(f"  [trivy-only] {len(issues)} issue(s) — none suppressed")
+            print(
+                f"  No security findings are currently excepted for {scope} — "
+                f"all {len(issues)} finding(s) will be evaluated normally."
+            )
 
         # ── Apply fixes (single pass — no re-scan loop) ──────────────
         fix_state: TrivyState = {
@@ -946,9 +1118,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         result = fix_issues(fix_state)
         all_fixes = result.get("fixes_applied", [])
         needs_review = result.get("needs_review", [])
+        review_prs = _create_manual_review_prs(needs_review, account_label, run_id)
         if not all_fixes:
             print("  [trivy-only] No fixes applied.")
-            return {"pr_urls": [], "needs_review": needs_review}
+            return {"pr_urls": review_prs, "needs_review": needs_review}
 
         files_touched = len({f["file_path"] for f in all_fixes})
         print(f"  [trivy-only] {len(all_fixes)} fix(es) applied across {files_touched} file(s)")
@@ -975,8 +1148,8 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             # while an earlier one is still open.
             existing = drift_history.get_open_event(derived_resource_id, account_label, "security_only")
             if existing:
-                print(f"  ⏭  {derived_resource_id}: open security PR "
-                      f"#{existing['pr_number']} already exists — skipping")
+                print(f"  Skipping {derived_resource_id}: open security PR "
+                      f"#{existing['pr_number']} already exists")
                 continue
 
             # ── Patched content (from tmpdir) ─────────────────────────
@@ -999,7 +1172,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             else:
                 plan_output = ("(original file not found — "
                                "full patched content below)")
-                repo_path = f"drift-reports/security-{basename}"
+                repo_path = (
+                    f"drift-reports/{gi._safe_label(account_label)}/"
+                    f"security-{basename}"
+                )
 
             # ── Determine highest severity among this file's fixes ────
             # fixes_applied entries carry rule_id but not severity —
@@ -1042,8 +1218,27 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             )
             if pr is not None:
                 pr_urls.append({"url": pr.html_url, "type": "security_only"})
+                # Security PRs are file-only (no terraform action) but still
+                # need the Approve/Reject flow — without this row they'd
+                # never appear in the dashboard queue.
+                from drift_reconciler.pending_applies import create_pending_apply, set_security_fixes
+                create_pending_apply(pr.number, account_label, "security_only")
+                # Persist the (resource, rule_id) pairs this PR fixes so a
+                # successful merge can auto-add security exceptions for
+                # exactly those findings — future scans skip them.
+                pairs = sorted({
+                    (i.get("resource"), fix["rule_id"])
+                    for fix in fixes_in_file
+                    for i in issues
+                    if i.get("rule_id") == fix["rule_id"] and i.get("resource")
+                })
+                if pairs:
+                    set_security_fixes(
+                        pr.number, account_label,
+                        [{"resource_address": r, "rule_id": rid} for r, rid in pairs],
+                    )
 
-        return {"pr_urls": pr_urls, "needs_review": needs_review}
+        return {"pr_urls": pr_urls + review_prs, "needs_review": needs_review}
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1588,6 +1783,23 @@ def _revert_on_gate_failure(
         })
 
 
+_FILE_ONLY_PR_TYPES = ("unmanaged", "security_only")
+
+
+def _pr_requires_terraform(pr_number: int, scope: str) -> bool:
+    """Dispatcher for the apply/reject flows: True when this PR goes
+    through the terraform gate/apply path.
+
+    File-only PRs (pr_type ``unmanaged`` — an unmanaged-resource report —
+    or ``security_only`` — a security patch to the .tf file) ARE the fix
+    in the PR itself: no init/plan/apply/revert, no drift gate.  All other
+    types (drift/fix, batch, rollback) keep the full gate/apply/revert
+    path.  Falls back to the terraform path when the pr_type can't be
+    read (DB down) — today's behavior."""
+    from drift_reconciler.drift_history import get_pr_type
+    return get_pr_type(pr_number, scope) not in _FILE_ONLY_PR_TYPES
+
+
 def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = None, is_revert: bool = False) -> None:
     """Apply an approved drift fix for *pr_number* in *scope*, or revert
     AWS for a REJECTED fix when *is_revert* is True.
@@ -1616,6 +1828,36 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         )
 
     try:
+        # File-only PRs (unmanaged / security) skip terraform entirely —
+        # the PR itself is the fix.  The GitHub side (merge on approve,
+        # close on reject) already happened in serve.py; just finalize
+        # the DB rows here, no init/plan/apply/revert, no drift gate.
+        if not _pr_requires_terraform(pr_number, scope):
+            import drift_history as _dh
+            if is_revert:
+                _dh.mark_reverted(
+                    pr_number, scope, status="rejected",
+                    resolution=("PR rejected — file-only PR "
+                                "(unmanaged/security), no AWS change needed"),
+                )
+            else:
+                _dh.resolve_entry(
+                    pr_number, scope,
+                    "PR merged — file-only change applied (no terraform action)",
+                )
+            # Revert writes 'reverted' — NOT 'rejected'.  The decision
+            # handler already claimed this row with status='rejected' when
+            # the job started; writing it again here leaves the row looking
+            # claim-pending forever, so the dashboard log poller (which
+            # keys "done" off terminal statuses) never stops polling.
+            _finish(
+                "reverted" if is_revert else "applied",
+                {"output": "file-only PR — no terraform action", "terraform": False},
+            )
+            print(f"--- PR #{pr_number} ({scope}) is a file-only "
+                  f"{'revert' if is_revert else 'apply'} — no terraform action ---")
+            return
+
         # Fetch the environment row for the AWS session (same pattern as
         # unmanaged_scan_node).
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -1654,12 +1896,22 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                 if value:
                     cmd.append(f"-backend-config={key}={value}")
         
-        init = subprocess.run(
-            cmd,
-            cwd=tf_dir, env=sub_env,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=300,
-        )
+        # Cold-init detection: no cached providers yet → first-ever init for
+        # this clone (new environment) must download providers; 900s for
+        # that, 300s otherwise (warm init is seconds with a provider cache).
+        cold_init = not os.path.isdir(os.path.join(tf_dir, ".terraform", "providers"))
+        try:
+            init = subprocess.run(
+                cmd,
+                cwd=tf_dir, env=sub_env,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=900 if cold_init else 300,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                "terraform init timed out — likely cold provider download "
+                "for a new environment; retry or increase the init timeout"
+            )
         if init.returncode != 0:
             raise RuntimeError(f"terraform init failed:\n{_strip_ansi(init.stderr)[:800]}")
 
@@ -1676,17 +1928,42 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # ── Safety gates (mirror drift-reconciler.yml ACCEPT path) ────
         gate_failure: str | None = None
 
+        # The plan JSON is the live drift snapshot at gate-check time —
+        # parse it once and share it between Gate A (live unresolved-drift
+        # check) and Gate B (rollback freshness).
+        show_result = subprocess.run(
+            ["terraform", "show", "-no-color", "-json", "tfplan"],
+            cwd=tf_dir, env=sub_env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=300,
+        )
+        if show_result.returncode != 0:
+            raise RuntimeError(f"terraform show failed:\n{_strip_ansi(show_result.stderr)[:800]}")
+        try:
+            plan_json = json.loads(show_result.stdout)
+        except json.JSONDecodeError:
+            raise RuntimeError("terraform show -json produced unparseable output")
+
         # Gate A: pre-apply drift gate.  Only meaningful for normal applies
         # — a revert's whole purpose is fixing existing drift, so open rows
         # are expected and must not block it (Gate B below is the
         # revert-specific check: the plan must match the stored baseline).
         # Excludes this PR's own rows (they stay 'open' until the
         # post-apply resolve step — including them would fail every apply).
-        from drift_reconciler.drift_history import (
-            has_unresolved_drift_except, load_baselines,
-        )
-        if not is_revert and has_unresolved_drift_except(scope, pr_number):
-            gate_failure = "pre_apply_check: unresolved drift exists in scope"
+        # Open rows are detection-time state, so re-verify them against
+        # the live plan: a resource fixed in AWS since the scan no longer
+        # appears in the plan and must not block this apply.
+        from drift_reconciler.drift_history import get_open_resources, load_baselines
+        from rollback_check import _extract_field_values, live_drift_rows
+        if not is_revert:
+            open_rows = get_open_resources(scope, except_pr_number=pr_number)
+            if open_rows:
+                live_drift = live_drift_rows(open_rows, plan_json)
+                if live_drift:
+                    gate_failure = (
+                        "pre_apply_check: unresolved drift exists in scope — "
+                        + ", ".join(str(r.get("resource_id")) for r in live_drift[:5])
+                    )
 
         # Gate B: rollback freshness gate — compare live values from the
         # plan JSON against the stored baseline (changes_jsonb) for this
@@ -1706,20 +1983,6 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                     "cannot verify revert safety"
                 )
             else:
-                from rollback_check import _extract_field_values
-                show_result = subprocess.run(
-                    ["terraform", "show", "-no-color", "-json", "tfplan"],
-                    cwd=tf_dir, env=sub_env,
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=300,
-                )
-                if show_result.returncode != 0:
-                    raise RuntimeError(f"terraform show failed:\n{_strip_ansi(show_result.stderr)[:800]}")
-                try:
-                    plan_json = json.loads(show_result.stdout)
-                except json.JSONDecodeError:
-                    raise RuntimeError("terraform show -json produced unparseable output")
-
                 for baseline in baselines:
                     resource_id = baseline["resource_id"]
                     changes = baseline.get("changes") or {}
@@ -1751,12 +2014,24 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                         # target — nothing to apply" no-op.
                         continue
                     for field in fields:
-                        expected = str(changes[field].get("before", ""))
+                        # Revert direction: live may legitimately be either
+                        # baseline state — the fix-applied state (baseline
+                        # "after" for a fix PR; "before" for a rollback PR)
+                        # or the pre-fix state (a no-op revert plan, caught
+                        # above as no_diff, but harmless to allow).  Any
+                        # third value means live changed since capture —
+                        # the plan's from-state is stale, fail closed.
+                        # Accept direction: the plan's from-state is the
+                        # baseline "before" — unchanged.
+                        expected = {str(changes[field].get("before", ""))}
+                        if is_revert:
+                            expected.add(str(changes[field].get("after", "")))
                         actual = live_values.get(field, "<missing>")
-                        if actual != expected:
+                        if actual not in expected:
                             gate_failure = (
                                 f"rollback_check: stale field {resource_id}.{field} "
-                                f"(expected={expected[:60]} actual={actual[:60]})"
+                                f"(expected={'|'.join(sorted(expected))[:60]} "
+                                f"actual={actual[:60]})"
                             )
                             break
                     if gate_failure:
@@ -1798,6 +2073,20 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                 tf_dir, pr_number, scope, gate_failure, env_dict,
             )
             _finish(self_status["status"], self_status["result"])
+            # Close out this PR's drift_events rows too — the apply was
+            # blocked, so they must not stay open (the revert branch above
+            # already marks its own rows).  manual_revert_required is the
+            # honest label: the gate blocked the apply, so AWS vs code
+            # must be verified by hand regardless of the auto-revert.
+            import drift_history as _dh
+            _dh.mark_reverted(
+                pr_number, scope, status="manual_revert_required",
+                resolution=(
+                    f"Apply blocked by safety gate ({gate_failure}) — "
+                    f"auto-revert status: {self_status['status']}; "
+                    f"manual verification required"
+                ),
+            )
             return
 
         print(f"[apply] ({mode_label}) terraform apply -auto-approve …")
@@ -1826,9 +2115,37 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
     except subprocess.TimeoutExpired as exc:
         print(f"[apply] timed out: {exc}")
         _finish("failed", {"error": f"timed out: {exc}"})
+        # The job is terminal — don't leave this PR's drift_events rows
+        # open waiting for a write that will never come.
+        import drift_history as _dh
+        _dh.mark_reverted(
+            pr_number, scope, status="manual_revert_required",
+            resolution=("Apply timed out — verify AWS vs code; "
+                        "manual action may be required"),
+        )
     except Exception as exc:
         print(f"[apply] failed: {exc}")
         _finish("failed", {"error": humanize_terraform_error(str(exc))})
+        import drift_history as _dh
+        _dh.mark_reverted(
+            pr_number, scope, status="manual_revert_required",
+            resolution=f"Apply failed: {exc} — verify AWS vs code; manual action may be required",
+        )
+
+
+def _current_git_branch(tf_dir: str) -> str:
+    """Return the checked-out branch of the git repo at *tf_dir* ('' when
+    not a repo / detached HEAD)."""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=tf_dir,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ""
 
 
 if __name__ == "__main__":
@@ -2028,6 +2345,30 @@ if __name__ == "__main__":
     if not os.path.isdir(tf_dir):
         raise RuntimeError(f"Terraform directory not found: {tf_dir}")
 
+    # Scan freshness: an explicit --tf-dir skips resolve_tf_dir's built-in
+    # fetch+reset, so a direct/scheduled CLI scan can evaluate a stale
+    # clone when new commits were pushed.  Refresh whenever tf_dir lives
+    # inside the drift clone base — never touch arbitrary git repos.
+    # Already-current clones make this a no-op (fetch finds nothing new).
+    _clone_base = os.environ.get(
+        "DRIFT_CLONE_BASE",
+        os.path.join(os.path.expanduser("~"), ".drift-clones"),
+    )
+    # commonpath raises on Windows when paths are on different drives
+    # (legacy local tf-dir vs clone base) — skip the refresh then.
+    try:
+        _in_clone_base = (
+            os.path.commonpath([os.path.abspath(tf_dir), os.path.abspath(_clone_base)])
+            == os.path.abspath(_clone_base)
+        )
+    except ValueError:
+        _in_clone_base = False
+    if _in_clone_base:
+        _branch = _current_git_branch(tf_dir)
+        if _branch:
+            from drift_reconciler.environment_credentials import refresh_clone
+            refresh_clone(tf_dir, _branch, slug=args.account_label)
+
     if args.rollback:
         if not args.rollback_pr:
             print("Error: --rollback-pr is required with --rollback")
@@ -2190,7 +2531,6 @@ if __name__ == "__main__":
             "terraform_failed": _terraform_failed,
         }
 
-        agent_output = ""
         _all_findings: list[dict] = []
         _all_pr_urls: list[str] = []
         _pd_alerts_sent = 0
@@ -2199,9 +2539,6 @@ if __name__ == "__main__":
             for node, data in event.items():
                 if not data:
                     continue
-                messages = data.get("messages") or []
-                if messages:
-                    agent_output = messages[-1].content
                 findings = data.get("drift_findings") or []
                 if findings:
                     _all_findings = findings
@@ -2214,9 +2551,6 @@ if __name__ == "__main__":
                 if alerts.get("slack"):
                     _slack_messages_sent = alerts["slack"]
 
-        # Print out to the terminal as usual
-        print(f"\n[Agent Response]:\n{agent_output}")
-
         # Mark scan as complete.
         if _run_id:
             from scan_runs import update_scan_run
@@ -2224,28 +2558,11 @@ if __name__ == "__main__":
             summary = {}
 
             # Split findings by origin.
-            drift_findings = [f for f in _all_findings if f.get("status") not in ("unmanaged", "unmanaged_tagged")]
-            unmanaged_findings = [f for f in _all_findings if f.get("status") in ("unmanaged", "unmanaged_tagged")]
+            drift_findings = [f for f in _all_findings if f.get("status") not in unmanaged_scanner.UNMANAGED_STATUSES]
+            unmanaged_findings = [f for f in _all_findings if f.get("status") in unmanaged_scanner.UNMANAGED_STATUSES]
 
             if not _terraform_failed:
                 summary["mode"] = "drift_only" if not unmanaged_findings else "full"
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", _account_label)
-                report_filename = f"drift_reconciliation_report_{safe_label}_{timestamp}.md"
-                report_path = os.path.join(tf_dir, report_filename)
-                try:
-                    with open(report_path, "w", encoding="utf-8") as f:
-                        f.write(f"# Terraform Drift Reconciliation Report\n")
-                        f.write(f"**Account:** {_account_label}  \n")
-                        f.write(f"**Region:** {_region}  \n")
-                        f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                        f.write("## Amazon Nova Pro Analysis & Action Plan\n\n")
-                        f.write(agent_output)
-                    print(f"\n[Success] Report written: {report_filename}")
-                    summary["report_path"] = report_path
-                except Exception as e:
-                    print(f"\n[Warning] Failed to write report file: {str(e)}")
-                    summary["report_path"] = f"(write failed: {e})"
             else:
                 summary["mode"] = "unmanaged_only"
                 summary["notice"] = "Terraform state backend unavailable — only unmanaged resources were scanned. Configuration drift was not checked."

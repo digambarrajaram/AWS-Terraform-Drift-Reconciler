@@ -73,9 +73,8 @@ function StageIndicator({ currentStage, status, stages = STAGES }: {
   status: string;
   stages?: typeof STAGES | typeof TRIVY_ONLY_STAGES | typeof UNMANAGED_ONLY_STAGES | typeof DRIFT_ONLY_STAGES;
 }) {
-  // When the run is complete, treat ALL stages as done regardless of
-  // which stage was reported last (parallel nodes race on the final
-  // current_stage write — whichever finishes last wins).
+  // Complete → all stages done.  Failed → only stages before the failure
+  // are green; the failing stage shows ✕ (not a success checkmark).
   const currentIdx = status === 'complete'
     ? stages.length
     : stages.findIndex((s) => s.key === currentStage);
@@ -106,7 +105,8 @@ function StageIndicator({ currentStage, status, stages = STAGES }: {
               </div>
               <span className={[
                 'text-[10px] whitespace-nowrap',
-                isCurrent ? 'text-foreground font-medium' : 'text-muted-foreground',
+                isFailed ? 'text-destructive font-medium'
+                  : isCurrent ? 'text-foreground font-medium' : 'text-muted-foreground',
               ].join(' ')}>
                 {stage.label}
               </span>
@@ -129,6 +129,9 @@ function StageIndicator({ currentStage, status, stages = STAGES }: {
 function ScanResult({ run }: { run: ScanRun }) {
   const { result_summary: rs, status, current_stage } = run;
   const failed = status === 'failed';
+  const failSummary = typeof rs?.summary === 'string' ? rs.summary : null;
+  const failDetail = typeof rs?.detail === 'string' ? rs.detail : null;
+  const failSuggestion = typeof rs?.suggestion === 'string' ? rs.suggestion : null;
 
   return (
     <div className={[
@@ -140,7 +143,9 @@ function ScanResult({ run }: { run: ScanRun }) {
           ? <XCircle size={18} className="text-destructive" />
           : <CheckCircle size={18} className="text-emerald-500" />}
         <span className="font-semibold text-sm">
-          {failed ? `Scan failed at ${current_stage ?? 'unknown stage'}` : 'Scan complete'}
+          {failed
+            ? (failSummary ?? `Scan failed at ${current_stage ?? 'unknown stage'}`)
+            : 'Scan complete'}
         </span>
         {run.completed_at && (
           <span className="ml-auto text-xs text-muted-foreground">
@@ -149,7 +154,25 @@ function ScanResult({ run }: { run: ScanRun }) {
         )}
       </div>
 
-      {rs && (
+      {failed && (failSuggestion || failDetail) && (
+        <div className="space-y-2 text-sm">
+          {failSuggestion && (
+            <p className="text-foreground/90">{failSuggestion}</p>
+          )}
+          {failDetail && (
+            <details className="rounded-md border border-border bg-card">
+              <summary className="cursor-pointer px-3 py-1.5 text-[11px] font-mono text-muted-foreground select-none">
+                technical details
+              </summary>
+              <pre className="whitespace-pre-wrap break-all px-3 pb-3 text-xs font-mono text-foreground/80 overflow-x-auto max-h-48">
+                {failDetail}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
+
+      {rs && !failed && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {/* Drift */}
           <div className="rounded-lg border border-border bg-card p-3">
@@ -203,14 +226,14 @@ function ScanResult({ run }: { run: ScanRun }) {
         </div>
       )}
 
-      {rs?.alerts_sent && (
+      {rs?.alerts_sent && !failed && (
         <div className="flex gap-4 text-xs text-muted-foreground">
           <span>PagerDuty alerts: <strong className="text-foreground">{rs.alerts_sent.pagerduty}</strong></span>
           <span>Slack alerts: <strong className="text-foreground">{rs.alerts_sent.slack}</strong></span>
         </div>
       )}
 
-      {failed && (
+      {failed && !failDetail && (
         <p className="text-xs text-muted-foreground">
           See the log viewer above for details on the failure.
         </p>

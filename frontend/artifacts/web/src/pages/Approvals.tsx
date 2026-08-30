@@ -22,9 +22,10 @@ interface PendingApply {
   id: string;
   pr_number: number;
   scope: string;
-  status: 'awaiting_approval' | 'approved' | 'rejected' | 'applied' | 'failed'
+  status: 'awaiting_approval' | 'approved' | 'rejected' | 'excepted' | 'applied' | 'failed'
     | 'cancelled' | 'reverted' | 'reverted_gate_blocked' | 'manual_revert_required';
   pr_type: string | null;
+  review_only?: boolean | null;
   merged_at: string | null;
   approved_by: string | null;
   approved_at: string | null;
@@ -72,6 +73,7 @@ const STATUS_STYLE: Record<PendingApply['status'], string> = {
   awaiting_approval:      'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   approved:               'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
   rejected:               'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400',
+  excepted:               'bg-amber-100  text-amber-800  dark:bg-amber-900/30 dark:text-amber-300',
   applied:                'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
   reverted:               'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
   failed:                 'bg-zinc-100   text-zinc-600   dark:bg-zinc-800  dark:text-zinc-400',
@@ -125,12 +127,14 @@ function MarkdownBody({ body }: { body: string }) {
 // ── Detail drawer ──────────────────────────────────────────────────────────
 
 function DetailDrawer({
-  row, onClose, onDecide, deciding,
+  row, onClose, onDecide, onCancel, deciding, cancelling,
 }: {
   row: PendingApply | null;
   onClose: () => void;
-  onDecide: (row: PendingApply, decision: 'approved' | 'rejected') => void;
+  onDecide: (row: PendingApply, decision: 'approved' | 'rejected' | 'excepted') => void;
+  onCancel: (row: PendingApply) => void;
   deciding: boolean;
+  cancelling: boolean;
 }) {
   const open = !!row;
 
@@ -154,10 +158,8 @@ function DetailDrawer({
   // Backend run state for the indicator:
   //   approved/rejected  → job spawned, still running (claim state)
   //   applied/failed/reverted/manual_revert_required/
-  //   reverted_gate_blocked → done (terminal; 'reverted' = file-only reject)
-  //   cancelled → stopped by user
-  const jobRunning = row && ['approved', 'rejected'].includes(row.status);
-
+  //   reverted_gate_blocked/excepted/cancelled → done (terminal;
+  //   'reverted' = file-only reject; 'excepted' = sync Except, no spawn)
   // complete lags one render behind the hook's fetch — read it through a
   // ref so the active gate below can reference it without a circular
   // dependency on the hook call it feeds.
@@ -184,45 +186,28 @@ function DetailDrawer({
     completeRef.current = false;
   }
 
-  // Only awaiting_approval polls nothing (no job has ever run for it).
-  // Poll the pending-applies endpoint (single-table completeness probe),
-  // stay armed while the job runs, and stop once the row is terminal AND
-  // the backend has confirmed complete:true — within one interval of the
-  // terminal status being set, never indefinitely.  The active gate reads
-  // row.status (list query) — one render behind the log feed, which is
-  // exactly the lag completeRef already bridges; serialPoll stops on
-  // complete:true regardless.
+  // Live status comes from the log poll; the list row is the fallback for
+  // rows that never had a job (awaiting_approval polls nothing).  Derive
+  // jobRunning/jobDone from *current* — using the stale list `row.status`
+  // while logStatus already flipped to applied caused "Job finished" and
+  // the spinning Cancel banner to show together.
   const { lines, complete, status: logStatus } = useScanLogs(
     logRunId,
-    !!(row && (jobRunning || (isJobDone(row.status) && !completeRef.current))),
+    !!(row && (
+      ['approved', 'rejected'].includes(row.status)
+      || (isJobDone(row.status) && !completeRef.current)
+    )),
     'pending',
   );
   if (!openIdChanged) {
     completeRef.current = complete;
   }
 
-  // Live status comes from the log poll; the list row is the fallback for
-  // rows that never had a job (awaiting_approval polls nothing).
   const current = row && logStatus
     ? { ...row, status: logStatus as PendingApply['status'] }
     : row;
-  const jobDone = current && isJobDone(current.status);
-
-  const [cancelling, setCancelling] = useState(false);
-  const cancel = useCallback(async () => {
-    if (!row) return;
-    setCancelling(true);
-    try {
-      await apiFetch(`/pending-applies/${row.id}/cancel`, { method: 'POST' });
-      toast.success('Apply cancelled');
-    } catch (err) {
-      toast.error('Failed to cancel', {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setCancelling(false);
-    }
-  }, [row]);
+  const jobRunning = !!(current && ['approved', 'rejected'].includes(current.status));
+  const jobDone = !!(current && isJobDone(current.status));
 
   // Guard after ALL hooks (Rules of Hooks) — only the JSX return is skipped.
   if (!current) return null;
@@ -242,7 +227,7 @@ function DetailDrawer({
             </SheetHeader>
 
             {/* ── Job run indicator ── */}
-            {jobRunning && (
+            {jobRunning && !jobDone && (
               <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-100/50 dark:bg-amber-900/20 px-3 py-2">
                 <Loader2 size={14} className="animate-spin text-amber-600 dark:text-amber-400" />
                 <span className="text-xs text-amber-800 dark:text-amber-300">
@@ -252,7 +237,7 @@ function DetailDrawer({
             )}
             {jobDone && (
               <div className="mb-4 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                {current.status === 'applied'
+                {current.status === 'applied' || current.status === 'excepted'
                   ? <CheckCircle size={14} className="text-emerald-500" />
                   : <XCircle size={14} className="text-destructive" />}
                 <span className="text-xs text-muted-foreground">
@@ -353,9 +338,9 @@ function DetailDrawer({
               <p className="text-xs text-muted-foreground">Could not load PR details.</p>
             )}
 
-            {/* ── Approve / Reject ── */}
+            {/* ── Approve / Except / Reject ── */}
             {current.status === 'awaiting_approval' && (
-              <div className="flex items-center gap-2 mt-5">
+              <div className="flex items-center gap-2 mt-5 flex-wrap">
                 <button
                   type="button"
                   disabled={deciding}
@@ -364,6 +349,16 @@ function DetailDrawer({
                 >
                   <CheckCircle size={13} /> {deciding ? 'Working…' : 'Approve & Merge'}
                 </button>
+                {current.pr_type === 'security_only' && !current.review_only && (
+                  <button
+                    type="button"
+                    disabled={deciding}
+                    onClick={() => onDecide(current, 'excepted')}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/60 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-800 dark:text-amber-300 transition-opacity hover:opacity-90 disabled:opacity-50"
+                  >
+                    <ShieldCheck size={13} /> {deciding ? 'Working…' : 'Except'}
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={deciding}
@@ -389,7 +384,7 @@ function DetailDrawer({
                   {jobRunning && (
                     <button
                       type="button"
-                      onClick={cancel}
+                      onClick={() => onCancel(current)}
                       disabled={cancelling}
                       className="inline-flex items-center gap-1 rounded-md bg-destructive px-2.5 py-1 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                     >
@@ -415,6 +410,7 @@ export default function Approvals() {
 
   const [selected, setSelected] = useState<PendingApply | null>(null);
   const [deciding, setDeciding] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   const { data, isLoading, error, isFetching } = useQuery<PendingApply[]>({
     queryKey: ['pendingApplies', scope],
@@ -448,7 +444,7 @@ export default function Approvals() {
     }
   }, [data, selected]);
 
-  const decide = useCallback(async (row: PendingApply, decision: 'approved' | 'rejected') => {
+  const decide = useCallback(async (row: PendingApply, decision: 'approved' | 'rejected' | 'excepted') => {
     if (deciding) return;
     setDeciding(true);
     try {
@@ -463,20 +459,21 @@ export default function Approvals() {
           }),
         },
       );
-      if (res.apply_started === false) {
+      if (res.apply_started === false && decision !== 'excepted') {
         // Defensive: the backend returns non-2xx here now, but don't
         // toast success for a job that never spawned if it ever slips
-        // through as a 200.
-        toast.error(decision === 'approved' ? 'Failed to approve' : 'Failed to reject', {
+        // through as a 200.  Except is sync (apply_started:false by design).
+        toast.error(
+          decision === 'approved' ? 'Failed to approve' : 'Failed to reject', {
           description: res.error ?? 'Apply job did not start — no job was spawned.',
         });
         return;
       }
-      toast.success(decisionToast(row.pr_number, decision, row.pr_type));
-      // Show the running state instantly — the claim lands in the backend
-      // before this toast, so mirror it in the cache *and* the open drawer
-      // without waiting for the next poll.  The final status still only
-      // comes from the backend.
+      toast.success(decisionToast(row.pr_number, decision, row.pr_type, row.review_only));
+      // Show the running/terminal state instantly — the claim lands in the
+      // backend before this toast, so mirror it in the cache *and* the open
+      // drawer without waiting for the next poll.  Final apply status still
+      // only comes from the backend for Merge/Reject jobs.
       const claimed = { ...row, status: decision as PendingApply['status'] };
       setSelected((prev) => (prev?.id === row.id ? claimed : prev));
       queryClient.setQueryData<PendingApply[]>(['pendingApplies', scope], (rows) =>
@@ -495,7 +492,9 @@ export default function Approvals() {
       toast.error(
         already
           ? 'Already handled'
-          : (decision === 'approved' ? 'Failed to approve' : 'Failed to reject'),
+          : (decision === 'approved' ? 'Failed to approve'
+            : decision === 'excepted' ? 'Failed to except'
+              : 'Failed to reject'),
         { description: msg },
       );
       queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
@@ -503,6 +502,29 @@ export default function Approvals() {
       setDeciding(false);
     }
   }, [queryClient, scope, deciding]);
+
+  // Mirror Scan.tsx Cancel Scan: POST …/cancel → status=cancelled + kill
+  // the spawned apply/revert subprocess registered under the pending id.
+  const cancel = useCallback(async (row: PendingApply) => {
+    if (cancelling) return;
+    setCancelling(true);
+    try {
+      await apiFetch(`/pending-applies/${row.id}/cancel`, { method: 'POST' });
+      toast.success(`PR #${row.pr_number} decision cancelled`);
+      const cancelled = { ...row, status: 'cancelled' as const };
+      setSelected((prev) => (prev?.id === row.id ? cancelled : prev));
+      queryClient.setQueryData<PendingApply[]>(['pendingApplies', scope], (rows) =>
+        rows?.map((r) => (r.id === row.id ? cancelled : r)) ?? rows,
+      );
+      queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
+    } catch (err) {
+      toast.error('Failed to cancel', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setCancelling(false);
+    }
+  }, [cancelling, queryClient, scope]);
 
   const rows = data ?? [];
 
@@ -555,6 +577,8 @@ export default function Approvals() {
                 {rows.map((row) => {
                   const shown = displayStatus(row.status, row.pr_type);
                   const awaiting = row.status === 'awaiting_approval';
+                  const claimRunning = row.status === 'approved' || row.status === 'rejected';
+                  const showExcept = row.pr_type === 'security_only' && !row.review_only;
                   return (
                     <tr
                       key={row.id}
@@ -583,22 +607,44 @@ export default function Approvals() {
                       </td>
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                         {awaiting && (
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <button
                               type="button"
+                              disabled={deciding}
                               onClick={() => decide(row, 'approved')}
-                              className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                              className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                             >
                               <CheckCircle size={12} /> Approve
                             </button>
+                            {showExcept && (
+                              <button
+                                type="button"
+                                disabled={deciding}
+                                onClick={() => decide(row, 'excepted')}
+                                className="inline-flex items-center gap-1 rounded-md border border-amber-500/60 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 transition-opacity hover:opacity-90 disabled:opacity-50"
+                              >
+                                <ShieldCheck size={12} /> Except
+                              </button>
+                            )}
                             <button
                               type="button"
+                              disabled={deciding}
                               onClick={() => decide(row, 'rejected')}
-                              className="inline-flex items-center gap-1 rounded-md bg-destructive px-2.5 py-1 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90"
+                              className="inline-flex items-center gap-1 rounded-md bg-destructive px-2.5 py-1 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                             >
                               <XCircle size={12} /> Reject
                             </button>
                           </div>
+                        )}
+                        {claimRunning && (
+                          <button
+                            type="button"
+                            disabled={cancelling}
+                            onClick={() => cancel(row)}
+                            className="inline-flex items-center gap-1 rounded-md bg-destructive px-2.5 py-1 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                          >
+                            <Ban size={12} /> {cancelling ? 'Cancelling…' : 'Cancel'}
+                          </button>
                         )}
                       </td>
                     </tr>
@@ -610,7 +656,14 @@ export default function Approvals() {
         </div>
       )}
 
-      <DetailDrawer row={selected} onClose={() => setSelected(null)} onDecide={decide} deciding={deciding} />
+      <DetailDrawer
+        row={selected}
+        onClose={() => setSelected(null)}
+        onDecide={decide}
+        onCancel={cancel}
+        deciding={deciding}
+        cancelling={cancelling}
+      />
     </div>
   );
 }

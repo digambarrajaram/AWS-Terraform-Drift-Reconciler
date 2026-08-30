@@ -24,6 +24,8 @@ describe('runningLabel', () => {
   it('returns empty for non-claim statuses', () => {
     assert.equal(runningLabel('applied', 'unmanaged'), '');
     assert.equal(runningLabel('awaiting_approval', 'fix'), '');
+    // excepted is terminal (sync Except) — never a running badge
+    assert.equal(runningLabel('excepted', 'security_only'), '');
   });
 });
 
@@ -35,10 +37,20 @@ describe('decisionToast', () => {
   });
 
   it('uses merge/exceptions wording for file-only types', () => {
-    for (const t of ['unmanaged', 'security_only', 'manual']) {
+    // unmanaged/manual always auto-except on merge.  security_only only
+    // does when review_only (real-fix security is covered below).
+    for (const t of ['unmanaged', 'manual']) {
       assert.equal(decisionToast(7, 'approved', t), 'PR #7 approved — merged, exceptions added');
       assert.equal(decisionToast(7, 'rejected', t), 'PR #7 rejected — PR closed; will resurface next scan');
     }
+    assert.equal(
+      decisionToast(7, 'approved', 'security_only', true),
+      'PR #7 approved — merged, exceptions added',
+    );
+    assert.equal(
+      decisionToast(7, 'rejected', 'security_only'),
+      'PR #7 rejected — PR closed; will resurface next scan',
+    );
   });
 });
 
@@ -51,8 +63,38 @@ describe('isJobDone', () => {
 
   it('terminal statuses are done', () => {
     for (const s of ['applied', 'failed', 'cancelled', 'reverted',
-      'reverted_gate_blocked', 'manual_revert_required']) {
+      'reverted_gate_blocked', 'manual_revert_required', 'excepted']) {
       assert.equal(isJobDone(s), true);
     }
   });
 });
+
+describe('decisionToast — security real-fix vs review_only', () => {
+  it('real-fix merge does not claim exceptions were added', () => {
+    assert.equal(
+      decisionToast(7, 'approved', 'security_only', false),
+      'PR #7 approved — merged (fix applied, no exception)',
+    );
+  });
+
+  it('review_only merge still mentions exceptions', () => {
+    assert.equal(
+      decisionToast(7, 'approved', 'security_only', true),
+      'PR #7 approved — merged, exceptions added',
+    );
+  });
+
+  it('excepted closes without merge and adds exception', () => {
+    assert.equal(
+      decisionToast(7, 'excepted', 'security_only', false),
+      'PR #7 excepted — closed without merge; exception added',
+    );
+  });
+});
+
+describe('isJobDone — excepted is terminal', () => {
+  it('excepted is done', () => {
+    assert.equal(isJobDone('excepted'), true);
+  });
+});
+

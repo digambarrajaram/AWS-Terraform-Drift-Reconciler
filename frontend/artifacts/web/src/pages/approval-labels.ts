@@ -7,18 +7,23 @@
 // drift wording; manual is a no-diff review PR but stays on the default
 // strings until someone specifies its wording.
 
-type ClaimStatus = 'approved' | 'rejected';
+type ClaimStatus = 'approved' | 'rejected' | 'excepted';
 
-const FILE_ONLY_RUNNING: Record<string, Partial<Record<ClaimStatus, string>>> = {
+const FILE_ONLY_RUNNING: Record<string, Partial<Record<'approved' | 'rejected', string>>> = {
   unmanaged: { approved: 'Merging unmanaged PR…', rejected: 'Closing…' },
-  security_only: { approved: 'Merging security PR…', rejected: 'Closing…' },
+  security_only: {
+    approved: 'Merging security PR…',
+    rejected: 'Closing…',
+  },
 };
-const DRIFT_RUNNING: Record<ClaimStatus, string> = {
+const DRIFT_RUNNING: Record<'approved' | 'rejected', string> = {
   approved: 'Applying drift…',
   rejected: 'Reverting drift…',
 };
 
-/** Running-badge label for a claim state, or '' when status isn't a claim. */
+/** Running-badge label for a claim state, or '' when status isn't a claim.
+ *  ``excepted`` is terminal (Except runs sync in the decision handler —
+ *  no apply subprocess), so it must not return a running label. */
 export function runningLabel(status: string, prType: string | null | undefined): string {
   if (status !== 'approved' && status !== 'rejected') return '';
   return FILE_ONLY_RUNNING[prType ?? '']?.[status] ?? DRIFT_RUNNING[status];
@@ -29,7 +34,7 @@ export function runningLabel(status: string, prType: string | null | undefined):
  * so they must never read as done; the job's own final write is one of
  * the terminal values ('reverted' for a file-only reject). */
 const JOB_DONE = new Set(['applied', 'failed', 'cancelled', 'reverted',
-  'reverted_gate_blocked', 'manual_revert_required']);
+  'reverted_gate_blocked', 'manual_revert_required', 'excepted']);
 
 /** True when the row has reached a terminal status (poller should stop). */
 export function isJobDone(status: string | null | undefined): boolean {
@@ -44,13 +49,23 @@ export function decisionToast(
   prNumber: number,
   decision: ClaimStatus,
   prType: string | null | undefined,
+  reviewOnly?: boolean | null,
 ): string {
+  if (decision === 'excepted') {
+    return `PR #${prNumber} excepted — closed without merge; exception added`;
+  }
   const fileOnly = prType != null && FILE_ONLY_TYPES.has(prType);
-  return fileOnly
-    ? decision === 'approved'
-      ? `PR #${prNumber} approved — merged, exceptions added`
-      : `PR #${prNumber} rejected — PR closed; will resurface next scan`
-    : decision === 'approved'
-      ? `PR #${prNumber} approved — merge + apply started`
-      : `PR #${prNumber} rejected — close + revert started`;
+  if (fileOnly) {
+    if (decision === 'approved') {
+      // Real-fix security: merge applies the .tf patch, no exception row.
+      if (prType === 'security_only' && !reviewOnly) {
+        return `PR #${prNumber} approved — merged (fix applied, no exception)`;
+      }
+      return `PR #${prNumber} approved — merged, exceptions added`;
+    }
+    return `PR #${prNumber} rejected — PR closed; will resurface next scan`;
+  }
+  return decision === 'approved'
+    ? `PR #${prNumber} approved — merge + apply started`
+    : `PR #${prNumber} rejected — close + revert started`;
 }

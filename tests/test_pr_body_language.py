@@ -2,7 +2,8 @@
 user-facing-string audit: a security or unmanaged PR must not say
 "Drift detected".  security=True → "Security issue detected",
 unmanaged=True → "Unmanaged resource detected", fix/rollback keep
-"Drift detected", review_only keeps its own heading and writes no file.
+"Drift detected", review_only keeps its own heading and commits a
+drift-reports/*.md body (GitHub requires a commit; no .tf change).
 
 Run: python -m unittest tests.test_pr_body_language
 """
@@ -25,17 +26,25 @@ class _FakePR:
         pass
 
 
+class _FakeGitRef:
+    def __init__(self, sha="abc123"):
+        self.object = type("O", (), {"sha": sha})()
+
+    def delete(self):
+        return None
+
+
 class _FakeRepo:
     def __init__(self):
         self.pull_kwargs = None
         self.file_writes = 0
-        self._orig_get_contents = self.get_contents
+        self.written_paths = []
 
     def get_pulls(self, state="open", base=None):
         return []
 
     def get_git_ref(self, ref):
-        return type("R", (), {"object": type("O", (), {"sha": "abc123"})})()
+        return _FakeGitRef()
 
     def create_git_ref(self, **kw):
         return None
@@ -45,10 +54,12 @@ class _FakeRepo:
 
     def create_file(self, **kw):
         self.file_writes += 1
+        self.written_paths.append(kw.get("path"))
         return None
 
     def update_file(self, **kw):
         self.file_writes += 1
+        self.written_paths.append(kw.get("path"))
         return None
 
     def create_pull(self, **kw):
@@ -67,12 +78,17 @@ class PrBodyLanguageTests(unittest.TestCase):
         gi._resolve_github_client, gi.drift_history.append_entry = self._orig
 
     def _create(self, **flags):
-        gi.create_drift_pr(
-            resource_id="aws_instance.foo",
-            pr_title="t", drift_summary="s", plan_output="p",
-            file_path="main.tf", file_content="x",
-            account_label="prod-cra", **flags,
-        )
+        kwargs = {
+            "resource_id": "aws_instance.foo",
+            "pr_title": "t",
+            "drift_summary": "s",
+            "plan_output": "p",
+            "file_path": "main.tf",
+            "file_content": "x",
+            "account_label": "prod-cra",
+        }
+        kwargs.update(flags)
+        gi.create_drift_pr(**kwargs)
         return self.repo.pull_kwargs["body"]
 
     def test_security_body(self):
@@ -93,10 +109,21 @@ class PrBodyLanguageTests(unittest.TestCase):
         body = self._create(is_rollback=True)
         self.assertIn("## Drift detected: `aws_instance.foo`", body)
 
-    def test_review_only_body_and_no_file_write(self):
-        body = self._create(review_only=True)
+    def test_review_only_body_and_no_tf_write(self):
+        # review_only still needs a drift-reports/*.md commit — GitHub
+        # rejects empty head==base PRs.  The report is not a .tf patch.
+        body = self._create(
+            review_only=True,
+            file_path="drift-reports/prod-cra/manual-review.md",
+            file_content="# review\n",
+        )
         self.assertIn("## Security finding — manual review requested", body)
-        self.assertEqual(self.repo.file_writes, 0)  # no file diff
+        self.assertEqual(self.repo.file_writes, 1)
+        self.assertTrue(all(
+            (p or "").startswith("drift-reports/") or (p or "").endswith(".md")
+            for p in self.repo.written_paths
+        ))
+        self.assertFalse(any((p or "").endswith(".tf") for p in self.repo.written_paths))
 
 
 if __name__ == "__main__":

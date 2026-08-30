@@ -369,16 +369,24 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope:
                 if row["status"] in (
                     "complete", "failed", "cancelled",
                     "applied", "reverted", "reverted_gate_blocked", "manual_revert_required",
+                    "excepted",
                 ):
                     return
+                fail_body = {
+                    "status": "failed",
+                    result_col: {
+                        "error": f"Process exited with code {proc.returncode}",
+                        "log_tail": error_summary,
+                    },
+                }
+                # pending_applies has no completed_at — PostgREST 400s the
+                # whole PATCH if we send it, leaving the row stuck in claim.
+                if table != "pending_applies":
+                    fail_body["completed_at"] = datetime.now(timezone.utc).isoformat()
                 requests.patch(
                     f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
                     headers=headers,
-                    json={
-                        "status": "failed",
-                        "completed_at": datetime.now(timezone.utc).isoformat(),
-                        result_col: {"error": f"Process exited with code {proc.returncode}", "log_tail": error_summary},
-                    },
+                    json=fail_body,
                     timeout=5,
                 )
                 return
@@ -467,7 +475,8 @@ def _load_env() -> None:
 
 
 def auto_add_exceptions_on_merge(
-    pr_number: int, scope: str, pr_type: str | None, approved_by: str
+    pr_number: int, scope: str, pr_type: str | None, approved_by: str,
+    reason: str | None = None,
 ) -> None:
     """Policy: merging an unmanaged/security PR auto-adds the covered
     resources/rules to the exception registry — no separate manual
@@ -541,7 +550,7 @@ def auto_add_exceptions_on_merge(
                 "exception_type": "unmanaged",
                 "resource_type": resource_type,
                 "resource_id_pattern": pattern,
-                "reason": f"Auto-added on merge of unmanaged PR #{pr_number}",
+                "reason": reason or f"Auto-added on merge of unmanaged PR #{pr_number}",
                 "approved_by": approved_by,
                 "auto": True,
             })
@@ -575,7 +584,7 @@ def auto_add_exceptions_on_merge(
                 "exception_type": "security",
                 "resource_address": ra,
                 "rule_id": rid,
-                "reason": f"Auto-added on merge of security PR #{pr_number}",
+                "reason": reason or f"Auto-added on merge of security PR #{pr_number}",
                 "approved_by": approved_by,
                 "auto": True,
             })
@@ -1721,11 +1730,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     # ── Cancel in-progress run ─────────────────────────────────────
     def _cancel_run(self, path, table):
-        """POST /api/scan/{run_id}/cancel or /api/rollback/{run_id}/cancel
+        """POST /api/scan/{run_id}/cancel, /api/rollback/{run_id}/cancel,
+        or /api/pending-applies/{id}/cancel.
 
-        Marks the run row as 'cancelled' and terminates the subprocess
-        gracefully (SIGTERM → 5 s wait → SIGKILL) so terraform can
-        release its state lock."""
+        Marks the run/pending row as 'cancelled' and terminates the
+        subprocess gracefully (SIGTERM → 5 s wait → SIGKILL) so terraform
+        can release its state lock.  pending_applies has no completed_at
+        column — only scan_runs/rollback_runs get that field."""
         run_id = path.split("/")[3]  # /api/scan/{run_id}/cancel
 
         # Write the cancelled status to Supabase FIRST so _watch_exit
@@ -1733,6 +1744,14 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         if url_base and key:
+            cancel_body = {"status": "cancelled"}
+            if table == "pending_applies":
+                cancel_body["result"] = {
+                    "cancelled": True,
+                    "message": "Decision job cancelled from dashboard",
+                }
+            else:
+                cancel_body["completed_at"] = datetime.now(timezone.utc).isoformat()
             for attempt in range(2):
                 try:
                     requests.patch(
@@ -1740,8 +1759,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                         headers={"apikey": key, "Authorization": f"Bearer {key}",
                                  "Content-Type": "application/json",
                                  "Prefer": "return=minimal"},
-                        json={"status": "cancelled",
-                              "completed_at": datetime.now(timezone.utc).isoformat()},
+                        json=cancel_body,
                         timeout=5,
                     )
                     break
@@ -1948,8 +1966,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         decision = body.get("decision", "")
-        if decision not in ("approved", "rejected"):
-            self._json_error(400, "decision must be 'approved' or 'rejected'.")
+        if decision not in ("approved", "rejected", "excepted"):
+            self._json_error(400, "decision must be 'approved', 'rejected', or 'excepted'.")
             return
         approved_by = (body.get("approved_by") or "").strip()
         if not approved_by:
@@ -2056,17 +2074,27 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             # resources/rules to the exception registry so future scans
             # skip them — no separate manual exception entry.  Fail-soft
             # (logged inside); the merge itself is already final.
-            print(f"  [approve] auto_add_exceptions_on_merge reached — "
-                  f"pr={pr_number} pr_type={row.get('pr_type')}", file=sys.stderr)
-            try:
-                auto_add_exceptions_on_merge(
-                    pr_number, scope, row.get("pr_type"), approved_by=approved_by,
-                )
-                print("  [approve] auto_add_exceptions_on_merge returned "
-                      "without exception", file=sys.stderr)
-            except Exception as exc:
-                print(f"  [approve] auto_add_exceptions_on_merge raised: {exc}",
+            # Real-fix security PRs apply the .tf patch on merge — no
+            # exception.  review_only security PRs (and unmanaged) still
+            # auto-except: there's no code change to absorb the finding.
+            _pr_type = row.get("pr_type")
+            _review_only = bool(row.get("review_only"))
+            if _pr_type == "security_only" and not _review_only:
+                print(f"  [approve] skipping auto_add_exceptions_on_merge — "
+                      f"real-fix security PR #{pr_number}", file=sys.stderr)
+            else:
+                print(f"  [approve] auto_add_exceptions_on_merge reached — "
+                      f"pr={pr_number} pr_type={_pr_type} review_only={_review_only}",
                       file=sys.stderr)
+                try:
+                    auto_add_exceptions_on_merge(
+                        pr_number, scope, _pr_type, approved_by=approved_by,
+                    )
+                    print("  [approve] auto_add_exceptions_on_merge returned "
+                          "without exception", file=sys.stderr)
+                except Exception as exc:
+                    print(f"  [approve] auto_add_exceptions_on_merge raised: {exc}",
+                          file=sys.stderr)
 
             # NOTE: drift_events resolution is deliberately NOT done here.
             # agent.py resolves (approve) / marks reverted (reject) only
@@ -2087,12 +2115,76 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self._json_error(409, f"GitHub close failed: {exc}")
                 return
 
+        elif decision == "excepted":
+            # Real-fix security only: close without merging, write the
+            # same security exception rows merge would have written, and
+            # resolve pending/drift rows.  No apply job.
+            if row.get("pr_type") != "security_only" or bool(row.get("review_only")):
+                _rollback("excepted is only valid for real-fix security PRs")
+                self._json_error(
+                    400,
+                    "Except is only available for real-fix security PRs "
+                    "(not review_only or other pr_types).",
+                )
+                return
+            try:
+                from drift_reconciler.github_integration import close_pr
+                close_pr(scope, pr_number)
+            except RuntimeError as exc:
+                _rollback(f"close failed: {exc}")
+                self._json_error(409, f"GitHub close failed: {exc}")
+                return
+            try:
+                auto_add_exceptions_on_merge(
+                    pr_number, scope, "security_only", approved_by=approved_by,
+                    reason=f"Excepted via dashboard on security PR #{pr_number}",
+                )
+            except Exception as exc:
+                print(f"  [except] auto_add_exceptions_on_merge raised: {exc}",
+                      file=sys.stderr)
+            try:
+                from drift_reconciler import drift_history as _dh
+                _dh.resolve_entry(
+                    pr_number, scope,
+                    f"Excepted via dashboard — security finding suppressed "
+                    f"without merging PR #{pr_number}",
+                )
+            except Exception as exc:
+                print(f"  [except] drift_history resolve failed: {exc}",
+                      file=sys.stderr)
+            try:
+                requests.patch(
+                    f"{table_url}?id=eq.{pending_id}",
+                    headers=headers,
+                    json={
+                        "status": "excepted",
+                        "result": {
+                            "excepted": True,
+                            "message": "PR closed without merge; security exception written",
+                        },
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                print(f"  [except] pending status update failed: {exc}",
+                      file=sys.stderr)
+            data = json.dumps({
+                "ok": True, "apply_started": False, "excepted": True,
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+
         # ── Spawn the apply/revert job asynchronously ─────────────────
         # Approve → --apply-pr against post-merge main.
         # Reject  → --revert-pr against pre-drift main (PR never merged),
         #           so the apply reverts AWS to match code.
         # (row/pr_number/scope come from the claim above.)
-        if pr_number and scope:
+        if pr_number and scope and decision != "excepted":
             # Reuse the pending_applies row id as the log run_id so
             # the log viewer can be pointed at it later if desired.
             apply_run_id = row.get("id") or f"apply-{pr_number}-{int(datetime.now().timestamp())}"
@@ -2468,6 +2560,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                                 complete = status in (
                                     "applied", "failed", "cancelled", "reverted",
                                     "reverted_gate_blocked", "manual_revert_required",
+                                    "excepted",
                                 )
                                 result = row.get("result") or {}
                                 result_output = result.get("output") if isinstance(result, dict) else None

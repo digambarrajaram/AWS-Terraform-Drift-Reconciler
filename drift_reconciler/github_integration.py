@@ -283,9 +283,16 @@ def create_drift_pr(
     # need a PR when the resource was un-excepted — bump a re-review stamp
     # so the commit is non-empty and Approvals gets a fresh queue entry.
     # Routine post-merge noise never reaches here: the active-exception
-    # filter and open-PR dedup sit upstream.  review_only PRs carry NO
-    # file change — the branch stays identical to base on purpose.
-    if not review_only:
+    # filter and open-PR dedup sit upstream.
+    #
+    # review_only PRs still need a file commit: GitHub rejects create_pull
+    # when head == base ("No commits between…"), which used to crash the
+    # whole trivy_only scan at stage trivy_only_review.  Callers pass a
+    # drift-reports/*.md body; the PR is still "review" (no .tf change).
+    write_file = bool(file_path and file_content) and (
+        not review_only or _is_report_path(file_path)
+    )
+    if write_file:
         try:
             try:
                 existing = repo.get_contents(file_path, ref=head_branch)
@@ -330,6 +337,12 @@ def create_drift_pr(
                 f"GitHub API error writing {file_path} on {head_branch}: "
                 f"{exc.status} {exc.data}"
             ) from exc
+    elif review_only:
+        # No report body supplied — cannot open a GitHub PR with zero
+        # commits.  Fail soft here rather than 422 at create_pull.
+        print(f"  ⚠ {resource_id}: review_only PR missing report content — skipping")
+        _delete_head_branch()
+        return None
 
     if review_only:
         pr_body = f"""## Security finding — manual review requested: `{resource_id}`

@@ -49,13 +49,13 @@ def decision_claim_miss_error(row: dict | None) -> tuple[int, str, dict]:
 
 
 def claim_decision(pending_id: str, decision: str, approved_by: str) -> dict:
-    """Atomically claim ``awaiting_approval`` → ``approved``|``rejected``.
+    """Atomically claim ``awaiting_approval`` → ``approved``|``rejected``|``excepted``.
 
     Returns ``{"ok": True, "row": ...}`` on success, or
     ``{"ok": False, "http_status": N, "error": "...", ...}`` on failure.
     """
-    if decision not in ("approved", "rejected"):
-        return {"ok": False, "http_status": 400, "error": "decision must be 'approved' or 'rejected'."}
+    if decision not in ("approved", "rejected", "excepted"):
+        return {"ok": False, "http_status": 400, "error": "decision must be 'approved', 'rejected', or 'excepted'."}
     if not (approved_by or "").strip():
         return {"ok": False, "http_status": 400, "error": "approved_by is required."}
     if not _URL or not _KEY:
@@ -101,14 +101,17 @@ def claim_decision(pending_id: str, decision: str, approved_by: str) -> dict:
         return {"ok": False, "http_status": 502, "error": f"Supabase unreachable: {exc}"}
 
 
-def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None) -> bool:
+def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
+                         review_only: bool = False) -> bool:
     """Insert an awaiting_approval row for a newly-created PR.
 
     This is the PRIMARY trigger for the dashboard Approve/Reject flow:
     every PR appears in the Approvals page as soon as it's created.
     Dedup-guarded on (pr_number, scope) so re-runs don't double-insert.
     *pr_type* mirrors the drift_events vocabulary (fix/batch/unmanaged/
-    security_only) so the queue can label and filter PR kinds."""
+    security_only) so the queue can label and filter PR kinds.
+    *review_only* marks security PRs that carry no .tf patch (manual
+    review) — Approvals treats them differently from real-fix PRs."""
     if not _URL or not _KEY:
         print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
@@ -130,6 +133,7 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None)
                 "scope": scope,
                 "status": "awaiting_approval",
                 "pr_type": pr_type,
+                "review_only": bool(review_only),
             },
             timeout=10,
         )

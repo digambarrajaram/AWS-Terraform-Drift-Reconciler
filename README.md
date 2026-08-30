@@ -19,7 +19,9 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 - `drift_alert` — severity-routed: PagerDuty or Slack via configurable rules
 - `drift_pr` — GitHub PR (fix/batch/rollback) + Supabase history append
 
-**CLI** — `--rollback`, `--rollback-pr`, `--scan-unmanaged`, `--trends`, `--tf-dir`, `--account-label`, `--region`
+**CLI** — `--rollback`, `--rollback-pr`, `--scan-unmanaged`, `--trivy-only`, `--trends`, `--tf-dir`, `--account-label`, `--region`
+
+**Approvals** — every PR lands in `pending_applies`; dashboard Merge / Except / Reject (and Cancel while apply/revert runs) drives GitHub + apply jobs
 
 **CI/CD** (`.github/workflows/`) — OIDC auth, scope-resolved, dual-gate (drift + freshness), auto-revert on block
 
@@ -36,7 +38,10 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | GitHub OIDC-based AWS auth (scan role + apply role) | ✅ |
 | PR creation with patched `.tf` file | ✅ |
 | Unmanaged-resource PR type (`pr_type="unmanaged"`) tracked separately | ✅ |
-| PR queue with type filter (fix/batch/rollback/unmanaged) + colored badges | ✅ |
+| Security PR types: real-fix (`.tf` patch) vs `review_only` (report-only / manual review) | ✅ |
+| PR queue with type filter (fix/batch/rollback/unmanaged/security) + colored badges | ✅ |
+| Approvals queue (`pending_applies`) — Approve/Merge, Reject, Except (real-fix security) | ✅ |
+| Cancel in-flight apply/revert decision jobs (same pattern as Cancel Scan) | ✅ |
 | Scope-tagged PR branches, titles, and dedup keys | ✅ |
 | `lifecycle.ignore_changes` / externally-managed resource handling | ✅ |
 | Drift exceptions stored in Supabase (no more local JSON files) | ✅ |
@@ -55,10 +60,17 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Feature | Status |
 |---|---|
 | Trivy misconfiguration scan on proposed drift fixes | ✅ |
+| Standalone `--trivy-only` / dashboard Trivy-only scan (no drift plan) | ✅ |
+| Clone refresh (`refresh_clone`) before trivy-only — same guard as drift scans | ✅ |
 | Auto-fix loop (LLM patch → validate → re-scan) | ✅ |
+| Real-fix security PRs (`*.tf`) vs review-only PRs (`drift-reports/*.md`) | ✅ |
+| Real-fix merge applies patch with **no** auto-exception; **Except** closes PR + writes exception | ✅ |
+| Review-only merge still auto-adds security exceptions | ✅ |
+| `fixes_jsonb` on `pending_applies` stores `(resource_address, rule_id)` for merge/except | ✅ |
 | Pre-existing vs newly-introduced issue classification | ✅ |
 | Baseline scan before patching to establish origin | ✅ |
-| Human-review routing for CIDR/KMS/IAM decisions | ✅ |
+| Human-review routing for CIDR/KMS/IAM / unfixable findings | ✅ |
+| Security exceptions in Supabase (suppress by resource + Trivy rule ID) | ✅ |
 
 ### Unmanaged resource detection
 
@@ -161,22 +173,25 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Feature | Status |
 |---|---|
 | Live scan trigger with stage tracking (polling + Realtime) | ✅ |
+| Trivy-only scan trigger from Scan page | ✅ |
+| Cancel Scan / Cancel Rollback / Cancel in-flight Approvals decision | ✅ |
 | Stage indicators with no-op detection (hollow dots for idle nodes) | ✅ |
 | Per-stage outcome chips (Drift PR N / Unmanaged PR N) | ✅ |
 | Alerts-sent tracking (PagerDuty + Slack counts, no-op detection) | ✅ |
 | Drift findings explorer with filters, search, pagination | ✅ |
+| Approvals page — PR drawer, Merge/Except/Reject, live apply logs (`serialPoll`) | ✅ |
 | Rollback UI with preview diff + confirmation polling | ✅ |
 | Trends page with 4 Chart.js visualizations + KPI summary cards | ✅ |
-| Exceptions management (add/expire/delete via Supabase CRUD) | ✅ |
+| Exceptions management (drift / unmanaged / security — add/expire/delete) | ✅ |
 | Alerts configuration (PagerDuty/Slack keys, severity routing, test send) | ✅ |
 | Environments management (CRUD, git source, AWS credentials via UI) | ✅ |
 | Responsive dark-theme design with shared site navigation | ✅ |
 | 5-minute scan polling timeout with user-facing message | ✅ |
-| Structured scan results (mode banner, drift/unmanaged blocks, per-type PR links) | ✅ |
+| Structured scan results (mode banner, drift/unmanaged/security blocks, per-type PR links) | ✅ |
 | Structured error display (summary, suggestion, expandable details) | ✅ |
 | Shared environment selector component (`env-selector.js`) | ✅ |
 | API access token gating (`X-Api-Access-Token` header, constant-time check) | ✅ |
-| Live execution log streaming (terminal pane, 2s polling, scroll-lock) | ✅ |
+| Live execution log streaming (serialized poll — no overlapping abort races) | ✅ |
 | One-time browser token prompt with localStorage persistence | ✅ |
 
 ### Environments & credentials
@@ -252,20 +267,33 @@ python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a
 # Rollback a previous fix
 python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --region us-east-1 --rollback --rollback-pr 50
 
+# Security scan only (Trivy; refreshes git clone under DRIFT_CLONE_BASE first)
+python drift_reconciler/agent.py --tf-dir terraform_code/ec2_terraform_account_a --account-label scope-a --trivy-only
+
 # Trend report
 python drift_reconciler/agent.py --trends --trends-account scope-a
 ```
 
+### Approvals (security PR actions)
+
+| PR kind | Merge | Except | Reject |
+|---|---|---|---|
+| Real-fix `security_only` (`review_only=false`) | Merge `.tf` patch; **no** auto-exception | Close without merge; write security exception from `fixes_jsonb` | Close PR; finding can resurface next scan |
+| Review-only security (`review_only=true`) | Merge report + auto-except | Hidden | Close PR; finding can resurface next scan |
+| Unmanaged / drift fix / batch | Unchanged (merge+except or apply/revert) | — | Unchanged |
+
+Cancel is available while an apply/revert job is in the claim state (`approved` / `rejected`) — same kill path as Cancel Scan.
 
 ### Dashboard pages
 
-Both dashboards cover the same 10 pages:
+React dashboard (port 5173) is the primary UI; vanilla HTML on 8080 remains for legacy:
 
 | Page | Vanilla (port 8080) | React (port 5173) |
 |---|---|---|
 | Overview / KPI cards | `index.html` | `Overview.tsx` |
 | Drift findings explorer | `explorer.html` | `Explorer.tsx` |
 | Scan trigger + live logs | `scan.html` | `Scan.tsx` |
+| Approvals (Merge / Except / Reject / Cancel) | — | `Approvals.tsx` |
 | Rollback preview + confirm | `rollback.html` | `Rollback.tsx` |
 | Trends + Chart.js | `trends.html` | `Trends.tsx` |
 | Exception CRUD | `exceptions.html` | `Exceptions.tsx` |
@@ -279,10 +307,10 @@ Both dashboards cover the same 10 pages:
 frontend/
   artifacts/
     web/               # React SPA — 10 pages, shadcn/ui, Tailwind, Supabase
-      src/pages/       # Overview, Explorer, Scan, Rollback, Trends,
+      src/pages/       # Overview, Explorer, Scan, Approvals, Rollback, Trends,
                        #   Exceptions, Alerts, Environments, PR Queue
       src/components/  # LogViewer, AuthPromptModal, ScopeSelector, ui/*
-      src/hooks/       # useScanLogs, useAuthStore, useDriftEvents, etc.
+      src/hooks/       # useScanLogs (serialPoll), useAuthStore, useDriftEvents, etc.
       src/api/         # Supabase client + API fetch wrappers
     api-server/        # Express API server — Drizzle ORM, Pino, CORS
     mockup-sandbox/    # UI prototyping sandbox with infinite canvas
@@ -325,13 +353,21 @@ Required GitHub Secrets: `PAGERDUTY_ROUTING_KEY`, `SLACK_WEBHOOK_URL`, `SUPABASE
 | Table | Purpose |
 |---|---|
 | `drift_events` | Per-finding event log (resource, severity, PR, status, changes JSONB) |
+| `pending_applies` | Approvals queue — one row per PR (`pr_type`, `review_only`, `fixes_jsonb`, claim/terminal status) |
 | `scan_runs` | Pipeline invocation tracking (status, stages, results) |
 | `rollback_runs` | Rollback invocation tracking |
 | `notification_secrets` | Singleton: PagerDuty key + Slack webhook (service-role only) |
 | `severity_routing_rules` | HIGH/MEDIUM/LOW → PagerDuty/Slack routing |
-| `drift_exception_registry` | Drift + unmanaged exception entries (anon-readable) |
+| `drift_exception_registry` | Drift + unmanaged + security exception entries (anon-readable) |
 | `environments` | Scope metadata, AWS credentials, git source |
 | `environment_secrets` | Per-environment secrets (AWS keys, GitHub token, service-role only) |
+
+Apply SQL under `migrations/` in the Supabase SQL editor (or your usual process) before deploying code that depends on new columns. Notable Approvals-related migrations:
+
+- `create_pending_applies_table.sql`
+- `add_pr_type_to_pending_applies.sql`
+- `add_fixes_jsonb_to_pending_applies.sql`
+- `add_review_only_to_pending_applies.sql` (includes `NOTIFY pgrst, 'reload schema'`)
 
 ## Project structure
 
@@ -354,6 +390,7 @@ drift_reconciler/
   environment_credentials.py  # AWS session resolver (profile/role/keys)
   scan_runs.py                # Scan lifecycle tracking in Supabase
   rollback_runs.py            # Rollback lifecycle tracking in Supabase
+  pending_applies.py          # Approvals queue create/claim/update + security fixes_jsonb
   cost_cache.json             # Static on-demand hourly rates
 
 dashboard/
@@ -376,6 +413,10 @@ terraform_code/
   account-a/                  # scope-a IAM bootstrap (scan + apply roles)
 
 migrations/
+  create_pending_applies_table.sql
+  add_pr_type_to_pending_applies.sql
+  add_fixes_jsonb_to_pending_applies.sql
+  add_review_only_to_pending_applies.sql
   create_scan_runs_table.sql
   create_rollback_runs_table.sql
   create_drift_severity_summary_view.sql

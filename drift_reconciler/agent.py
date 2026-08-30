@@ -961,9 +961,12 @@ def unmanaged_scan_node(state: State):
 
 def _create_manual_review_prs(needs_review: list[dict], account_label: str,
                               run_id: str | None) -> list[dict]:
-    """Turn unfixable trivy findings into review-only PRs (no file diff —
-    the body carries rule_id + resource + rejection reason) so they appear
+    """Turn unfixable trivy findings into review-only PRs so they appear
     in the dashboard Approvals queue instead of being silently dropped.
+
+    Each PR carries a ``drift-reports/…/*.md`` commit (GitHub requires at
+    least one commit between head and base) — not a Terraform change.  The
+    body explains why the automated fix was rejected.
 
     Reuses the security_only path end to end: merge auto-adds exceptions
     for the (resource, rule_id) pairs via auto_add_exceptions_on_merge;
@@ -996,23 +999,41 @@ def _create_manual_review_prs(needs_review: list[dict], account_label: str,
             for i in items
         )
         count = len(items)
-        pr = gi.create_drift_pr(
-            resource_id=resource_addr,
-            pr_title=(f"Manual review: {resource_addr} "
-                      f"({count} finding{'s' if count != 1 else ''})"),
-            drift_summary=findings,
-            plan_output=reasons,
-            file_path="",
-            file_content="",
-            risk_level="LOW",
-            account_label=account_label,
-            security=True,
-            review_only=True,
+        # Markdown report so create_pull has a real commit.  Empty
+        # review_only branches used to 422 ("No commits between…") and
+        # mark the whole trivy_only scan failed at trivy_only_review.
+        report_body = (
+            f"# Manual review: `{resource_addr}`\n\n"
+            f"{findings}\n\n"
+            f"### Why no automated fix\n\n```text\n{reasons}\n```\n"
         )
+        report_path = gi.drift_report_repo_path(
+            account_label, f"manual-review.{resource_addr}"
+        )
+        try:
+            pr = gi.create_drift_pr(
+                resource_id=resource_addr,
+                pr_title=(f"Manual review: {resource_addr} "
+                          f"({count} finding{'s' if count != 1 else ''})"),
+                drift_summary=findings,
+                plan_output=reasons,
+                file_path=report_path,
+                file_content=report_body,
+                risk_level="LOW",
+                account_label=account_label,
+                security=True,
+                review_only=True,
+            )
+        except Exception as exc:
+            # One resource's GitHub failure must not fail the whole scan —
+            # remaining resources still get review PRs, and the run stays
+            # complete with whatever succeeded.
+            print(f"  ⚠ Manual review PR failed for {resource_addr}: {exc}")
+            continue
         if pr is None:
             continue
         pr_urls.append({"url": pr.html_url, "type": "manual"})
-        create_pending_apply(pr.number, account_label, "security_only")
+        create_pending_apply(pr.number, account_label, "security_only", review_only=True)
         # Persist the (resource, rule_id) pairs under review so a merge
         # auto-adds security exceptions for exactly these findings.
         pairs = sorted({(i.get("resource"), i["rule_id"]) for i in items if i.get("resource")})
@@ -1022,6 +1043,35 @@ def _create_manual_review_prs(needs_review: list[dict], account_label: str,
                 [{"resource_address": r, "rule_id": rid} for r, rid in pairs],
             )
     return pr_urls
+
+
+def finalize_trivy_only_scan(run_id: str | None, results: dict) -> None:
+    """Mark a finished trivy_only run complete — including when the only
+    outcome is manual-review PRs after fix rejections.  ``failed`` is
+    reserved for unhandled exceptions in the caller."""
+    if not run_id:
+        return
+    from scan_runs import update_scan_run
+    from datetime import datetime as dt, timezone
+
+    pr_urls = results.get("pr_urls") or []
+    needs_review = results.get("needs_review") or []
+    summary = {
+        "mode": "trivy_only",
+        "security": {
+            "found": len(pr_urls) > 0,
+            "count": len(pr_urls),
+            "pr_links": [r["url"] for r in pr_urls],
+            "needs_review": needs_review,
+        },
+    }
+    update_scan_run(
+        run_id,
+        status="complete",
+        completed_at=dt.now(timezone.utc).isoformat(),
+        result_summary=summary,
+        pr_links=[r["url"] for r in pr_urls] if pr_urls else None,
+    )
 
 
 def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str | None = None) -> dict:
@@ -2280,29 +2330,30 @@ if __name__ == "__main__":
         if not os.path.isdir(tf_dir):
             raise RuntimeError(f"Terraform directory not found: {tf_dir}")
 
+        # Scan freshness: --tf-dir skips resolve_tf_dir's built-in
+        # fetch+reset.  Refresh whenever tf_dir lives inside the drift
+        # clone base — same guard used for drift scans — so a merged
+        # security fix is present before Trivy re-scans.
+        _clone_base = os.environ.get(
+            "DRIFT_CLONE_BASE",
+            os.path.join(os.path.expanduser("~"), ".drift-clones"),
+        )
+        try:
+            _in_clone_base = (
+                os.path.commonpath([os.path.abspath(tf_dir), os.path.abspath(_clone_base)])
+                == os.path.abspath(_clone_base)
+            )
+        except ValueError:
+            _in_clone_base = False
+        if _in_clone_base:
+            _branch = _current_git_branch(tf_dir)
+            if _branch:
+                from drift_reconciler.environment_credentials import refresh_clone
+                refresh_clone(tf_dir, _branch, slug=args.account_label)
+
         try:
             results = run_trivy_only_scan(tf_dir, _account_label, _account_label, _run_id)
-            if _run_id:
-                from scan_runs import update_scan_run
-                from datetime import datetime as dt, timezone
-                pr_urls = results["pr_urls"]
-                needs_review = results["needs_review"]
-                summary = {
-                    "mode": "trivy_only",
-                    "security": {
-                        "found": len(pr_urls) > 0,
-                        "count": len(pr_urls),
-                        "pr_links": [r["url"] for r in pr_urls],
-                        "needs_review": needs_review,
-                    },
-                }
-                update_scan_run(
-                    _run_id,
-                    status="complete",
-                    completed_at=dt.now(timezone.utc).isoformat(),
-                    result_summary=summary,
-                    pr_links=[r["url"] for r in pr_urls] if pr_urls else None,
-                )
+            finalize_trivy_only_scan(_run_id, results)
         except Exception as e:
             if _run_id:
                 from scan_runs import update_scan_run

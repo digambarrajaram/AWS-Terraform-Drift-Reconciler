@@ -5,6 +5,7 @@ node_modules/
 build/
 dist/
 /dist
+*.tsbuildinfo
 
 # Coverage & testing
 coverage/
@@ -25,47 +26,30 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Temporary files
-*.tmp
-*.swp
-*.swo
-
-# Terraform state backups (local; remote state is in S3)
-terraform/.terraform/
-terraform/*.tfstate
-terraform/*.tfstate.backup
-terraform/.terraform.lock.hcl
-
-# Drift reports
-drift_reconciliation_report_*.md
-
-# Drift history (now stored in Supabase — local files are ephemeral cache)
-.drift-history/
-drift-trends-report-*.md
-
-
-Set-Content .gitignore @'
-# Ignore environment variables and credentials
-.env
-*.env
-
-# Ignore compiled python files
-**/__pycache__/
-*.pyc
-
-# Ignore python virtual environments
+# Python virtual environments
+.venv/
+venv/
+drift/
 test/Include/
 test/Lib/
 test/Scripts/
 test/pyvenv.cfg
 
-# Ignore ALL local terraform hidden directories and lock files everywhere
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Terraform local state / plugins (remote state is in S3)
 **/.terraform/
 **/.terraform.lock.hcl
-
-# Ignore ALL local terraform state files everywhere
 **/*.tfstate
 **/*.tfstate.*
 **/tfplan
 **/plan.json
-'@
+
+# Drift reports (ephemeral local outputs)
+drift_reconciliation_report_*.md
+.drift-history/
+drift-trends-report.md
+drift-trends-report-*.md

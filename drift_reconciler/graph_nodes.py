@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import pagerduty_alert as pga
 import slack_notify as slack
@@ -16,6 +18,7 @@ from drift_reconciler.environment_credentials import (
     _resolve_env_credentials,
 )
 from trivy_agent import graph as trivy_graph, State as TrivyState
+from trivy_agent import _run_trivy, _extract_issues
 from scan_runs import report_stage
 from drift_findings import State
 from hcl_patch import _apply_changes_to_file
@@ -121,6 +124,7 @@ def _load_routing_rules() -> dict[str, str]:
     if Supabase is unreachable or the table is empty."""
     import os as _os
     import requests as _requests
+    import agent as _ag
     try:
         url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -144,7 +148,7 @@ def _load_routing_rules() -> dict[str, str]:
             if r.get("scope") is None:
                 rules[r["severity"]] = r["channel"]
         for r in rows:
-            if r.get("scope") == _account_label:
+            if r.get("scope") == _ag._account_label:
                 rules[r["severity"]] = r["channel"]
         return rules
     except Exception:

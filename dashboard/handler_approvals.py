@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 
 import requests
@@ -257,6 +258,16 @@ class ApprovalsMixin:
         # Row already claimed (status=approved); a merge failure rolls
         # the status back so the decision is retryable.
         if decision == "approved":
+            # Manual-review security PRs have no .tf patch — merging only
+            # added exceptions before, which is Except's job.  Block Approve.
+            if row.get("pr_type") == "security_only" and bool(row.get("review_only")):
+                _rollback("approve blocked for review_only security PR")
+                self._json_error(
+                    400,
+                    "Manual-review security PRs cannot be merged — use Except "
+                    "to suppress the finding, or Reject to resurface next scan.",
+                )
+                return
             try:
                 from drift_reconciler.github_integration import merge_pr
                 merge_result = merge_pr(scope, pr_number, commit_message=f"Merge drift fix PR #{pr_number}")
@@ -290,21 +301,16 @@ class ApprovalsMixin:
                 except requests.RequestException as exc:
                     print(f"  ⚠ pending row merge-info update failed: {exc}", file=sys.stderr)
 
-            # Policy: merging an unmanaged/security PR auto-adds its
-            # resources/rules to the exception registry so future scans
-            # skip them — no separate manual exception entry.  Fail-soft
-            # (logged inside); the merge itself is already final.
-            # Real-fix security PRs apply the .tf patch on merge — no
-            # exception.  review_only security PRs (and unmanaged) still
-            # auto-except: there's no code change to absorb the finding.
+            # Policy: unmanaged merge auto-adds exceptions.  Real-fix
+            # security applies the .tf patch — no exception.  review_only
+            # security is blocked above (use Except).
             _pr_type = row.get("pr_type")
-            _review_only = bool(row.get("review_only"))
-            if _pr_type == "security_only" and not _review_only:
+            if _pr_type == "security_only":
                 print(f"  [approve] skipping auto_add_exceptions_on_merge — "
                       f"real-fix security PR #{pr_number}", file=sys.stderr)
             else:
                 print(f"  [approve] auto_add_exceptions_on_merge reached — "
-                      f"pr={pr_number} pr_type={_pr_type} review_only={_review_only}",
+                      f"pr={pr_number} pr_type={_pr_type}",
                       file=sys.stderr)
                 try:
                     auto_add_exceptions_on_merge(
@@ -336,15 +342,35 @@ class ApprovalsMixin:
                 return
 
         elif decision == "excepted":
-            # Real-fix security only: close without merging, write the
-            # same security exception rows merge would have written, and
-            # resolve pending/drift rows.  No apply job.
-            if row.get("pr_type") != "security_only" or bool(row.get("review_only")):
-                _rollback("excepted is only valid for real-fix security PRs")
+            # Any security_only PR: close without merging, write exception
+            # rows from fixes_jsonb.  Covers real-fix (suppress over patch)
+            # and review_only (no patch — Except is the only suppress path).
+            if row.get("pr_type") != "security_only":
+                _rollback("excepted is only valid for security_only PRs")
                 self._json_error(
                     400,
-                    "Except is only available for real-fix security PRs "
-                    "(not review_only or other pr_types).",
+                    "Except is only available for security PRs.",
+                )
+                return
+            fixes = row.get("fixes_jsonb") or []
+            if not fixes:
+                # Claim representation can omit jsonb — re-read explicitly.
+                try:
+                    fres = requests.get(
+                        f"{table_url}?select=fixes_jsonb&id=eq.{pending_id}&limit=1",
+                        headers=headers, timeout=10,
+                    )
+                    if fres.status_code == 200 and fres.json():
+                        fixes = fres.json()[0].get("fixes_jsonb") or []
+                except requests.RequestException:
+                    fixes = []
+            if not fixes:
+                _rollback("no fixes_jsonb on pending row — cannot Except")
+                self._json_error(
+                    409,
+                    "Cannot Except: this security PR has no recorded "
+                    "(resource, rule_id) pairs. Re-run the security scan to "
+                    "recreate the PR, then try Except again.",
                 )
                 return
             try:
@@ -355,13 +381,20 @@ class ApprovalsMixin:
                 self._json_error(409, f"GitHub close failed: {exc}")
                 return
             try:
-                auto_add_exceptions_on_merge(
+                n = auto_add_exceptions_on_merge(
                     pr_number, scope, "security_only", approved_by=approved_by,
                     reason=f"Excepted via dashboard on security PR #{pr_number}",
                 )
+                print(f"  [except] auto_add inserted {n} exception row(s) "
+                      f"for PR #{pr_number}", file=sys.stderr)
+                if n == 0:
+                    print(f"  ⚠ [except] PR #{pr_number} closed but 0 exceptions "
+                          f"were written — check fixes_jsonb / rule_id column",
+                          file=sys.stderr)
             except Exception as exc:
                 print(f"  [except] auto_add_exceptions_on_merge raised: {exc}",
                       file=sys.stderr)
+                n = 0
             try:
                 from drift_reconciler import drift_history as _dh
                 _dh.resolve_entry(
@@ -380,6 +413,7 @@ class ApprovalsMixin:
                         "status": "excepted",
                         "result": {
                             "excepted": True,
+                            "exceptions_added": n,
                             "message": "PR closed without merge; security exception written",
                         },
                     },
@@ -390,6 +424,7 @@ class ApprovalsMixin:
                       file=sys.stderr)
             data = json.dumps({
                 "ok": True, "apply_started": False, "excepted": True,
+                "exceptions_added": n,
             }).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -433,7 +468,7 @@ class ApprovalsMixin:
 
             mode_flag = "--revert-pr" if decision == "rejected" else "--apply-pr"
             cmd = [
-                _sys.executable,
+                sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
                 "--tf-dir", tf_dir,
                 "--account-label", scope,

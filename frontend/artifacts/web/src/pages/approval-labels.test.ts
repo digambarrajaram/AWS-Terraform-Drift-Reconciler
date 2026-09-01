@@ -37,16 +37,12 @@ describe('decisionToast', () => {
   });
 
   it('uses merge/exceptions wording for file-only types', () => {
-    // unmanaged/manual always auto-except on merge.  security_only only
-    // does when review_only (real-fix security is covered below).
+    // unmanaged always auto-excepts on merge.  security review_only no
+    // longer offers Approve — Except is the suppress path.
     for (const t of ['unmanaged', 'manual']) {
       assert.equal(decisionToast(7, 'approved', t), 'PR #7 approved — merged, exceptions added');
       assert.equal(decisionToast(7, 'rejected', t), 'PR #7 rejected — PR closed; will resurface next scan');
     }
-    assert.equal(
-      decisionToast(7, 'approved', 'security_only', true),
-      'PR #7 approved — merged, exceptions added',
-    );
     assert.equal(
       decisionToast(7, 'rejected', 'security_only'),
       'PR #7 rejected — PR closed; will resurface next scan',
@@ -77,10 +73,10 @@ describe('decisionToast — security real-fix vs review_only', () => {
     );
   });
 
-  it('review_only merge still mentions exceptions', () => {
+  it('review_only uses Except (not merge) — toast for excepted', () => {
     assert.equal(
-      decisionToast(7, 'approved', 'security_only', true),
-      'PR #7 approved — merged, exceptions added',
+      decisionToast(7, 'excepted', 'security_only', true),
+      'PR #7 excepted — closed without merge; exception added',
     );
   });
 

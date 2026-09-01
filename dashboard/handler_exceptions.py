@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from dashboard.env import _get_valid_scopes
 from dashboard.exceptions_policy import _validate_exception_entry_local
 
 

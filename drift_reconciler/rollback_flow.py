@@ -184,14 +184,16 @@ def _run_rollback(tf_dir: str, pr_number: int, run_id: str | None = None) -> Non
 
 def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
     """Inner implementation — wrapped by _run_rollback for error handling."""
+    import agent as _ag
+    account_label = _ag._account_label
     _report_rollback_stage(run_id, "loading_baseline")
-    baselines = _load_rollback_baselines(pr_number, _account_label)
+    baselines = _load_rollback_baselines(pr_number, account_label)
     if not baselines:
-        raise RuntimeError(f"No baselines found in Supabase for PR #{pr_number} ({_account_label})")
+        raise RuntimeError(f"No baselines found in Supabase for PR #{pr_number} ({account_label})")
 
     # Resolve the AWS subprocess env once — every baseline in this run
     # targets the same scope.
-    sub_env = _terraform_sub_env_for_scope(_account_label)
+    sub_env = _terraform_sub_env_for_scope(account_label)
 
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 
@@ -303,7 +305,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
             file_path=gi.to_repo_relative_path(rb["file_path"]),
             file_content=patched_content,
             risk_level="LOW",
-            account_label=_account_label,
+            account_label=account_label,
             is_rollback=True,
             rolled_back_from_pr=pr_number,
         )

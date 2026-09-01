@@ -133,12 +133,13 @@ class ExceptActionTests(unittest.TestCase):
 
 
 class ReviewOnlyMergeStillExceptsTests(unittest.TestCase):
-    """(c) review_only merge still auto-excepts."""
+    """(c) review_only security: Approve blocked; Except is the suppress path."""
 
-    def test_review_only_gate_does_not_skip(self):
+    def test_review_only_approve_is_blocked(self):
+        # Mirrors the handler gate: review_only security must not Approve.
         row = {"pr_type": "security_only", "review_only": True}
-        should_skip = row.get("pr_type") == "security_only" and not bool(row.get("review_only"))
-        self.assertFalse(should_skip)
+        block_approve = row.get("pr_type") == "security_only" and bool(row.get("review_only"))
+        self.assertTrue(block_approve)
 
     def test_create_pending_apply_persists_review_only(self):
         posted = []

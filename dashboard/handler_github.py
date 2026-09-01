@@ -10,6 +10,7 @@ import sys
 
 import requests
 
+from dashboard.exceptions_policy import auto_add_exceptions_on_merge
 from drift_reconciler.utils import mask_secret as _mask
 
 class GitHubMixin:
@@ -284,15 +285,19 @@ class GitHubMixin:
             self._json_error(502, "Supabase unreachable")
             return
 
-        # Out-of-band merges follow the same policy as the Approve path:
-        # merging an unmanaged/security PR auto-adds its resources/rules
-        # to the exception registry.  (Approval-flow merges already did
-        # this in the decision handler; the dedup here catches this PR's
-        # rows only if no exception exists yet.)
-        auto_add_exceptions_on_merge(
-            pr_number, scope, pr_type,
-            approved_by=(payload.get("sender") or {}).get("login") or "webhook",
-        )
+        # Out-of-band merges: unmanaged still auto-excepts.  Real-fix
+        # security ("Security fix …") must NOT — the .tf patch is the fix.
+        # (Dashboard review_only merges already wrote exceptions in the
+        # decision handler; those PRs use "Manual review" titles and never
+        # reach this webhook branch.)
+        if pr_type == "security_only":
+            print(f"  [webhook] skipping auto_add for real-fix security "
+                  f"PR #{pr_number}", file=sys.stderr)
+        else:
+            auto_add_exceptions_on_merge(
+                pr_number, scope, pr_type,
+                approved_by=(payload.get("sender") or {}).get("login") or "webhook",
+            )
 
         data = json.dumps({"ok": True}).encode("utf-8")
         self.send_response(200)

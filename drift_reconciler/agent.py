@@ -23,6 +23,12 @@ if _DR not in sys.path:
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# When launched as ``python drift_reconciler/agent.py``, this file is
+# ``__main__`` — but split modules do ``import agent`` and would otherwise
+# load a *second* copy with fresh ``_tf_dir=None``.  Register ourselves
+# under the ``agent`` name first so those imports share our globals.
+sys.modules.setdefault("agent", sys.modules[__name__])
+
 from typing import Annotated  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402
 from langgraph.graph import StateGraph, START, END  # noqa: E402

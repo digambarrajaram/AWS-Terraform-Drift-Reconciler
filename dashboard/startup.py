@@ -4,8 +4,11 @@ from __future__ import annotations
 import argparse
 import http.server
 import os
+import sys
 import threading
 from pathlib import Path
+
+import requests
 
 from dashboard.paths import _REPO_ROOT, _DASHBOARD_DIR
 from dashboard.process_runner import _cleanup_old_logs

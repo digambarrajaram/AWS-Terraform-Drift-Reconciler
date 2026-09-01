@@ -70,22 +70,26 @@ def _validate_exception_entry_local(exception_type: str, entry: dict) -> tuple[b
 def auto_add_exceptions_on_merge(
     pr_number: int, scope: str, pr_type: str | None, approved_by: str,
     reason: str | None = None,
-) -> None:
+) -> int:
     """Policy: merging an unmanaged/security PR auto-adds the covered
     resources/rules to the exception registry — no separate manual
     exception entry.  Fail-soft: the merge is already final on GitHub,
     so a registry write failure only means the next scan may re-flag
-    (the old behavior); never fail the merge over it."""
+    (the old behavior); never fail the merge over it.
+
+    Returns the number of exception rows successfully inserted.
+    """
     import requests as _req_mod
 
     requests = _requests()
+    inserted = 0
     if pr_type not in ("unmanaged", "security_only"):
-        return
+        return 0
     url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     if not url or not key:
         print("  ⚠ auto exception add skipped — Supabase not configured", file=sys.stderr)
-        return
+        return 0
 
     read_headers = {"apikey": key, "Authorization": f"Bearer {key}"}
     write_headers = {**read_headers, "Content-Type": "application/json"}
@@ -103,14 +107,19 @@ def auto_add_exceptions_on_merge(
         except _req_mod.RequestException:
             return True  # can't check — skip the insert, fail soft
 
-    def _insert(row: dict) -> None:
+    def _insert(row: dict) -> bool:
+        nonlocal inserted
         try:
             resp = requests.post(base, headers=write_headers, json=row, timeout=10)
             if resp.status_code >= 300:
                 print(f"  ⚠ auto exception add failed ({resp.status_code}): "
                       f"{resp.text[:200]}", file=sys.stderr)
+                return False
+            inserted += 1
+            return True
         except _req_mod.RequestException as exc:
             print(f"  ⚠ auto exception add failed: {exc}", file=sys.stderr)
+            return False
 
     if pr_type == "unmanaged":
         # The unmanaged PR's drift_events rows carry the resource_ids to
@@ -127,7 +136,7 @@ def auto_add_exceptions_on_merge(
             rows = resp.json() if resp.text and resp.status_code == 200 else []
         except _req_mod.RequestException as exc:
             print(f"  ⚠ auto exception add: drift_events read failed: {exc}", file=sys.stderr)
-            return
+            return 0
         print(f"  [exceptions] drift_events rows for pr={pr_number}: "
               f"{[r.get('resource_id') for r in rows]}", file=sys.stderr)
         for row in rows:
@@ -162,20 +171,23 @@ def auto_add_exceptions_on_merge(
             rows = resp.json() if resp.text and resp.status_code == 200 else []
         except _req_mod.RequestException as exc:
             print(f"  ⚠ auto exception add: pending_applies read failed: {exc}", file=sys.stderr)
-            return
+            return 0
         fixes = (rows[0].get("fixes_jsonb") or []) if rows else []
         if not fixes:
-            print(f"  ⚠ security PR #{pr_number} has no recorded fixes — "
-                  f"skipping auto exception (add manually)", file=sys.stderr)
-            return
+            print(f"  ⚠ security PR #{pr_number} has no recorded fixes_jsonb — "
+                  f"skipping auto exception (add manually or re-scan)", file=sys.stderr)
+            return 0
+        print(f"  [exceptions] security PR #{pr_number} fixes_jsonb: "
+              f"{len(fixes)} pair(s)", file=sys.stderr)
         for fix in fixes:
             ra = fix.get("resource_address") or ""
             rid = fix.get("rule_id") or ""
             if not ra or not rid:
                 continue
             if _already_exists("security", resource_address=ra, rule_id=rid):
+                print(f"  [exceptions] already exists: {ra} / {rid}", file=sys.stderr)
                 continue
-            _insert({
+            if _insert({
                 "scope": scope,
                 "exception_type": "security",
                 "resource_address": ra,
@@ -183,4 +195,9 @@ def auto_add_exceptions_on_merge(
                 "reason": reason or f"Auto-added on merge of security PR #{pr_number}",
                 "approved_by": approved_by,
                 "auto": True,
-            })
+            }):
+                print(f"  [exceptions] inserted security exception: {ra} / {rid}",
+                      file=sys.stderr)
+    print(f"  [exceptions] auto_add done for PR #{pr_number}: "
+          f"{inserted} row(s) inserted", file=sys.stderr)
+    return inserted

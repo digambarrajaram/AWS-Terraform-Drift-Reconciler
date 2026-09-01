@@ -8,6 +8,7 @@ import sys
 
 import github_integration as gi
 import drift_reconciler.drift_history as drift_history
+from drift_reconciler.environment_credentials import _resolve_env_credentials
 from terraform_errors import humanize_terraform_error, _strip_ansi
 
 def _revert_on_gate_failure(

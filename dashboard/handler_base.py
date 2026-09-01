@@ -26,6 +26,7 @@ from dashboard.process_runner import (
     _RUNNING_LOCK,
     _spawn_with_capture,
 )
+from dashboard.supabase_http import _supabase_get
 
 class HandlerBase(http.server.SimpleHTTPRequestHandler):
     _CACHEABLE = {".js", ".css", ".png", ".svg", ".woff2"}
@@ -161,7 +162,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             tf_dir = _tf_dir_for(scope)
 
             cmd = [
-                _sys.executable,
+                sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
                 "--tf-dir", tf_dir,
                 "--account-label", scope,
@@ -232,7 +233,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
 
             # Non-blocking subprocess — fire and respond 202 immediately.
             cmd = [
-                _sys.executable,
+                sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
                 "--tf-dir", tf_dir,
                 "--account-label", scope,
@@ -274,7 +275,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
 
             tf_dir = _tf_dir_for(scope)
             cmd = [
-                _sys.executable,
+                sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
                 "--tf-dir", tf_dir,
                 "--account-label", scope,
@@ -331,7 +332,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
 
             tf_dir = _tf_dir_for(scope)
             cmd = [
-                _sys.executable,
+                sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
                 "--tf-dir", tf_dir,
                 "--account-label", scope,

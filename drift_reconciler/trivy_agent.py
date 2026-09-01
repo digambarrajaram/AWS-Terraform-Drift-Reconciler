@@ -32,6 +32,7 @@ class FixEntry(TypedDict):
     rule_id: str
     file_path: str
     description: str
+    resource: str  # terraform address, e.g. aws_s3_bucket.data
 
 
 class State(TypedDict):
@@ -812,7 +813,12 @@ def fix_issues(state: State) -> dict:
         if result:
             desc, delta = result
             file_line_offsets[file_path] = offset + delta
-            fixes.append(FixEntry(rule_id=rule_id, file_path=file_path, description=desc))
+            fixes.append(FixEntry(
+                rule_id=rule_id,
+                file_path=file_path,
+                description=desc,
+                resource=issue.get("resource") or "",
+            ))
             print(f"  ✓ {rule_id}: {desc}  ({os.path.basename(file_path)}, {issue.get('resource')})")
         else:
             print(f"  ⏭  {rule_id}: no applicable fix  ({resolution[:80]})")

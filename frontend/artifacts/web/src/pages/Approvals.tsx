@@ -339,17 +339,22 @@ function DetailDrawer({
             )}
 
             {/* ── Approve / Except / Reject ── */}
+            {/* Real-fix security: Approve (merge patch) + Except + Reject.
+                Review-only security (no .tf patch): Except + Reject only —
+                Approve/Merge would only add exceptions, which is Except's job. */}
             {current.status === 'awaiting_approval' && (
               <div className="flex items-center gap-2 mt-5 flex-wrap">
-                <button
-                  type="button"
-                  disabled={deciding}
-                  onClick={() => onDecide(current, 'approved')}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  <CheckCircle size={13} /> {deciding ? 'Working…' : 'Approve & Merge'}
-                </button>
-                {current.pr_type === 'security_only' && !current.review_only && (
+                {!(current.pr_type === 'security_only' && current.review_only) && (
+                  <button
+                    type="button"
+                    disabled={deciding}
+                    onClick={() => onDecide(current, 'approved')}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                  >
+                    <CheckCircle size={13} /> {deciding ? 'Working…' : 'Approve & Merge'}
+                  </button>
+                )}
+                {current.pr_type === 'security_only' && (
                   <button
                     type="button"
                     disabled={deciding}
@@ -578,7 +583,8 @@ export default function Approvals() {
                   const shown = displayStatus(row.status, row.pr_type);
                   const awaiting = row.status === 'awaiting_approval';
                   const claimRunning = row.status === 'approved' || row.status === 'rejected';
-                  const showExcept = row.pr_type === 'security_only' && !row.review_only;
+                  const showApprove = !(row.pr_type === 'security_only' && row.review_only);
+                  const showExcept = row.pr_type === 'security_only';
                   return (
                     <tr
                       key={row.id}
@@ -591,7 +597,11 @@ export default function Approvals() {
                       <td className="px-4 py-3 font-mono text-xs">#{row.pr_number}</td>
                       <td className="px-4 py-3 font-mono text-xs">{row.scope}</td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                        {row.pr_type ? (PR_TYPE_LABEL[row.pr_type] ?? row.pr_type) : '—'}
+                        {row.pr_type === 'security_only' && row.review_only
+                          ? 'Security (review)'
+                          : row.pr_type
+                            ? (PR_TYPE_LABEL[row.pr_type] ?? row.pr_type)
+                            : '—'}
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                         {fmtDate(row.merged_at)}
@@ -608,14 +618,16 @@ export default function Approvals() {
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                         {awaiting && (
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <button
-                              type="button"
-                              disabled={deciding}
-                              onClick={() => decide(row, 'approved')}
-                              className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-                            >
-                              <CheckCircle size={12} /> Approve
-                            </button>
+                            {showApprove && (
+                              <button
+                                type="button"
+                                disabled={deciding}
+                                onClick={() => decide(row, 'approved')}
+                                className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                              >
+                                <CheckCircle size={12} /> Approve
+                              </button>
+                            )}
                             {showExcept && (
                               <button
                                 type="button"

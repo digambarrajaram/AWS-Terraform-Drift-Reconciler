@@ -8,7 +8,8 @@ import tempfile
 
 import github_integration as gi
 import drift_reconciler.drift_history as drift_history
-from trivy_agent import _run_trivy, _extract_issues, fix_issues
+import unmanaged_scanner
+from trivy_agent import _run_trivy, _extract_issues, fix_issues, State as TrivyState
 from scan_runs import report_stage
 
 def _create_manual_review_prs(needs_review: list[dict], account_label: str,
@@ -87,8 +88,8 @@ def _create_manual_review_prs(needs_review: list[dict], account_label: str,
             continue
         pr_urls.append({"url": pr.html_url, "type": "manual"})
         create_pending_apply(pr.number, account_label, "security_only", review_only=True)
-        # Persist the (resource, rule_id) pairs under review so a merge
-        # auto-adds security exceptions for exactly these findings.
+        # Persist the (resource, rule_id) pairs under review so Except can
+        # write security exceptions (Approve/Merge is not offered for these).
         pairs = sorted({(i.get("resource"), i["rule_id"]) for i in items if i.get("resource")})
         if pairs:
             set_security_fixes(
@@ -328,20 +329,38 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
                 # never appear in the dashboard queue.
                 from drift_reconciler.pending_applies import create_pending_apply, set_security_fixes
                 create_pending_apply(pr.number, account_label, "security_only")
-                # Persist the (resource, rule_id) pairs this PR fixes so a
-                # successful merge can auto-add security exceptions for
-                # exactly those findings — future scans skip them.
+                # Persist the (resource_address, rule_id) pairs this PR fixes so
+                # Except (real-fix) / Approve (review_only) can write security
+                # exceptions for exactly those findings.
                 pairs = sorted({
-                    (i.get("resource"), fix["rule_id"])
+                    (fix.get("resource") or "", fix["rule_id"])
                     for fix in fixes_in_file
-                    for i in issues
-                    if i.get("rule_id") == fix["rule_id"] and i.get("resource")
+                    if fix.get("rule_id")
                 })
+                # Fallback when FixEntry has no resource (older shape).
+                if not any(r for r, _ in pairs):
+                    pairs = sorted({
+                        (i.get("resource") or "", fix["rule_id"])
+                        for fix in fixes_in_file
+                        for i in issues
+                        if i.get("rule_id") == fix.get("rule_id") and i.get("resource")
+                        and (
+                            not i.get("target")
+                            or os.path.basename(i.get("target") or "") == basename
+                        )
+                    })
+                pairs = [(r, rid) for r, rid in pairs if r and rid]
                 if pairs:
-                    set_security_fixes(
+                    ok = set_security_fixes(
                         pr.number, account_label,
                         [{"resource_address": r, "rule_id": rid} for r, rid in pairs],
                     )
+                    print(f"  [trivy-only] recorded {len(pairs)} fix pair(s) on "
+                          f"pending_applies for PR #{pr.number} "
+                          f"({'ok' if ok else 'FAILED'})")
+                else:
+                    print(f"  ⚠ security PR #{pr.number}: no (resource, rule_id) "
+                          f"pairs recorded — Except cannot auto-add exceptions")
 
         return {"pr_urls": pr_urls + review_prs, "needs_review": needs_review}
 

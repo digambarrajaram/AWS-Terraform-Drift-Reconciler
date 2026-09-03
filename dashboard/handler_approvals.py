@@ -25,6 +25,9 @@ class ApprovalsMixin:
         params = parse_qs(parsed.query)
         status = params.get("status", ["awaiting_approval"])[0]
         scope = params.get("scope", [None])[0]
+        if not scope or scope not in _get_valid_scopes():
+            self._json_error(400, "A valid scope is required")
+            return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -96,6 +99,10 @@ class ApprovalsMixin:
         environment's repo + token — the same info a human reviewer
         sees on GitHub, so Approve/Reject can be decided in-dashboard."""
         pending_id = self.path.split("/")[3]
+        requested_scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if requested_scope not in _get_valid_scopes():
+            self._json_error(400, "A valid scope is required")
+            return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -106,7 +113,8 @@ class ApprovalsMixin:
         try:
             resp = requests.get(
                 f"{url}/rest/v1/pending_applies"
-                f"?select=pr_number,scope&id=eq.{pending_id}&limit=1",
+                f"?select=pr_number,scope&id=eq.{pending_id}"
+                f"&scope=eq.{requested_scope}&limit=1",
                 headers=headers, timeout=10,
             )
             rows = resp.json() if resp.text and resp.status_code == 200 else []
@@ -190,7 +198,7 @@ class ApprovalsMixin:
         if decision not in ("approved", "rejected", "excepted"):
             self._json_error(400, "decision must be 'approved', 'rejected', or 'excepted'.")
             return
-        approved_by = (body.get("approved_by") or "").strip()
+        approved_by = (self.headers.get("X-Operator-Id") or body.get("approved_by") or "").strip()
         if not approved_by:
             self._json_error(400, "approved_by is required.")
             return
@@ -223,6 +231,19 @@ class ApprovalsMixin:
         pr_number = row.get("pr_number")
         scope = row.get("scope")
         if not pr_number or not scope:
+            try:
+                rollback_resp = requests.patch(
+                    f"{table_url}?id=eq.{pending_id}&status=eq.{decision}",
+                    headers=headers,
+                    json={"status": "awaiting_approval", "approved_by": None, "approved_at": None},
+                    timeout=10,
+                )
+                if rollback_resp.status_code >= 300:
+                    print(f"  ⚠ claim rollback failed ({rollback_resp.status_code}) for malformed row "
+                          f"{pending_id}: {rollback_resp.text[:200]}", file=sys.stderr)
+            except requests.RequestException as exc:
+                print(f"  ⚠ claim rollback failed for malformed row {pending_id}: {exc}",
+                      file=sys.stderr)
             self._json_error(409, "Pending apply row is missing pr_number or scope.")
             return
 
@@ -287,19 +308,21 @@ class ApprovalsMixin:
             # Record merge info on the pending row so the gate-failure
             # revert path has the merge commit SHA available.
             merge_sha = (merge_result or {}).get("sha")
+            merge_info = {"merged_at": datetime.now(timezone.utc).isoformat()}
             if merge_sha:
-                try:
-                    requests.patch(
-                        f"{table_url}?pr_number=eq.{pr_number}&scope=eq.{scope}",
-                        headers=headers,
-                        json={
-                            "merged_at": datetime.now(timezone.utc).isoformat(),
-                            "merge_commit_sha": merge_sha,
-                        },
-                        timeout=10,
-                    )
-                except requests.RequestException as exc:
-                    print(f"  ⚠ pending row merge-info update failed: {exc}", file=sys.stderr)
+                merge_info["merge_commit_sha"] = merge_sha
+            try:
+                merge_info_resp = requests.patch(
+                    f"{table_url}?pr_number=eq.{pr_number}&scope=eq.{scope}",
+                    headers=headers, json=merge_info, timeout=10,
+                )
+                if merge_info_resp.status_code >= 300:
+                    self._json_error(502, "PR merged, but merge metadata could not be recorded; apply was not started.")
+                    return
+            except requests.RequestException as exc:
+                print(f"  ⚠ pending row merge-info update failed: {exc}", file=sys.stderr)
+                self._json_error(502, "PR merged, but merge metadata could not be recorded; apply was not started.")
+                return
 
             # Policy: unmanaged merge auto-adds exceptions.  Real-fix
             # security applies the .tf patch — no exception.  review_only
@@ -384,6 +407,7 @@ class ApprovalsMixin:
                 n = auto_add_exceptions_on_merge(
                     pr_number, scope, "security_only", approved_by=approved_by,
                     reason=f"Excepted via dashboard on security PR #{pr_number}",
+                    strict=True,
                 )
                 print(f"  [except] auto_add inserted {n} exception row(s) "
                       f"for PR #{pr_number}", file=sys.stderr)
@@ -394,7 +418,16 @@ class ApprovalsMixin:
             except Exception as exc:
                 print(f"  [except] auto_add_exceptions_on_merge raised: {exc}",
                       file=sys.stderr)
-                n = 0
+                try:
+                    requests.patch(
+                        f"{table_url}?id=eq.{pending_id}", headers=headers,
+                        json={"status": "failed", "result": {"error": str(exc), "excepted": False}},
+                        timeout=10,
+                    )
+                except requests.RequestException as patch_exc:
+                    print(f"  [except] failed status update failed: {patch_exc}", file=sys.stderr)
+                self._json_error(502, f"Exception could not be recorded: {exc}")
+                return
             try:
                 from drift_reconciler import drift_history as _dh
                 _dh.resolve_entry(

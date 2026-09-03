@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { format, parseISO } from 'date-fns';
+import { format } from 'date-fns';
 import { errorMessage } from '@/lib/errorUtils';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -56,6 +56,12 @@ function DayPicker({ value, onChange }: { value: number; onChange: (d: number) =
       ))}
     </div>
   );
+}
+
+function safeDate(value: string | number, pattern: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return format(date, pattern);
 }
 
 // ── ChartCard ──────────────────────────────────────────────────────────────
@@ -130,7 +136,7 @@ function StatTile({ label, value, icon, accent }: TileProps) {
   );
 }
 
-function StatTiles({ summary, loading }: { summary: DriftSummary | undefined; loading: boolean }) {
+function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefined; loading: boolean; error?: Error | null }) {
   if (loading) {
     return (
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -143,6 +149,10 @@ function StatTiles({ summary, loading }: { summary: DriftSummary | undefined; lo
         ))}
       </div>
     );
+  }
+
+  if (error) {
+    return <p className="text-sm text-destructive">Unable to load trend summary: {errorMessage(error)}</p>;
   }
 
   const s = summary ?? { total: 0, uniqueResources: 0, resolved: 0, open: 0, rollback: 0 };
@@ -174,7 +184,7 @@ function StatTiles({ summary, loading }: { summary: DriftSummary | undefined; lo
         accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
       />
       <StatTile
-        label="Rollbacks"
+        label="Rollback Events"
         value={s.rollback.toLocaleString()}
         icon={<GitPullRequest size={16} />}
         accent="bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
@@ -192,7 +202,7 @@ function VolumeTooltip({ active, payload, label }: {
   return (
     <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
       <p className="text-muted-foreground mb-1">
-        {label ? format(new Date(label), 'MMM d, yyyy, HH:mm') : ''}
+        {label ? safeDate(label, 'MMM d, yyyy, HH:mm') : ''}
       </p>
       <p className="font-semibold text-foreground">{payload[0].value} events</p>
     </div>
@@ -211,7 +221,7 @@ function MTTRTooltip({ active, payload }: {
         {d.severity}
       </p>
       <p className="text-foreground">
-        Avg time to resolve: <strong>{d.avg_hours.toFixed(1)} h</strong>
+        Avg time to resolve: <strong>{Number(d.avg_hours).toFixed(1)} h</strong>
       </p>
       <p className="text-muted-foreground">{d.count} event{d.count !== 1 ? 's' : ''}</p>
     </div>
@@ -241,9 +251,11 @@ const TICK_STYLE = { fontSize: 11, fill: 'hsl(var(--muted-foreground))' };
 
 function VolumeTick({ x, y, payload }: { x?: number; y?: number; payload?: { value: string } }) {
   if (!payload?.value) return null;
+  const date = new Date(payload.value);
+  if (Number.isNaN(date.getTime())) return null;
   return (
     <text x={x} y={y! + 10} textAnchor="middle" style={TICK_STYLE}>
-      {format(parseISO(payload.value), 'MMM d')}
+      {format(date, 'MMM d')}
     </text>
   );
 }
@@ -283,6 +295,7 @@ export default function Trends() {
   //     visually wider than consecutive days.
   const volumeData = [...(volume.data ?? [])]
     .map((d) => ({ ...d, ts: new Date(d.day).getTime() }))
+    .filter((d) => Number.isFinite(d.ts) && Number.isFinite(Number(d.count)))
     .sort((a, b) => a.ts - b.ts);
 
   return (
@@ -297,7 +310,7 @@ export default function Trends() {
       </div>
 
       {/* Stat tiles */}
-      <StatTiles summary={summary.data} loading={summary.isLoading} />
+      <StatTiles summary={summary.data} loading={summary.isLoading} error={summary.error as Error | null} />
 
       {/* Two-column charts */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -305,6 +318,7 @@ export default function Trends() {
         {/* Most Drifted Resources */}
         <ChartCard
           title="Most Drifted Resources"
+          subtitle="Total events by resource in the selected period"
           loading={mostDrifted.isLoading}
           error={mostDrifted.error as Error | null}
           empty={!mostDrifted.isLoading && (mostDrifted.data?.length ?? 0) === 0}

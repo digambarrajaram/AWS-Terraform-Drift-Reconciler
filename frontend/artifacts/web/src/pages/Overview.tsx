@@ -30,8 +30,9 @@ const SEVERITY_STYLE: Record<string, { label: string; bg: string; text: string; 
   HIGH:   { label: 'High',   bg: 'bg-red-50   dark:bg-red-950/40',    text: 'text-red-700   dark:text-red-400',    dot: 'bg-red-500'   },
   MEDIUM: { label: 'Medium', bg: 'bg-amber-50  dark:bg-amber-950/40', text: 'text-amber-700 dark:text-amber-400', dot: 'bg-amber-500' },
   LOW:    { label: 'Low',    bg: 'bg-blue-50   dark:bg-blue-950/40',   text: 'text-blue-700  dark:text-blue-400',  dot: 'bg-blue-500'  },
+  OTHER:  { label: 'Other',  bg: 'bg-zinc-50  dark:bg-zinc-950/40',  text: 'text-zinc-700  dark:text-zinc-400',  dot: 'bg-zinc-500'  },
 };
-const SEVERITY_ORDER = ['HIGH', 'MEDIUM', 'LOW'];
+const SEVERITY_ORDER = ['HIGH', 'MEDIUM', 'LOW', 'OTHER'];
 
 // ── StatCard ─────────────────────────────────────────────────────────────────
 
@@ -138,7 +139,12 @@ export default function Overview() {
   const severityMap = useMemo(() => {
     const map: Record<string, number> = {};
     for (const row of severitySummary.data ?? []) {
-      map[row.severity.toUpperCase()] = Number(row.count);
+      const severity = row.severity.toUpperCase();
+      const key = SEVERITY_STYLE[severity] ? severity : 'OTHER';
+      const count = Number(row.count);
+      if (Number.isFinite(count)) {
+        map[key] = (map[key] ?? 0) + count;
+      }
     }
     return map;
   }, [severitySummary.data]);

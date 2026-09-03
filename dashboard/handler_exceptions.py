@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
-from datetime import datetime
+from datetime import datetime, date
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -32,22 +33,23 @@ class ExceptionsMixin:
         base = f"{url}/rest/v1/drift_exception_registry"
 
         def _fetch(exception_type):
-            try:
-                resp = requests.get(
-                    f"{base}?select=*&scope=eq.{scope_raw}&exception_type=eq.{exception_type}&active=eq.true&order=created_at.desc",
-                    headers=headers, timeout=10,
-                )
-                if resp.status_code == 200:
-                    return resp.json() if resp.text else []
-                return []
-            except requests.RequestException:
-                return []
+            resp = requests.get(
+                f"{base}?select=*&scope=eq.{scope_raw}&exception_type=eq.{exception_type}&active=eq.true&order=created_at.desc",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"Supabase query failed ({resp.status_code})")
+            return resp.json() if resp.text else []
 
-        payload = {
-            "drift_exceptions": _fetch("drift"),
-            "unmanaged_exceptions": _fetch("unmanaged"),
-            "security_exceptions": _fetch("security"),
-        }
+        try:
+            payload = {
+                "drift_exceptions": _fetch("drift"),
+                "unmanaged_exceptions": _fetch("unmanaged"),
+                "security_exceptions": _fetch("security"),
+            }
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            self._json_error(502, f"Failed to load exceptions: {exc}")
+            return
         data = json.dumps(payload).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -115,7 +117,15 @@ class ExceptionsMixin:
                 row["resource_id_pattern"] = (entry.get("resource_id_pattern") or "").strip()
                 cost = entry.get("max_monthly_cost_usd")
                 if cost is not None and cost != "":
-                    row["max_monthly_cost_usd"] = float(cost)
+                    try:
+                        parsed_cost = float(cost)
+                    except (TypeError, ValueError):
+                        self._json_error(400, "max_monthly_cost_usd must be a number")
+                        return
+                    if parsed_cost < 0 or not math.isfinite(parsed_cost):
+                        self._json_error(400, "max_monthly_cost_usd must be a finite non-negative number")
+                        return
+                    row["max_monthly_cost_usd"] = parsed_cost
             if entry.get("approved_by"):
                 # Normalize to lowercase — prevents "Digambar",
                 # "digambar", and "Digambar R" from becoming 3
@@ -139,7 +149,16 @@ class ExceptionsMixin:
                 self._json_error(502, f"Supabase unreachable: {e}")
 
         elif action == "expire":
-            self._do_exception_update(scope, exception_type, entry, headers, table_url, {"expires": (entry.get("expires") or "").strip()})
+            expires = (entry.get("expires") or "").strip()
+            try:
+                if not expires:
+                    raise ValueError("expiry date is required")
+                if datetime.strptime(expires, "%Y-%m-%d").date() <= date.today():
+                    raise ValueError("expiry date must be in the future")
+            except ValueError as exc:
+                self._json_error(400, str(exc))
+                return
+            self._do_exception_update(scope, exception_type, entry, headers, table_url, {"expires": expires})
 
         elif action == "delete":
             self._do_exception_update(scope, exception_type, entry, headers, table_url, {"active": False})

@@ -25,10 +25,12 @@ _HEADERS = {
 }
 
 
-def get_notification_secrets() -> dict[str, str | None]:
+def get_notification_secrets(strict: bool = False) -> dict[str, str | None]:
     """Return ``{pagerduty_routing_key, slack_webhook_url}`` from the
     singleton row, or ``{}`` on failure."""
     if not _URL or not _KEY:
+        if strict:
+            raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
         return {}
     try:
         resp = requests.get(
@@ -43,8 +45,12 @@ def get_notification_secrets() -> dict[str, str | None]:
                     "pagerduty_routing_key": rows[0].get("pagerduty_routing_key"),
                     "slack_webhook_url": rows[0].get("slack_webhook_url"),
                 }
+        if strict:
+            raise RuntimeError(f"notification settings query failed ({resp.status_code})")
         return {}
     except requests.RequestException:
+        if strict:
+            raise
         return {}
 
 

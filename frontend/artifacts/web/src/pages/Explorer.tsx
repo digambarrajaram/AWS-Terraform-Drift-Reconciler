@@ -11,6 +11,8 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet';
 import { useScope } from '@/hooks/useScope';
+import { useEnvironments } from '@/hooks/useEnvironments';
+import { useAppConfig } from '@/api/config';
 import {
   useDriftEvents, PAGE_SIZE,
   type SortColumn, type DriftFilters, type DriftSort,
@@ -20,6 +22,7 @@ import type { DriftEvent } from '@/types';
 // ── Badge maps ──────────────────────────────────────────────────────────────
 
 const SEV_CLS: Record<string, string> = {
+  CRITICAL: 'bg-rose-100   text-rose-800   dark:bg-rose-900/30   dark:text-rose-300',
   HIGH:   'bg-red-100    text-red-700    dark:bg-red-900/30   dark:text-red-400',
   MEDIUM: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   LOW:    'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
@@ -98,6 +101,18 @@ function normalizeFields(fields: unknown): string[] {
   return [];
 }
 
+function safeDate(value: string, relative = false): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return relative ? formatDistanceToNow(date, { addSuffix: true }) : format(date, 'MMM d, yyyy, HH:mm');
+}
+
+function buildPrUrl(repoUrl: string | null, githubRepo: string | undefined, prNumber: number | null): string | null {
+  if (!prNumber) return null;
+  const base = repoUrl || (githubRepo ? `https://github.com/${githubRepo}` : null);
+  return base ? `${base.replace(/\.git$/, '').replace(/\/+$/, '')}/pull/${prNumber}` : null;
+}
+
 function EventDetail({ e }: { e: DriftEvent }) {
   const fields = normalizeFields(e.fields_changed);
   return (
@@ -111,7 +126,7 @@ function EventDetail({ e }: { e: DriftEvent }) {
           {kv('Region',   e.region)}
           {kv('Account',  e.account)}
           {kv('File',     e.file_path)}
-          {kv('Created',  format(new Date(e.created_at), 'MMM d, yyyy, HH:mm'))}
+          {kv('Created',  safeDate(e.created_at))}
           {kv('Unmanaged', e.unmanaged ? 'Yes' : 'No')}
         </div>
         {e.resolution && kv('Resolution', e.resolution)}
@@ -192,7 +207,7 @@ function EventDetail({ e }: { e: DriftEvent }) {
   );
 }
 
-function DetailDrawer({ event, onClose }: { event: DriftEvent | null; onClose: () => void }) {
+function DetailDrawer({ event, onClose, repoUrl, githubRepo }: { event: DriftEvent | null; onClose: () => void; repoUrl: string | null; githubRepo?: string }) {
   return (
     <Sheet open={!!event} onOpenChange={(v) => !v && onClose()}>
       <SheetContent className="w-full sm:max-w-xl overflow-y-auto">
@@ -201,6 +216,13 @@ function DetailDrawer({ event, onClose }: { event: DriftEvent | null; onClose: (
             <SheetHeader className="mb-4">
               <SheetTitle className="text-base break-all font-mono">{event.resource_id}</SheetTitle>
             </SheetHeader>
+            {event.pr_number && buildPrUrl(repoUrl, githubRepo, event.pr_number) && (
+                buildPrUrl(repoUrl, githubRepo, event.pr_number)
+                  ? <a href={buildPrUrl(repoUrl, githubRepo, event.pr_number)!} target="_blank" rel="noopener noreferrer" className="mb-4 inline-flex items-center gap-1.5 text-xs text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
+                      <ExternalLink size={12} /> View PR #{event.pr_number}
+                    </a>
+                  : <span className="text-muted-foreground" title="Repository is not configured for this environment">PR #{event.pr_number}</span>
+            )}
             <EventDetail e={event} />
           </>
         )}
@@ -282,8 +304,8 @@ function DriftCard({
           {event.account}
           {event.region && <> · {event.region}</>}
           {' · '}
-          <span title={format(new Date(event.created_at), 'MMM d, yyyy, HH:mm')}>
-            {formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}
+          <span title={safeDate(event.created_at)}>
+            {safeDate(event.created_at, true)}
           </span>
         </p>
 
@@ -431,6 +453,7 @@ function FilterBar({
         <select value={filters.severityFilter}
           onChange={(e) => onFilters({ severityFilter: e.target.value })} className={selectCls}>
           <option value="all">All severities</option>
+          <option value="CRITICAL">Critical</option>
           <option value="HIGH">High</option>
           <option value="MEDIUM">Medium</option>
           <option value="LOW">Low</option>
@@ -609,6 +632,9 @@ function Pagination({
 
 export default function Explorer() {
   const { scope } = useScope();
+  const { activeEnvironments } = useEnvironments();
+  const { data: config } = useAppConfig();
+  const repoUrl = activeEnvironments.find((e) => e.slug === scope)?.repo_url ?? null;
 
   const [filters,     setFilters]     = useState<ExplorerFilters>(DEFAULT_FILTERS);
   const [sort,        setSort]        = useState<DriftSort>(DEFAULT_SORT);
@@ -641,7 +667,7 @@ export default function Explorer() {
   // Clear expanded cards on page/view change
   useEffect(() => { setExpanded(new Set()); }, [page, view]);
 
-  const { data, isLoading, isFetching } = useDriftEvents(scope, filters, sort, page);
+  const { data, error, isLoading, isFetching } = useDriftEvents(scope, filters, sort, page);
   const events     = data?.events ?? [];
   const total      = data?.count  ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -761,6 +787,8 @@ export default function Explorer() {
               <tbody className="divide-y divide-border">
                 {isLoading ? (
                   <TableSkeleton />
+                ) : error ? (
+                  <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-destructive">Unable to load Explorer data: {error instanceof Error ? error.message : String(error)}</td></tr>
                 ) : events.length === 0 ? (
                   <tr>
                     <td colSpan={6}>
@@ -790,15 +818,15 @@ export default function Explorer() {
                         <Badge value={ev.status} map={STATUS_CLS} />
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                        <span title={format(new Date(ev.created_at), 'MMM d, yyyy, HH:mm')}>
-                          {formatDistanceToNow(new Date(ev.created_at), { addSuffix: true })}
+                        <span title={safeDate(ev.created_at)}>
+                          {safeDate(ev.created_at, true)}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-xs">
                         {ev.pr_number
-                          ? <span className="inline-flex items-center gap-1 text-primary" onClick={(e) => e.stopPropagation()}>
-                              <ExternalLink size={11} /> #{ev.pr_number}
-                            </span>
+                          ? buildPrUrl(repoUrl, config?.githubRepo, ev.pr_number)
+                            ? <a href={buildPrUrl(repoUrl, config?.githubRepo, ev.pr_number)!} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline" onClick={(e) => e.stopPropagation()}><ExternalLink size={11} /> #{ev.pr_number}</a>
+                            : <span className="text-muted-foreground" title="Repository is not configured for this environment">PR #{ev.pr_number}</span>
                           : <span className="text-muted-foreground">—</span>}
                       </td>
                     </tr>
@@ -834,8 +862,8 @@ export default function Explorer() {
             >
               <option value="created_at:desc">Newest first</option>
               <option value="created_at:asc">Oldest first</option>
-              <option value="severity:asc">Severity (A→Z)</option>
-              <option value="severity:desc">Severity (Z→A)</option>
+              <option value="severity:asc">Severity (Critical → Low)</option>
+              <option value="severity:desc">Severity (Low → Critical)</option>
               <option value="resource_id:asc">Resource (A→Z)</option>
               <option value="resource_id:desc">Resource (Z→A)</option>
             </select>
@@ -843,6 +871,8 @@ export default function Explorer() {
 
           {isLoading ? (
             <CardSkeleton />
+          ) : error ? (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-12 text-center text-sm text-destructive">Unable to load Explorer data: {error instanceof Error ? error.message : String(error)}</div>
           ) : events.length === 0 ? (
             <div className="rounded-xl border border-border">
               <EmptyState filtered={isFiltered} />
@@ -872,7 +902,7 @@ export default function Explorer() {
       )}
 
       {/* Detail drawer — table view only */}
-      <DetailDrawer event={selected} onClose={() => setSelected(null)} />
+      <DetailDrawer event={selected} onClose={() => setSelected(null)} repoUrl={repoUrl} githubRepo={config?.githubRepo} />
     </div>
   );
 }

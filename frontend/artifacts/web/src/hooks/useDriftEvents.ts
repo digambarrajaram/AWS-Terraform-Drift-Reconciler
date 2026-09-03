@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { keepPreviousData } from '@tanstack/react-query';
-import { useAppConfig } from '@/api/config';
-import { getSupabaseClient } from '@/api/supabaseClient';
+import { apiFetch } from '@/api/apiFetch';
 import { normalizeDriftEvent } from '@/lib/drift';
 import type { DriftEvent } from '@/types';
 
@@ -30,9 +29,7 @@ export function useDriftEvents(
   sort: DriftSort,
   page: number,
 ) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
-  const enabled  = !!supabase && !!scope;
+  const enabled = !!scope;
 
   return useQuery<{ events: DriftEvent[]; count: number }>({
     // Decompose filter/sort objects into primitives so the queryKey is immune
@@ -48,50 +45,16 @@ export function useDriftEvents(
     enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
-      const offset = page * PAGE_SIZE;
-
-      // Build query incrementally; each step returns the typed builder
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let q: any = supabase!
-        .from('drift_events')
-        .select('*', { count: 'exact' })
-        .eq('account', scope!);
-
-      if (filters.statusFilter   !== 'all') q = q.eq('status',   filters.statusFilter);
-      if (filters.severityFilter !== 'all') q = q.eq('severity', filters.severityFilter);
-      if (filters.typeFilter     !== 'all') q = q.eq('pr_type',  filters.typeFilter);
-      if (filters.search)                   q = q.ilike('resource_id', `%${filters.search}%`);
-      if (filters.dateFrom)                 q = q.gte('created_at', filters.dateFrom);
-      if (filters.dateTo)                   q = q.lte('created_at', `${filters.dateTo}T23:59:59`);
-
-      // When sorting by severity, skip the DB order (alphabetical H<L<M is wrong)
-      // and apply a client-side comparator after the fetch instead.
-      const sortBySeverityClient = sort.column === 'severity';
-      if (!sortBySeverityClient) {
-        q = q.order(sort.column, { ascending: sort.ascending });
-      } else {
-        // Stable secondary sort so pages are deterministic
-        q = q.order('created_at', { ascending: false });
-      }
-      q = q.range(offset, offset + PAGE_SIZE - 1);
-
-      const { data, count, error } = await q;
-      if (error) throw error;
-
-      let events = (data ?? []).map(normalizeDriftEvent) as DriftEvent[];
-
-      if (sortBySeverityClient) {
-        const SEV_RANK: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
-        const rank = (s: string) => SEV_RANK[s.toUpperCase()] ?? 3;
-        events = [...events].sort((a, b) => {
-          const diff = rank(a.severity) - rank(b.severity);
-          if (diff !== 0) return sort.ascending ? diff : -diff;
-          // tie-break: newest first
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-        });
-      }
-
-      return { events, count: count ?? 0 };
+      const query = new URLSearchParams({
+        scope: scope!, page: String(page), sort: sort.column,
+        ascending: String(sort.ascending), status: filters.statusFilter,
+        severity: filters.severityFilter, type: filters.typeFilter,
+      });
+      if (filters.search) query.set('search', filters.search);
+      if (filters.dateFrom) query.set('dateFrom', filters.dateFrom);
+      if (filters.dateTo) query.set('dateTo', filters.dateTo);
+      const result = await apiFetch<{ events: DriftEvent[]; count: number }>(`/pr-queue?${query}`);
+      return { events: result.events.map(normalizeDriftEvent), count: result.count };
     },
   });
 }

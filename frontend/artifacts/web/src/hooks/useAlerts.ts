@@ -1,7 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, ApiError } from '@/api/apiFetch';
-import { useAppConfig } from '@/api/config';
-import { getSupabaseClient } from '@/api/supabaseClient';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -83,23 +81,12 @@ export function useSendTest() {
 // ── useRoutingRules ────────────────────────────────────────────────────────
 
 export function useRoutingRules(scope: string | null) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
-
   return useQuery<RoutingRule[]>({
     queryKey: ['routingRules', scope],
-    enabled:  !!supabase && !!scope,
-    queryFn: async () => {
-      const { data, error } = await supabase!
-        .from('severity_routing_rules')
-        .select('*')
-        .or(`scope.is.null,scope.eq.${scope!}`);
-      if (error) throw error;
-      const rows = (data ?? []) as RoutingRule[];
-      console.log('[useRoutingRules] scope=', scope, 'rows=', rows.length,
-        rows.map(r => `${r.severity}:${r.scope ?? 'NULL'}=${r.channel}`));
-      return rows;
-    },
+    enabled: !!scope,
+    queryFn: () => apiFetch<RoutingRule[]>(
+      `/routing-rules?scope=${encodeURIComponent(scope!)}`,
+    ),
   });
 }
 

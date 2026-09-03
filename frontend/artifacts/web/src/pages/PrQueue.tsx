@@ -20,6 +20,7 @@ import type { DriftEvent } from '@/types';
 // ── Badges ─────────────────────────────────────────────────────────────────
 
 const SEV: Record<string, string> = {
+  CRITICAL: 'bg-rose-100   text-rose-800   dark:bg-rose-900/30   dark:text-rose-300',
   HIGH:   'bg-red-100    text-red-700    dark:bg-red-900/30   dark:text-red-400',
   MEDIUM: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   LOW:    'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
@@ -116,6 +117,12 @@ function buildPrUrl(
   return `${clean}/pull/${prNumber}`;
 }
 
+function safeDate(iso: string, relative = false): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '—';
+  return relative ? formatDistanceToNow(date, { addSuffix: true }) : format(date, 'MMM d, yyyy, HH:mm');
+}
+
 function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
   event: DriftEvent | null;
   onClose: () => void;
@@ -169,7 +176,7 @@ function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
                   {kv('Region',   e.region)}
                   {kv('Account',  e.account)}
                   {kv('File',     e.file_path)}
-                  {kv('Created',  format(new Date(e.created_at), 'MMM d, yyyy, HH:mm'))}
+                  {kv('Created',  safeDate(e.created_at))}
                   {kv('Unmanaged', e.unmanaged ? 'Yes' : 'No')}
                 </div>
                 {e.resolution && kv('Resolution', e.resolution)}
@@ -314,6 +321,7 @@ function FilterBar({
       >
         <option value="all">All severities</option>
         <option value="HIGH">High</option>
+        <option value="CRITICAL">Critical</option>
         <option value="MEDIUM">Medium</option>
         <option value="LOW">Low</option>
       </select>
@@ -407,7 +415,7 @@ export default function PrQueue() {
     sort.column, sort.ascending,
   ]);
 
-  const { data, isLoading, isFetching } = useDriftEvents(scope, filters, sort, page);
+  const { data, error, isLoading, isFetching } = useDriftEvents(scope, filters, sort, page);
   const events = data?.events ?? [];
   const total  = data?.count  ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -476,6 +484,12 @@ export default function PrQueue() {
                     ))}
                   </tr>
                 ))
+              ) : error ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-12 text-center text-sm text-destructive">
+                    Unable to load PR queue: {error instanceof Error ? error.message : String(error)}
+                  </td>
+                </tr>
               ) : events.length === 0 ? (
                 <EmptyState filtered={isFiltered} />
               ) : (
@@ -512,8 +526,8 @@ export default function PrQueue() {
 
                     {/* Created */}
                     <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                      <span title={format(new Date(ev.created_at), 'MMM d, yyyy, HH:mm')}>
-                        {formatDistanceToNow(new Date(ev.created_at), { addSuffix: true })}
+                      <span title={safeDate(ev.created_at)}>
+                        {safeDate(ev.created_at, true)}
                       </span>
                     </td>
 

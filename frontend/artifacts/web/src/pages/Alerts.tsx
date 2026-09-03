@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { errorMessage } from '@/lib/errorUtils';
 import {
-  CheckCircle2, XCircle, Eye, EyeOff, Send, Save,
+  CheckCircle2, XCircle, Send, Save,
   Bell, Globe, SlidersHorizontal, Loader2, AlertTriangle,
 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -67,7 +67,6 @@ function CredentialRow({
   backendAvailable: boolean;
 }) {
   const [value,    setValue]    = useState('');
-  const [showVal,  setShowVal]  = useState(false);
   const [testing,  setTesting]  = useState(false);
 
   const save    = useSaveCredential();
@@ -129,19 +128,15 @@ function CredentialRow({
       {masked && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-mono tracking-widest">
-            {showVal ? masked : masked.replace(/[^•]/g, '•').slice(0, 8) + masked.slice(-4)}
+            {masked}
           </span>
-          <button type="button" onClick={() => setShowVal((v) => !v)}
-            className="text-muted-foreground hover:text-foreground transition-colors">
-            {showVal ? <EyeOff size={12} /> : <Eye size={12} />}
-          </button>
         </div>
       )}
 
       {/* Update form */}
       <form onSubmit={handleSave} className="flex items-center gap-2">
         <input
-          type={showVal ? 'text' : 'password'}
+          type="password"
           placeholder={`Enter new ${label}…`}
           value={value}
           onChange={(e) => setValue(e.target.value)}

@@ -25,6 +25,7 @@ export interface UnmanagedException {
   reason:               string;
   approved_by:          string | null;
   max_monthly_cost_usd: number | null;
+  expires:               string | null;
   active:               boolean;
 }
 

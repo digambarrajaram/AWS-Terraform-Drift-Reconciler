@@ -1,7 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
-import { useAppConfig } from '@/api/config';
-import { getSupabaseClient } from '@/api/supabaseClient';
+import { apiFetch } from '@/api/apiFetch';
 
 export interface ScanRun {
   id: string;
@@ -42,46 +41,27 @@ export interface ScanRun {
 }
 
 export function useScanRunHistory(scope: string | null) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
-  const enabled  = !!supabase && !!scope;
+  const enabled = !!scope;
 
   return useQuery<ScanRun[]>({
     queryKey: ['scanRuns', scope],
     enabled,
-    queryFn: async () => {
-      const { data, error } = await supabase!
-        .from('scan_runs')
-        .select('*')
-        .eq('scope', scope!)
-        .order('started_at', { ascending: false })
-        .limit(20);
-      if (error) throw error;
-      return (data ?? []) as ScanRun[];
-    },
+    queryFn: () => apiFetch<ScanRun[]>(`/scan-runs?scope=${encodeURIComponent(scope!)}`),
   });
 }
 
-export function useScanRun(runId: string | null) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
-  const enabled  = !!supabase && !!runId;
+export function useScanRun(runId: string | null, scope: string | null) {
+  const enabled = !!runId && !!scope;
 
   return useQuery<ScanRun | null>({
-    queryKey: ['scanRun', runId],
+    queryKey: ['scanRun', runId, scope],
     enabled,
     // Poll every 3 s while the run is still in progress
     refetchInterval: (query) =>
       query.state.data?.status === 'running' ? 3000 : false,
-    queryFn: async () => {
-      const { data, error } = await supabase!
-        .from('scan_runs')
-        .select('*')
-        .eq('id', runId!)
-        .single();
-      if (error) throw error;
-      return data as ScanRun;
-    },
+    queryFn: () => apiFetch<ScanRun>(
+      `/scan-runs/${runId}?scope=${encodeURIComponent(scope!)}`,
+    ),
   });
 }
 
@@ -91,7 +71,7 @@ export function useInvalidateScanRuns() {
   return useCallback(
     (scope: string, runId?: string) => {
       qc.invalidateQueries({ queryKey: ['scanRuns', scope] });
-      if (runId) qc.invalidateQueries({ queryKey: ['scanRun', runId] });
+      if (runId) qc.invalidateQueries({ queryKey: ['scanRun', runId, scope] });
     },
     [qc],
   );

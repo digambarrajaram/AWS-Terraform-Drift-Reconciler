@@ -3,12 +3,42 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
 from drift_reconciler.utils import mask_secret as _mask
 
 class NotificationsMixin:
+    def _serve_routing_rules(self):
+        scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, "A valid scope is required")
+            return
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/severity_routing_rules"
+                f"?select=*&or=(scope.is.null,scope.eq.{scope})",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"}, timeout=10,
+            )
+            if resp.status_code != 200:
+                self._json_error(502, f"Routing rules query failed ({resp.status_code})")
+                return
+            data = json.dumps(resp.json() or []).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _handle_routing_rules_post(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length > 0 else b""
@@ -24,11 +54,14 @@ class NotificationsMixin:
             return
 
         channel = body.get("channel", "").lower()
-        if channel not in ("pagerduty", "slack"):
-            self._json_error(400, "channel must be pagerduty or slack.")
+        if channel not in ("pagerduty", "slack", "none"):
+            self._json_error(400, "channel must be pagerduty, slack, or none.")
             return
 
         scope = body.get("scope") or None
+        if scope is not None and scope not in _get_valid_scopes():
+            self._json_error(400, "scope must be a valid active environment.")
+            return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -50,7 +83,9 @@ class NotificationsMixin:
             # Supabase returns 200 + [{...}] when a row was matched, or
             # 200 + [] when no rows matched — the body distinguishes them.
             resp = requests.patch(f"{table_url}?{filters}", headers=headers, json=payload, timeout=10)
-            patched = resp.status_code in (200, 204) and resp.json() if resp.text else False
+            patched = resp.status_code == 204 or (
+                resp.status_code == 200 and bool(resp.json())
+            )
             if not patched:
                 # No existing row — INSERT.
                 resp = requests.post(table_url, headers=headers, json=payload, timeout=10)
@@ -83,6 +118,9 @@ class NotificationsMixin:
             return
 
         scope = body.get("scope") or None
+        if scope is not None and scope not in _get_valid_scopes():
+            self._json_error(400, "scope must be a valid active environment.")
+            return
 
         def _fail(msg):
             data = json.dumps({"success": False, "error": msg}).encode("utf-8")
@@ -184,7 +222,7 @@ class NotificationsMixin:
     def _serve_notification_settings(self):
         try:
             from drift_reconciler.notification_config import get_notification_secrets
-            secrets = get_notification_secrets()
+            secrets = get_notification_secrets(strict=True)
         except Exception:
             secrets = {}
 

@@ -282,7 +282,10 @@ function ScanHistory({ runs, activeRunId, onSelect, loading }: {
             </thead>
             <tbody className="divide-y divide-border">
               {runs.map((run) => {
-                const style = STATUS_STYLE[run.status];
+                const style = STATUS_STYLE[run.status] ?? {
+                  label: run.status,
+                  cls: 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400',
+                };
                 const isActive = run.id === activeRunId;
                 return (
                   <tr
@@ -344,7 +347,7 @@ export default function Scan() {
   const submitting = submittingScan || submittingSecurity;
 
   const history    = useScanRunHistory(scope);
-  const activeRun  = useScanRun(activeRunId);
+  const activeRun  = useScanRun(activeRunId, scope);
   const { lines, complete: logsComplete } = useScanLogs(activeRunId);
 
   // When logs complete, refetch history + active run for final status
@@ -358,7 +361,13 @@ export default function Scan() {
     if (!activeRunId) return;
     try {
       await apiFetch(`/scan/${activeRunId}/cancel`, { method: 'POST' });
-    } catch { /* fire-and-forget */ }
+      toast.success('Scan cancelled');
+    } catch (err) {
+      toast.error('Failed to cancel scan', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
     // Refetch scan history so the cancelled status appears without refresh.
     if (scope) invalidate(scope, activeRunId);
     setActiveRunId(null);

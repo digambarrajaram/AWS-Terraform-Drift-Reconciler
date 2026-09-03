@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useAppConfig } from '@/api/config';
-import { getSupabaseClient } from '@/api/supabaseClient';
+import { apiFetch } from '@/api/apiFetch';
 import { normalizeDriftEvent } from '@/lib/drift';
 import type { DriftEvent } from '@/types';
 
@@ -42,24 +41,14 @@ export interface RollbackRun {
  * Filters client-side to only rows with a pr_number.
  */
 export function useEligiblePRs(scope: string | null) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
-
   return useQuery<DriftEvent[]>({
     queryKey: ['eligiblePRs', scope],
-    enabled:  !!supabase && !!scope,
+    enabled: !!scope,
     queryFn: async () => {
-      const { data, error } = await supabase!
-        .from('drift_events')
-        .select('*')
-        .eq('account', scope!)
-        .in('status', ['open', 'resolved'])
-        .not('changes_jsonb', 'is', null)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return (data ?? [])
-        .filter((e: DriftEvent) => e.pr_number != null)
-        .map(normalizeDriftEvent) as DriftEvent[];
+      const result = await apiFetch<{ eligible: DriftEvent[] }>(
+        `/rollback-data?scope=${encodeURIComponent(scope!)}`,
+      );
+      return result.eligible.map(normalizeDriftEvent);
     },
   });
 }
@@ -69,44 +58,30 @@ export function useEligiblePRs(scope: string | null) {
 /**
  * Single rollback_run row. Polls every 3 s while status === 'running'.
  */
-export function useRollbackRun(runId: string | null) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
+export function useRollbackRun(runId: string | null, scope: string | null) {
 
   return useQuery<RollbackRun | null>({
     queryKey: ['rollbackRun', runId],
-    enabled:  !!supabase && !!runId,
+    enabled: !!runId && !!scope,
     refetchInterval: (query) =>
       query.state.data?.status === 'running' ? 3000 : false,
-    queryFn: async () => {
-      const { data, error } = await supabase!
-        .from('rollback_runs')
-        .select('*')
-        .eq('id', runId!)
-        .single();
-      if (error) throw error;
-      return data as RollbackRun | null;
-    },
+    queryFn: () => apiFetch<RollbackRun>(
+      `/rollback-runs/${runId}?scope=${encodeURIComponent(scope!)}`,
+    ),
   });
 }
 
 // ── useRollbackHistory ─────────────────────────────────────────────────────
 
 export function useRollbackHistory(scope: string | null) {
-  const { data: config } = useAppConfig();
-  const supabase = config ? getSupabaseClient(config) : null;
-
   return useQuery<RollbackRun[]>({
     queryKey: ['rollbackHistory', scope],
-    enabled:  !!supabase && !!scope,
+    enabled: !!scope,
     queryFn: async () => {
-      const { data, error } = await supabase!
-        .from('rollback_runs')
-        .select('*')
-        .eq('scope', scope!)
-        .order('started_at', { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as RollbackRun[];
+      const result = await apiFetch<{ history: RollbackRun[] }>(
+        `/rollback-data?scope=${encodeURIComponent(scope!)}`,
+      );
+      return result.history;
     },
   });
 }

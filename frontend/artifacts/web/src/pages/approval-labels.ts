@@ -15,6 +15,10 @@ const FILE_ONLY_RUNNING: Record<string, Partial<Record<'approved' | 'rejected', 
     approved: 'Merging security PR…',
     rejected: 'Closing…',
   },
+  rollback: {
+    approved: 'Applying rollback…',
+    rejected: 'Cancelling rollback…',
+  },
 };
 const DRIFT_RUNNING: Record<'approved' | 'rejected', string> = {
   approved: 'Applying drift…',
@@ -43,6 +47,39 @@ export function isJobDone(status: string | null | undefined): boolean {
 
 const FILE_ONLY_TYPES = new Set(['unmanaged', 'security_only', 'manual']);
 
+/** Decision button label — outcome-oriented, not GitHub jargon.
+ *  Drift approve: keep AWS, update Terraform + state to match.
+ *  Drift reject: keep Terraform, revert AWS (+ state) to match code.
+ *  Rollback approve: merge reverse patch + apply (undo prior fix).
+ *  File-only: merge/close (no terraform apply). */
+export function decisionButtonLabel(
+  decision: ClaimStatus,
+  prType: string | null | undefined,
+  opts?: { compact?: boolean },
+): string {
+  const compact = opts?.compact === true;
+  if (decision === 'excepted') {
+    return compact ? 'Except' : 'Add exception';
+  }
+  if (prType === 'rollback') {
+    if (decision === 'approved') {
+      return compact ? 'Apply rollback' : 'Apply rollback';
+    }
+    return compact ? 'Cancel' : 'Cancel rollback';
+  }
+  const fileOnly = prType != null && FILE_ONLY_TYPES.has(prType);
+  if (fileOnly) {
+    if (decision === 'approved') {
+      return compact ? 'Accept & merge' : 'Accept & merge PR';
+    }
+    return compact ? 'Close PR' : 'Close without changes';
+  }
+  if (decision === 'approved') {
+    return compact ? 'Accept AWS' : 'Accept AWS changes';
+  }
+  return compact ? 'Revert AWS' : 'Revert AWS to code';
+}
+
 /** Success toast after a decision POST — wording matches what the backend
  * actually does for this pr_type (merge+apply vs merge+exceptions). */
 export function decisionToast(
@@ -53,6 +90,11 @@ export function decisionToast(
 ): string {
   if (decision === 'excepted') {
     return `PR #${prNumber} excepted — closed without merge; exception added`;
+  }
+  if (prType === 'rollback') {
+    return decision === 'approved'
+      ? `PR #${prNumber} approved — applying rollback`
+      : `PR #${prNumber} rejected — rollback cancelled`;
   }
   const fileOnly = prType != null && FILE_ONLY_TYPES.has(prType);
   if (fileOnly) {
@@ -66,6 +108,6 @@ export function decisionToast(
     return `PR #${prNumber} rejected — PR closed; will resurface next scan`;
   }
   return decision === 'approved'
-    ? `PR #${prNumber} approved — merge + apply started`
-    : `PR #${prNumber} rejected — close + revert started`;
+    ? `PR #${prNumber} approved — updating code + state to match AWS`
+    : `PR #${prNumber} rejected — reverting AWS to match original code`;
 }

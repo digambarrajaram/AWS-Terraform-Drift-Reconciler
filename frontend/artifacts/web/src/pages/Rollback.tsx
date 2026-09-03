@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { format, formatDistanceToNow } from 'date-fns';
 import { toast } from 'sonner';
 import {
   RotateCcw, CheckCircle, XCircle, Loader2, ExternalLink,
-  AlertTriangle, ChevronRight, Inbox, Ban,
+  AlertTriangle, ChevronRight, Inbox, Ban, ClipboardCheck,
 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 
@@ -147,7 +148,7 @@ function EligiblePRList({
                     <SevBadge sev={ev.severity} />
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap"
-                      title={format(new Date(ev.created_at), 'MMM d, yyyy, HH:mm')}>
+                      title={fmtDate(ev.created_at)}>
                     {relTime(ev.created_at)}
                   </td>
                   <td className="px-4 py-3 text-right">
@@ -362,7 +363,7 @@ function RollbackHistory({
             </thead>
             <tbody className="divide-y divide-border">
               {filtered.map((run) => {
-                const ss = RUN_STATUS[run.status];
+                const ss = RUN_STATUS[run.status] ?? { label: run.status, cls: 'bg-muted text-muted-foreground' };
                 const prUrl = run.rollback_pr_url ?? run.result?.pr_url ?? null;
                 const diffCount = run.result?.diff?.length;
                 return (
@@ -421,8 +422,8 @@ export default function Rollback() {
   const eligible = useEligiblePRs(scope);
   const history  = useRollbackHistory(scope);
 
-  const previewRun = useRollbackRun(ctx?.previewRunId ?? null);
-  const executeRun = useRollbackRun(ctx?.executeRunId ?? null);
+  const previewRun = useRollbackRun(ctx?.previewRunId ?? null, scope);
+  const executeRun = useRollbackRun(ctx?.executeRunId ?? null, scope);
 
   const previewLogs = useScanLogs(ctx?.previewRunId ?? null);
   const executeLogs = useScanLogs(ctx?.executeRunId ?? null);
@@ -556,10 +557,20 @@ export default function Rollback() {
     }
   }, [scope, ctx]);
 
-  function reset() {
+  async function reset() {
     const runId = ctx?.executeRunId ?? ctx?.previewRunId;
+    if (runId && isRunning) {
+      try {
+        await apiFetch(`/rollback/${runId}/cancel`, { method: 'POST' });
+        toast.success('Rollback cancelled');
+      } catch (err) {
+        toast.error('Failed to cancel rollback', {
+          description: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+    }
     if (runId) {
-      apiFetch(`/rollback/${runId}/cancel`, { method: 'POST' }).catch(() => {});
       queryClient.invalidateQueries({ queryKey: ['rollbackRun', runId] });
       queryClient.invalidateQueries({ queryKey: ['rollbackHistory', scope] });
     }
@@ -683,21 +694,34 @@ export default function Rollback() {
 
           {/* Execute success */}
           {phase === 'execute_done' && !ctx.failed && (
-            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-4 flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-2">
-                <CheckCircle size={16} className="text-emerald-500 shrink-0" />
-                <span className="text-sm font-medium">Reversing PR created</span>
+            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <CheckCircle size={16} className="text-emerald-500 shrink-0" />
+                  <span className="text-sm font-medium">Rollback PR created — awaiting Approvals</span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Link
+                    to="/approvals"
+                    className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                  >
+                    <ClipboardCheck size={11} /> Open Approvals
+                  </Link>
+                  {ctx.rollbackPrUrl && (
+                    <a
+                      href={ctx.rollbackPrUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                    >
+                      <ExternalLink size={11} /> View PR
+                    </a>
+                  )}
+                </div>
               </div>
-              {ctx.rollbackPrUrl && (
-                <a
-                  href={ctx.rollbackPrUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
-                >
-                  <ExternalLink size={11} /> View Rollback PR
-                </a>
-              )}
+              <p className="text-xs text-muted-foreground">
+                Final step: on Approvals, choose Apply rollback (merge + terraform apply) or Cancel rollback.
+              </p>
             </div>
           )}
 
@@ -742,15 +766,23 @@ export default function Rollback() {
 
       {/* ── Eligible PRs list ─────────────────────────────────────────────── */}
       {phase === 'idle' && (
-        <EligiblePRList
-          events={eligible.data ?? []}
-          loading={eligible.isLoading}
-          onPreview={handlePreview}
-          activePrNumber={ctx?.prNumber ?? null}
-        />
+        <>
+          {eligible.error && (
+            <p className="text-sm text-destructive">Unable to load rollback candidates: {eligible.error instanceof Error ? eligible.error.message : String(eligible.error)}</p>
+          )}
+          <EligiblePRList
+            events={eligible.data ?? []}
+            loading={eligible.isLoading}
+            onPreview={handlePreview}
+            activePrNumber={ctx?.prNumber ?? null}
+          />
+        </>
       )}
 
       {/* ── History ─────────────────────────────────────────────────────── */}
+      {history.error && (
+        <p className="text-sm text-destructive">Unable to load rollback history: {history.error instanceof Error ? history.error.message : String(history.error)}</p>
+      )}
       <RollbackHistory
         runs={history.data ?? []}
         loading={history.isLoading}

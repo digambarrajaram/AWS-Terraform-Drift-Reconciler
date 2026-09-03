@@ -69,7 +69,7 @@ def _validate_exception_entry_local(exception_type: str, entry: dict) -> tuple[b
 
 def auto_add_exceptions_on_merge(
     pr_number: int, scope: str, pr_type: str | None, approved_by: str,
-    reason: str | None = None,
+    reason: str | None = None, strict: bool = False,
 ) -> int:
     """Policy: merging an unmanaged/security PR auto-adds the covered
     resources/rules to the exception registry — no separate manual
@@ -105,6 +105,8 @@ def auto_add_exceptions_on_merge(
             )
             return bool(resp.json()) if resp.text and resp.status_code == 200 else False
         except _req_mod.RequestException:
+            if strict:
+                raise
             return True  # can't check — skip the insert, fail soft
 
     def _insert(row: dict) -> bool:
@@ -112,12 +114,16 @@ def auto_add_exceptions_on_merge(
         try:
             resp = requests.post(base, headers=write_headers, json=row, timeout=10)
             if resp.status_code >= 300:
+                if strict:
+                    raise RuntimeError(f"exception registry write failed ({resp.status_code}): {resp.text[:200]}")
                 print(f"  ⚠ auto exception add failed ({resp.status_code}): "
                       f"{resp.text[:200]}", file=sys.stderr)
                 return False
             inserted += 1
             return True
         except _req_mod.RequestException as exc:
+            if strict:
+                raise
             print(f"  ⚠ auto exception add failed: {exc}", file=sys.stderr)
             return False
 
@@ -135,6 +141,8 @@ def auto_add_exceptions_on_merge(
             )
             rows = resp.json() if resp.text and resp.status_code == 200 else []
         except _req_mod.RequestException as exc:
+            if strict:
+                raise
             print(f"  ⚠ auto exception add: drift_events read failed: {exc}", file=sys.stderr)
             return 0
         print(f"  [exceptions] drift_events rows for pr={pr_number}: "
@@ -170,6 +178,8 @@ def auto_add_exceptions_on_merge(
             )
             rows = resp.json() if resp.text and resp.status_code == 200 else []
         except _req_mod.RequestException as exc:
+            if strict:
+                raise
             print(f"  ⚠ auto exception add: pending_applies read failed: {exc}", file=sys.stderr)
             return 0
         fixes = (rows[0].get("fixes_jsonb") or []) if rows else []

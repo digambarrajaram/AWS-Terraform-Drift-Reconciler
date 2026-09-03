@@ -40,30 +40,37 @@ class RunsMixin:
         # sees it and doesn't overwrite it with 'failed'.
         url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        if url_base and key:
-            cancel_body = {"status": "cancelled"}
-            if table == "pending_applies":
-                cancel_body["result"] = {
-                    "cancelled": True,
-                    "message": "Decision job cancelled from dashboard",
-                }
-            else:
-                cancel_body["completed_at"] = datetime.now(timezone.utc).isoformat()
-            for attempt in range(2):
-                try:
-                    requests.patch(
-                        f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
-                        headers={"apikey": key, "Authorization": f"Bearer {key}",
-                                 "Content-Type": "application/json",
-                                 "Prefer": "return=minimal"},
-                        json=cancel_body,
-                        timeout=5,
-                    )
-                    break
-                except requests.RequestException:
-                    if attempt == 1:
-                        print(f"[cancel] Failed to write cancelled status for {run_id} — "
-                              f"the exit watcher will mark it as failed.", file=sys.stderr)
+        if not url_base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        cancel_body = {"status": "cancelled"}
+        if table == "pending_applies":
+            cancel_body["result"] = {
+                "cancelled": True,
+                "message": "Decision job cancelled from dashboard",
+            }
+        else:
+            cancel_body["completed_at"] = datetime.now(timezone.utc).isoformat()
+        status_filter = "in.(approved,rejected)" if table == "pending_applies" else "eq.running"
+        cancel_url = f"{url_base}/rest/v1/{table}?id=eq.{run_id}&status={status_filter}"
+        try:
+            response = requests.patch(
+                cancel_url,
+                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json",
+                         "Prefer": "return=representation"},
+                json=cancel_body,
+                timeout=5,
+            )
+        except requests.RequestException as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        if response.status_code not in (200, 204):
+            self._json_error(502, f"Failed to cancel run ({response.status_code})")
+            return
+        if response.status_code == 200 and response.text and not response.json():
+            self._json_error(409, "Run is no longer running")
+            return
 
         # Terminate the subprocess gracefully first so terraform can
         # release the DynamoDB state lock.  Only force-kill if it

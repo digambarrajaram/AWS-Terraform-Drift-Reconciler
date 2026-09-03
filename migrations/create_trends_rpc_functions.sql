@@ -16,7 +16,7 @@ as $$
     select resource_id, count(*) as drift_count
     from drift_events
     where account = p_account
-      and (p_days = 0 or created_at >= now() - (p_days || ' days')::interval)
+      and (p_days = 0 or created_at >= current_date - ((p_days - 1) || ' days')::interval)
     group by resource_id
     order by drift_count desc
     limit 15;
@@ -38,7 +38,7 @@ as $$
       and status = 'resolved'
       and pr_type in ('fix', 'batch')
       and resolved_at is not null
-      and (p_days = 0 or created_at >= now() - (p_days || ' days')::interval)
+      and (p_days = 0 or created_at >= current_date - ((p_days - 1) || ' days')::interval)
     group by severity;
 $$;
 
@@ -54,13 +54,14 @@ as $$
            count(*)::bigint as count
     from drift_events
     where account = p_account
-      and (p_days = 0 or created_at >= now() - (p_days || ' days')::interval)
+      and (p_days = 0 or created_at >= current_date - ((p_days - 1) || ' days')::interval)
     group by 1
     order by 1;
 $$;
 
--- Grant execute to anon so the dashboard and trends script can call
--- these without the service-role key.
-grant execute on function get_most_drifted(text, int) to anon;
-grant execute on function get_mttr_by_severity(text, int) to anon;
-grant execute on function get_drift_volume_daily(text, int) to anon;
+-- Trends is served by the authenticated dashboard API, which uses the
+-- service role after validating the requested active scope.  Do not expose
+-- arbitrary account aggregation to the anonymous browser role.
+revoke execute on function get_most_drifted(text, int) from anon;
+revoke execute on function get_mttr_by_severity(text, int) from anon;
+revoke execute on function get_drift_volume_daily(text, int) from anon;

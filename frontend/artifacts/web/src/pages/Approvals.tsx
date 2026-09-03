@@ -11,7 +11,7 @@ import { LogViewer } from '@/components/shared/LogViewer';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { apiFetch } from '@/api/apiFetch';
 import { useScope } from '@/hooks/useScope';
-import { runningLabel, decisionToast, isJobDone } from './approval-labels';
+import { runningLabel, decisionButtonLabel, decisionToast, isJobDone } from './approval-labels';
 import { useScanLogs } from '@/hooks/useScanLogs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '@/lib/errorUtils';
@@ -141,7 +141,9 @@ function DetailDrawer({
   const { data: details, isLoading: detailsLoading } = useQuery<PrDetails>({
     queryKey: ['prDetails', row?.id],
     enabled: !!row,
-    queryFn: () => apiFetch<PrDetails>(`/pending-applies/${row!.id}/pr-details`),
+    queryFn: () => apiFetch<PrDetails>(
+      `/pending-applies/${row!.id}/pr-details?scope=${encodeURIComponent(row!.scope)}`,
+    ),
   });
 
   // One poller per open drawer: the serialized log poll (useScanLogs)
@@ -203,7 +205,7 @@ function DetailDrawer({
     completeRef.current = complete;
   }
 
-  const current = row && logStatus
+  const current = row && !openIdChanged && logStatus
     ? { ...row, status: logStatus as PendingApply['status'] }
     : row;
   const jobRunning = !!(current && ['approved', 'rejected'].includes(current.status));
@@ -338,10 +340,10 @@ function DetailDrawer({
               <p className="text-xs text-muted-foreground">Could not load PR details.</p>
             )}
 
-            {/* ── Approve / Except / Reject ── */}
-            {/* Real-fix security: Approve (merge patch) + Except + Reject.
-                Review-only security (no .tf patch): Except + Reject only —
-                Approve/Merge would only add exceptions, which is Except's job. */}
+            {/* ── Accept AWS / Except / Revert AWS ── */}
+            {/* Real-fix security: Accept (merge patch) + Except + Revert.
+                Review-only security (no .tf patch): Except + Close only —
+                Accept/Merge would only add exceptions, which is Except's job. */}
             {current.status === 'awaiting_approval' && (
               <div className="flex items-center gap-2 mt-5 flex-wrap">
                 {!(current.pr_type === 'security_only' && current.review_only) && (
@@ -351,7 +353,7 @@ function DetailDrawer({
                     onClick={() => onDecide(current, 'approved')}
                     className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
-                    <CheckCircle size={13} /> {deciding ? 'Working…' : 'Approve & Merge'}
+                    <CheckCircle size={13} /> {deciding ? 'Working…' : decisionButtonLabel('approved', current.pr_type)}
                   </button>
                 )}
                 {current.pr_type === 'security_only' && (
@@ -361,7 +363,7 @@ function DetailDrawer({
                     onClick={() => onDecide(current, 'excepted')}
                     className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/60 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-800 dark:text-amber-300 transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
-                    <ShieldCheck size={13} /> {deciding ? 'Working…' : 'Except'}
+                    <ShieldCheck size={13} /> {deciding ? 'Working…' : decisionButtonLabel('excepted', current.pr_type)}
                   </button>
                 )}
                 <button
@@ -370,7 +372,7 @@ function DetailDrawer({
                   onClick={() => onDecide(current, 'rejected')}
                   className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
-                  <XCircle size={13} /> Reject & Close
+                  <XCircle size={13} /> {decisionButtonLabel('rejected', current.pr_type)}
                 </button>
               </div>
             )}
@@ -460,7 +462,7 @@ export default function Approvals() {
           body: JSON.stringify({
             decision,
             // No per-user identity in this deployment — the token holder is the operator.
-            approved_by: 'dashboard-user',
+            approved_by: window.localStorage.getItem('drift_operator_id') || 'dashboard-user',
           }),
         },
       );
@@ -549,7 +551,8 @@ export default function Approvals() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Click a PR to review its details, commits, checks, and file changes before approving or rejecting.
+        Click a PR to review details. Accept AWS changes updates code and state to match AWS;
+        Revert AWS to code restores original Terraform on AWS.
       </p>
 
       {isLoading ? (
@@ -625,7 +628,7 @@ export default function Approvals() {
                                 onClick={() => decide(row, 'approved')}
                                 className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                               >
-                                <CheckCircle size={12} /> Approve
+                                <CheckCircle size={12} /> {decisionButtonLabel('approved', row.pr_type, { compact: true })}
                               </button>
                             )}
                             {showExcept && (
@@ -635,7 +638,7 @@ export default function Approvals() {
                                 onClick={() => decide(row, 'excepted')}
                                 className="inline-flex items-center gap-1 rounded-md border border-amber-500/60 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 transition-opacity hover:opacity-90 disabled:opacity-50"
                               >
-                                <ShieldCheck size={12} /> Except
+                                <ShieldCheck size={12} /> {decisionButtonLabel('excepted', row.pr_type, { compact: true })}
                               </button>
                             )}
                             <button
@@ -644,7 +647,7 @@ export default function Approvals() {
                               onClick={() => decide(row, 'rejected')}
                               className="inline-flex items-center gap-1 rounded-md bg-destructive px-2.5 py-1 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                             >
-                              <XCircle size={12} /> Reject
+                              <XCircle size={12} /> {decisionButtonLabel('rejected', row.pr_type, { compact: true })}
                             </button>
                           </div>
                         )}

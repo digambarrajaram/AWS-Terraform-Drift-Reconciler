@@ -6,6 +6,7 @@ import http.server
 import json
 import os
 import sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -74,6 +75,20 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
         elif path == "/api/environments":
             self._serve_environments()
+        elif path == "/api/overview":
+            self._serve_overview()
+        elif path == "/api/scan-runs":
+            self._serve_scan_runs()
+        elif path.startswith("/api/scan-runs/"):
+            self._serve_scan_run()
+        elif path == "/api/pr-queue":
+            self._serve_pr_queue()
+        elif path == "/api/rollback-data":
+            self._serve_rollback_data()
+        elif path.startswith("/api/rollback-runs/"):
+            self._serve_rollback_run()
+        elif path == "/api/trends":
+            self._serve_trends()
         elif path == "/api/pending-applies":
             self._serve_pending_applies()
         elif path.startswith("/api/pending-applies/") and path.endswith("/pr-details"):
@@ -87,6 +102,8 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             self._serve_pending_apply_single()
         elif path == "/api/notification-settings":
             self._serve_notification_settings()
+        elif path == "/api/routing-rules":
+            self._serve_routing_rules()
         elif path == "/api/github-settings":
             self._serve_github_settings()
         elif path.startswith("/api/exceptions"):
@@ -133,6 +150,12 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
                 return
 
+            # Reject local overlaps before inserting a run row.
+            with _RUNNING_LOCK:
+                if any(p.poll() is None and sc == scope for p, _e, sc in _RUNNING.values()):
+                    self._json_error(409, f"Scan already running for {scope}")
+                    return
+
             # Check for an existing running scan in this scope.
             try:
                 resp = _supabase_get(
@@ -148,18 +171,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             try:
+                tf_dir = _tf_dir_for(scope)
+            except RuntimeError as se:
+                self._json_error(400, f"Cannot resolve Terraform directory: {se}")
+                return
+
+            try:
                 run_id = create_scan_run(scope, unmanaged_flag=False, scan_type="trivy_only")
             except Exception as se:
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
-
-            with _RUNNING_LOCK:
-                for rid, (p, _e, _sc) in list(_RUNNING.items()):
-                    if p.poll() is None and _sc == scope:
-                        self._json_error(409, f"Scan already running for {scope} (run: {rid})")
-                        return
-
-            tf_dir = _tf_dir_for(scope)
 
             cmd = [
                 sys.executable,
@@ -172,7 +193,19 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            try:
+                _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            except Exception as se:
+                try:
+                    update_scan_run(
+                        run_id, status="failed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        result_summary={"summary": str(se)},
+                    )
+                except Exception as cleanup_error:
+                    print(f"[scan] Failed to mark startup error for {run_id}: {cleanup_error}", file=sys.stderr)
+                self._json_error(500, f"Failed to start scan: {se}")
+                return
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -194,6 +227,12 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
                 return
 
+            # Reject local overlaps before inserting a run row.
+            with _RUNNING_LOCK:
+                if any(p.poll() is None and sc == scope for p, _e, sc in _RUNNING.values()):
+                    self._json_error(409, f"Scan already running for {scope}")
+                    return
+
             # Check for an existing running scan in this scope.
             try:
                 resp = _supabase_get(
@@ -208,28 +247,21 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(502, f"Supabase unreachable: {exc}")
                 return
 
-            # Insert the scan_run row.
             scan_mode = body.get("scan_mode", "drift_only")
             if scan_mode not in ("drift_only", "drift_and_unmanaged", "unmanaged_only"):
                 self._json_error(400, "scan_mode must be drift_only, drift_and_unmanaged, or unmanaged_only.")
                 return
             unmanaged_flag_for_db = scan_mode in ("drift_and_unmanaged", "unmanaged_only")
             try:
+                tf_dir = _tf_dir_for(scope)
+            except RuntimeError as se:
+                self._json_error(400, f"Cannot resolve Terraform directory: {se}")
+                return
+            try:
                 run_id = create_scan_run(scope, unmanaged_flag_for_db, scan_type=scan_mode)
             except Exception as se:
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
-
-            # Guard against overlapping scans for the same scope — two
-            # terraform processes racing for the same state lock will
-            # both fail, and the second lock-acquisition error is confusing.
-            with _RUNNING_LOCK:
-                for rid, (p, _e, _sc) in list(_RUNNING.items()):
-                    if p.poll() is None and _sc == scope:
-                        self._json_error(409, f"Scan already running for {scope} (run: {rid})")
-                        return
-
-            tf_dir = _tf_dir_for(scope)
 
             # Non-blocking subprocess — fire and respond 202 immediately.
             cmd = [
@@ -243,7 +275,19 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            try:
+                _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            except Exception as se:
+                try:
+                    update_scan_run(
+                        run_id, status="failed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        result_summary={"summary": str(se)},
+                    )
+                except Exception as cleanup_error:
+                    print(f"[scan] Failed to mark startup error for {run_id}: {cleanup_error}", file=sys.stderr)
+                self._json_error(500, f"Failed to start scan: {se}")
+                return
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -267,13 +311,33 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, "pr_number (integer) and a valid scope are required")
                 return
 
+            with _RUNNING_LOCK:
+                if any(p.poll() is None and sc == scope for p, _e, sc in _RUNNING.values()):
+                    self._json_error(409, f"Rollback already running for {scope}")
+                    return
+            try:
+                resp = _supabase_get(
+                    "rollback_runs",
+                    {"select": "id", "pr_number": f"eq.{pr_number}", "scope": f"eq.{scope}", "status": "eq.running", "limit": "1"},
+                )
+                if resp.status_code == 200 and resp.json():
+                    self._json_error(409, f"Rollback already running for PR #{pr_number}", run_id=resp.json()[0]["id"])
+                    return
+            except requests.RequestException as exc:
+                self._json_error(502, f"Supabase unreachable: {exc}")
+                return
+            try:
+                tf_dir = _tf_dir_for(scope)
+            except RuntimeError as exc:
+                self._json_error(400, f"Cannot resolve Terraform directory: {exc}")
+                return
+
             try:
                 run_id = create_rollback_run(pr_number, scope, mode="preview")
             except Exception as se:
                 self._json_error(502, f"Failed to create rollback run: {se}")
                 return
 
-            tf_dir = _tf_dir_for(scope)
             cmd = [
                 sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -286,7 +350,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            try:
+                _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            except Exception as exc:
+                try:
+                    from drift_reconciler.rollback_runs import update_rollback_run
+                    update_rollback_run(run_id, status="failed", completed_at=datetime.now(timezone.utc).isoformat(), result={"summary": str(exc)})
+                except Exception as cleanup_error:
+                    print(f"[rollback] Failed to mark startup error for {run_id}: {cleanup_error}", file=sys.stderr)
+                self._json_error(500, f"Failed to start rollback preview: {exc}")
+                return
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -310,11 +383,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, "pr_number (integer) and a valid scope are required")
                 return
 
+            with _RUNNING_LOCK:
+                if any(p.poll() is None and sc == scope for p, _e, sc in _RUNNING.values()):
+                    self._json_error(409, f"Rollback already running for {scope}")
+                    return
+
             # Concurrency check — only one rollback for a given PR at a time.
             try:
                 resp = _supabase_get(
                     "rollback_runs",
-                    {"select": "id", "pr_number": f"eq.{pr_number}", "status": "eq.running", "limit": "1"}
+                    {"select": "id", "pr_number": f"eq.{pr_number}", "scope": f"eq.{scope}", "status": "eq.running", "limit": "1"}
                 )
                 if resp.status_code == 200 and resp.json():
                     existing_id = resp.json()[0]["id"]
@@ -325,12 +403,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             try:
+                tf_dir = _tf_dir_for(scope)
+            except RuntimeError as se:
+                self._json_error(400, f"Cannot resolve Terraform directory: {se}")
+                return
+            try:
                 run_id = create_rollback_run(pr_number, scope, mode="execute")
             except Exception as se:
                 self._json_error(502, f"Failed to create rollback run: {se}")
                 return
 
-            tf_dir = _tf_dir_for(scope)
             cmd = [
                 sys.executable,
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
@@ -343,7 +425,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             _configure_aws_env(env, scope)
-            _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            try:
+                _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
+            except Exception as exc:
+                try:
+                    from drift_reconciler.rollback_runs import update_rollback_run
+                    update_rollback_run(run_id, status="failed", completed_at=datetime.now(timezone.utc).isoformat(), result={"summary": str(exc)})
+                except Exception as cleanup_error:
+                    print(f"[rollback] Failed to mark startup error for {run_id}: {cleanup_error}", file=sys.stderr)
+                self._json_error(500, f"Failed to start rollback execution: {exc}")
+                return
 
             resp_body = json.dumps({"run_id": run_id}).encode("utf-8")
             self.send_response(202)
@@ -413,6 +504,382 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         ctype = {".js": "application/javascript", ".css": "text/css", ".png": "image/png"}.get(ext, "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_overview(self):
+        """Return scope-validated summary data for the Overview page."""
+        scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, f"Invalid scope: {scope}")
+            return
+
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+
+        try:
+            severity_resp = requests.get(
+                f"{base}/rest/v1/drift_severity_summary"
+                f"?select=severity,count&account=eq.{scope}",
+                headers=headers, timeout=10,
+            )
+            rollback_resp = requests.get(
+                f"{base}/rest/v1/drift_events"
+                f"?select=id&status=eq.open&pr_type=eq.rollback&account=eq.{scope}",
+                headers={**headers, "Prefer": "count=exact"}, timeout=10,
+            )
+            scan_resp = requests.get(
+                f"{base}/rest/v1/scan_runs"
+                f"?select=completed_at&scope=eq.{scope}&status=eq.complete"
+                f"&completed_at=not.is.null&order=completed_at.desc&limit=1",
+                headers=headers, timeout=10,
+            )
+            cost_resp = requests.get(
+                f"{base}/rest/v1/drift_events"
+                f"?select=cost_impact&status=eq.open&account=eq.{scope}",
+                headers=headers, timeout=10,
+            )
+            responses = (severity_resp, rollback_resp, scan_resp, cost_resp)
+            if any(resp.status_code != 200 for resp in responses):
+                self._json_error(502, "Overview query failed")
+                return
+
+            cost = 0
+            for row in cost_resp.json() or []:
+                value = row.get("cost_impact")
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except json.JSONDecodeError:
+                        value = None
+                estimate = value.get("monthly_estimate_usd") if isinstance(value, dict) else None
+                if isinstance(estimate, (int, float)):
+                    cost += estimate
+
+            payload = {
+                "severity": severity_resp.json() or [],
+                "rollback_count": len(rollback_resp.json() or []),
+                "last_scan": (scan_resp.json() or [{}])[0].get("completed_at"),
+                "cost_impact": cost,
+            }
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_scan_runs(self):
+        """Return scan history for one validated active environment."""
+        scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, f"Invalid scope: {scope}")
+            return
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        try:
+            resp = requests.get(
+                f"{base}/rest/v1/scan_runs?select=*&scope=eq.{scope}"
+                "&order=started_at.desc&limit=20",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                self._json_error(502, f"Scan history query failed ({resp.status_code})")
+                return
+            data = json.dumps(resp.json() or []).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_scan_run(self):
+        """Return one scan run only after validating its requested scope."""
+        parts = urlparse(self.path).path.rstrip("/").split("/")
+        if len(parts) != 4 or not parts[3]:
+            self._json_error(400, "Missing scan run id")
+            return
+        run_id = parts[3]
+        scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, f"Invalid scope: {scope}")
+            return
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        try:
+            resp = requests.get(
+                f"{base}/rest/v1/scan_runs?select=*&id=eq.{run_id}&scope=eq.{scope}&limit=1",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                self._json_error(502, f"Scan run query failed ({resp.status_code})")
+                return
+            rows = resp.json() or []
+            if not rows:
+                self._json_error(404, "Scan run not found")
+                return
+            data = json.dumps(rows[0]).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_pr_queue(self):
+        """Return filtered, paginated PR queue data for a validated scope."""
+        params = parse_qs(urlparse(self.path).query)
+        scope = params.get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, f"Invalid scope: {scope}")
+            return
+        try:
+            page = max(0, int(params.get("page", ["0"])[0]))
+        except ValueError:
+            page = 0
+        sort_column = params.get("sort", ["created_at"])[0]
+        sort_ascending = params.get("ascending", ["false"])[0].lower() == "true"
+        if sort_column not in ("created_at", "severity", "resource_id"):
+            self._json_error(400, "Invalid sort column")
+            return
+
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        query = {"account": f"eq.{scope}"}
+        for name, column in (("status", "status"), ("severity", "severity"), ("type", "pr_type")):
+            value = params.get(name, ["all"])[0]
+            if value != "all":
+                query[column] = f"eq.{value}"
+        search = params.get("search", [""])[0]
+        if search:
+            query["resource_id"] = f"ilike.*{search}*"
+        date_from = params.get("dateFrom", [""])[0]
+        date_to = params.get("dateTo", [""])[0]
+        if date_from:
+            query["created_at.gte"] = date_from
+        if date_to:
+            query["created_at.lte"] = f"{date_to}T23:59:59"
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Prefer": "count=exact"}
+        try:
+            if sort_column == "severity":
+                rows = []
+                offset = 0
+                while True:
+                    batch_query = {"select": "*", **query, "offset": str(offset), "limit": "1000"}
+                    resp = requests.get(
+                        f"{base}/rest/v1/drift_events", params=batch_query,
+                        headers=headers, timeout=10,
+                    )
+                    if resp.status_code != 200:
+                        break
+                    batch = resp.json() or []
+                    rows.extend(batch)
+                    if len(batch) < 1000:
+                        break
+                    offset += 1000
+                rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+                rows.sort(key=lambda row: (rank.get(str(row.get("severity", "")).upper(), 4), row.get("created_at", "")), reverse=not sort_ascending)
+                total = len(rows)
+                rows = rows[page * 20:(page + 1) * 20]
+            else:
+                query.update({"order": f"{sort_column}.{'asc' if sort_ascending else 'desc'}", "offset": str(page * 20), "limit": "20"})
+                resp = requests.get(
+                    f"{base}/rest/v1/drift_events", params={"select": "*", **query},
+                    headers=headers, timeout=10,
+                )
+                rows = resp.json() if resp.status_code == 200 else []
+                content_range = resp.headers.get("Content-Range", "*/0")
+                total = int(content_range.rsplit("/", 1)[-1]) if "/" in content_range else len(rows)
+            if resp.status_code != 200:
+                self._json_error(502, f"PR queue query failed ({resp.status_code})")
+                return
+            data = json.dumps({"events": rows, "count": total}).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _rollback_scope(self):
+        scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, "A valid scope is required")
+            return None
+        return scope
+
+    def _serve_rollback_data(self):
+        scope = self._rollback_scope()
+        if not scope:
+            return
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        try:
+            eligible = requests.get(
+                f"{base}/rest/v1/drift_events?select=*&account=eq.{scope}"
+                "&status=in.(open,resolved)&changes_jsonb=not.is.null"
+                "&pr_number=not.is.null&order=created_at.desc",
+                headers=headers, timeout=10,
+            )
+            history = requests.get(
+                f"{base}/rest/v1/rollback_runs?select=*&scope=eq.{scope}"
+                "&order=started_at.desc",
+                headers=headers, timeout=10,
+            )
+            if eligible.status_code != 200 or history.status_code != 200:
+                self._json_error(502, "Rollback data query failed")
+                return
+            data = json.dumps({
+                "eligible": eligible.json() or [],
+                "history": history.json() or [],
+            }).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_rollback_run(self):
+        parts = urlparse(self.path).path.rstrip("/").split("/")
+        if len(parts) != 4 or not parts[3]:
+            self._json_error(400, "Missing rollback run id")
+            return
+        scope = self._rollback_scope()
+        if not scope:
+            return
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        try:
+            resp = requests.get(
+                f"{base}/rest/v1/rollback_runs?select=*&id=eq.{parts[3]}&scope=eq.{scope}&limit=1",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"}, timeout=10,
+            )
+            if resp.status_code != 200:
+                self._json_error(502, f"Rollback run query failed ({resp.status_code})")
+                return
+            rows = resp.json() or []
+            if not rows:
+                self._json_error(404, "Rollback run not found")
+                return
+            data = json.dumps(rows[0]).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_trends(self):
+        """Return all Trends data for one validated scope and period."""
+        params = parse_qs(urlparse(self.path).query)
+        scope = params.get("scope", [""])[0]
+        if scope not in _get_valid_scopes():
+            self._json_error(400, "A valid scope is required")
+            return
+        try:
+            days = int(params.get("days", ["30"])[0])
+        except ValueError:
+            self._json_error(400, "days must be 7, 30, or 90")
+            return
+        if days not in (7, 30, 90):
+            self._json_error(400, "days must be 7, 30, or 90")
+            return
+
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        rpc_headers = {**headers, "Content-Type": "application/json"}
+        try:
+            rpc_results = {}
+            for name in ("get_most_drifted", "get_mttr_by_severity", "get_drift_volume_daily"):
+                resp = requests.post(
+                    f"{base}/rest/v1/rpc/{name}", headers=rpc_headers,
+                    json={"p_account": scope, "p_days": days}, timeout=10,
+                )
+                if resp.status_code != 200:
+                    self._json_error(502, f"Trends query failed ({resp.status_code})")
+                    return
+                rpc_results[name] = resp.json() or []
+
+            since = (datetime.now(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
+
+            def fetch_events(extra=None):
+                query = {"account": f"eq.{scope}", "created_at": f"gte.{since}"}
+                query.update(extra or {})
+                return requests.get(
+                    f"{base}/rest/v1/drift_events", params={"select": "resource_id", **query},
+                    headers=headers, timeout=10,
+                )
+
+            responses = [
+                fetch_events(),
+                fetch_events({"status": "eq.resolved"}),
+                fetch_events({"status": "eq.open"}),
+                fetch_events({"pr_type": "eq.rollback"}),
+            ]
+            if any(resp.status_code != 200 for resp in responses):
+                self._json_error(502, "Trends summary query failed")
+                return
+            all_rows, resolved_rows, open_rows, rollback_rows = [resp.json() or [] for resp in responses]
+            data = json.dumps({
+                "most_drifted": rpc_results["get_most_drifted"],
+                "mttr": rpc_results["get_mttr_by_severity"],
+                "volume": rpc_results["get_drift_volume_daily"],
+                "summary": {
+                    "total": len(all_rows),
+                    "uniqueResources": len({row.get("resource_id") for row in all_rows}),
+                    "resolved": len(resolved_rows),
+                    "open": len(open_rows),
+                    "rollback": len(rollback_rows),
+                },
+            }).encode("utf-8")
+        except (requests.RequestException, ValueError) as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

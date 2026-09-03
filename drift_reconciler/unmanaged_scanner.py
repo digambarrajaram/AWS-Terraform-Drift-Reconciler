@@ -6,7 +6,7 @@ Usage (standalone test):
 """
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import json
 import os
 import re
@@ -166,16 +166,27 @@ def _load_exceptions(scope: str) -> list[dict[str, Any]]:
         resp = requests.get(
             f"{url}/rest/v1/drift_exception_registry"
             f"?select=resource_type,resource_id_pattern,reason,approved_by,"
-            f"max_monthly_cost_usd,created_at"
+            f"max_monthly_cost_usd,created_at,expires"
             f"&scope=eq.{scope}&exception_type=eq.unmanaged&active=eq.true",
             headers={"apikey": key, "Authorization": f"Bearer {key}"},
             timeout=10,
         )
         if resp.status_code == 200:
-            return resp.json() if resp.text else []
+            rows = resp.json() if resp.text else []
+            return [
+                row for row in rows
+                if not row.get("expires") or _unmanaged_exception_not_expired(row["expires"])
+            ]
         return []
     except requests.RequestException:
         return []
+
+
+def _unmanaged_exception_not_expired(value: Any) -> bool:
+    try:
+        return date.fromisoformat(str(value)[:10]) > date.today()
+    except ValueError:
+        return True
 
 
 def format_exception_attribution(exc: dict[str, Any]) -> str:

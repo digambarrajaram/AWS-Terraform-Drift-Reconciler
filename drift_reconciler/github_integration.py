@@ -408,8 +408,14 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
     # so the synthetic branch_id row would otherwise be typed "fix".
     if append_history:
         try:
+            # Branch naming appends "-rollback" to keep rollback PRs distinct
+            # from fix PRs for the same address; history / Gate B need the
+            # real Terraform resource address to match plan JSON.
+            history_rid = resource_id
+            if is_rollback and resource_id.endswith("-rollback"):
+                history_rid = resource_id[: -len("-rollback")]
             drift_history.append_entry(
-                resource_id=resource_id,
+                resource_id=history_rid,
                 account_label=account_label,
                 region=os.environ.get("AWS_REGION", "unknown"),
                 pr_number=pr.number,

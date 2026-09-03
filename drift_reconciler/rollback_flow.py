@@ -306,10 +306,19 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
             file_content=patched_content,
             risk_level="LOW",
             account_label=account_label,
+            # reversed_changes so Approvals apply Gate B can verify freshness
+            # against the real TF resource (suffix stripped in create_drift_pr).
+            changes=rb["reversed_changes"],
             is_rollback=True,
             rolled_back_from_pr=pr_number,
         )
-        if pr and run_id:
+        if pr is None:
+            continue
+        # Same Approvals gate as fix/batch/security: PR lands in
+        # pending_applies immediately so Accept/Revert applies it.
+        from drift_reconciler.pending_applies import create_pending_apply
+        create_pending_apply(pr.number, account_label, "rollback")
+        if run_id:
             from datetime import datetime as dt, timezone
             from rollback_runs import update_rollback_run
             update_rollback_run(
@@ -320,6 +329,6 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
                 rollback_pr_url=pr.html_url,
             )
 
-    print("\nRollback PR(s) created. Review and merge to revert the original fix.")
+    print("\nRollback PR(s) created — review on the Approvals page to apply.")
 
 

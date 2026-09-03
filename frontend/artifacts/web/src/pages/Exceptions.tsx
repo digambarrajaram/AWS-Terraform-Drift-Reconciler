@@ -26,7 +26,13 @@ import {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function isExpired(expires: string | null): boolean {
-  return !!expires && isPast(parseISO(expires));
+  if (!expires) return false;
+  try {
+    const parsed = parseISO(expires);
+    return !isNaN(parsed.getTime()) && isPast(parsed);
+  } catch {
+    return false;
+  }
 }
 
 function todayISO(): string {
@@ -57,10 +63,15 @@ function ActiveBadge({ active, expires }: { active: boolean; expires?: string | 
 
 function ExpiresCell({ expires }: { expires: string | null }) {
   if (!expires) return <span className="text-muted-foreground">Never</span>;
+  let label = expires;
+  try {
+    const parsed = parseISO(expires);
+    if (!isNaN(parsed.getTime())) label = format(parsed, 'MMM d, yyyy, HH:mm');
+  } catch { /* display the raw value for malformed legacy rows */ }
   const expired = isExpired(expires);
   return (
     <span className={expired ? 'text-destructive font-medium' : 'text-foreground'}>
-      {format(parseISO(expires), 'MMM d, yyyy, HH:mm')}
+      {label}
       {expired && ' (expired)'}
     </span>
   );
@@ -121,7 +132,7 @@ function ExpireDialog({
             Cancel
           </button>
           <button type="button" disabled={!val || pending}
-            onClick={() => onConfirm(new Date(val + 'T23:59:59').toISOString())}
+            onClick={() => onConfirm(val)}
             className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity">
             {pending ? 'Saving…' : 'Set Expiry'}
           </button>
@@ -593,7 +604,7 @@ function UnmanagedTab({
             <table className="w-full text-xs min-w-[700px]">
               <thead>
                 <tr className="border-b border-border bg-muted/40">
-                  {['Resource Type', 'ID Pattern', 'Reason', 'Approved By', 'Max Cost/mo', 'Status', ''].map((h) => (
+                  {['Resource Type', 'ID Pattern', 'Reason', 'Approved By', 'Max Cost/mo', 'Expires', 'Status', ''].map((h) => (
                     <th key={`unmanaged-${h}`} className="px-4 py-2.5 text-left font-medium text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -615,6 +626,9 @@ function UnmanagedTab({
                         {row.max_monthly_cost_usd != null
                           ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(row.max_monthly_cost_usd)
                           : '—'}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <ExpiresCell expires={row.expires} />
                       </td>
                       <td className="px-4 py-3">
                         <ActiveBadge active={row.active} />

@@ -109,7 +109,7 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
     every PR appears in the Approvals page as soon as it's created.
     Dedup-guarded on (pr_number, scope) so re-runs don't double-insert.
     *pr_type* mirrors the drift_events vocabulary (fix/batch/unmanaged/
-    security_only) so the queue can label and filter PR kinds.
+    security_only/rollback) so the queue can label and filter PR kinds.
     *review_only* marks security PRs that carry no .tf patch (manual
     review) — Approvals treats them differently from real-fix PRs."""
     if not _URL or not _KEY:

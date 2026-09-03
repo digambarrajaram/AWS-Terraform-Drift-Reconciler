@@ -79,11 +79,14 @@ class EnvironmentsMixin:
                             f"{s_url}?select=environment_id,github_token,aws_access_key_id,aws_secret_access_key,webhook_secret&environment_id=in.({ids})",
                             headers=s_headers, timeout=10,
                         )
-                        if s_resp.status_code == 200:
-                            for row in (s_resp.json() or []):
-                                secrets_lookup[row["environment_id"]] = row
-                    except requests.RequestException:
-                        pass
+                        if s_resp.status_code != 200:
+                            self._json_error(502, f"Environment secrets query failed ({s_resp.status_code})")
+                            return
+                        for row in (s_resp.json() or []):
+                            secrets_lookup[row["environment_id"]] = row
+                    except (requests.RequestException, ValueError) as exc:
+                        self._json_error(502, f"Environment secrets unavailable: {exc}")
+                        return
 
                 for e in envs:
                     sec = secrets_lookup.get(e["id"], {})
@@ -128,16 +131,38 @@ class EnvironmentsMixin:
         required = ["name", "aws_account_id", "region", "tf_state_bucket", "tf_directory_path"]
         row = {"slug": slug}
         for field in required:
-            val = (body.get(field) or "").strip()
+            raw_val = body.get(field)
+            if raw_val is not None and not isinstance(raw_val, str):
+                self._json_error(400, f"{field} must be a string.")
+                return
+            val = (raw_val or "").strip()
             if not val:
                 self._json_error(400, f"{field} is required.")
                 return
             row[field] = val
 
+        if not re.fullmatch(r"\d{12}", row["aws_account_id"]):
+            self._json_error(400, "aws_account_id must be a 12-digit AWS account ID.")
+            return
+        if not re.fullmatch(r"[a-z]{2}(?:-gov|-iso|-isob)?-[a-z]+-\d", row["region"]):
+            self._json_error(400, "region must be a valid AWS region.")
+            return
+
         # Optional fields
         for opt in ["aws_profile", "tf_lock_table", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "scan_role_arn", "aws_external_id"]:
+            if opt in body and body[opt] is not None and not isinstance(body[opt], str):
+                self._json_error(400, f"{opt} must be a string.")
+                return
             if body.get(opt):
                 row[opt] = body[opt].strip()
+
+        for field in ("aws_role_arn", "scan_role_arn"):
+            if row.get(field) and not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", row[field]):
+                self._json_error(400, f"{field} must be a valid IAM role ARN.")
+                return
+        if row.get("repo_url") and not re.match(r"^(https://|git@|ssh://)", row["repo_url"]):
+            self._json_error(400, "repo_url must use https, git@, or ssh://.")
+            return
 
         # Guard: auth_type='keys' requires keys.
         if row.get("auth_type") == "keys":
@@ -190,16 +215,32 @@ class EnvironmentsMixin:
                 self.end_headers()
                 self.wfile.write(data)
             elif resp.status_code == 409:
-                # Slug exists — try reactivating a soft-deleted row.
+                # Slug exists — apply the submitted configuration when
+                # reactivating a soft-deleted row.
+                existing = requests.get(
+                    f"{table_url}?select=id&slug=eq.{slug}&is_active=eq.false&limit=1",
+                    headers=headers, timeout=10,
+                )
+                if existing.status_code != 200 or not existing.json():
+                    self._json_error(409, f"slug '{slug}' already exists.")
+                    return
+                env_id = existing.json()[0]["id"]
                 reactivate = requests.patch(
-                    f"{table_url}?slug=eq.{slug}&is_active=eq.false",
+                    f"{table_url}?id=eq.{env_id}&is_active=eq.false",
                     headers=headers,
-                    json={"is_active": True, "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()},
+                    json={**row, "is_active": True, "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()},
                     timeout=10,
                 )
                 if reactivate.status_code in (200, 204):
+                    secrets_to_write = {
+                        k.lstrip("_"): (body.get(k) or "").strip()
+                        for k in ("_github_token", "_aws_access_key_id", "_aws_secret_access_key", "_webhook_secret")
+                        if isinstance(body.get(k), str) and body.get(k).strip()
+                    }
+                    if secrets_to_write:
+                        self._upsert_env_secret(env_id, secrets_to_write)
                     self.send_response(200)
-                    data = json.dumps({"slug": slug, "reactivated": True}).encode("utf-8")
+                    data = json.dumps({"slug": slug, "reactivated": True, "id": env_id}).encode("utf-8")
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
@@ -226,6 +267,7 @@ class EnvironmentsMixin:
         aws_access_key_val = None
         aws_secret_key_val = None
         webhook_secret_val = None
+        clear_github_token = body.get("git_auth_type") == "none"
         for k, v in body.items():
             if k == "_github_token":
                 github_token_val = (str(v).strip() or None)
@@ -236,9 +278,36 @@ class EnvironmentsMixin:
             elif k == "_webhook_secret":
                 webhook_secret_val = (str(v).strip() or None)
             elif k in allowed:
+                if k == "is_active":
+                    if not isinstance(v, bool):
+                        self._json_error(400, "is_active must be a boolean.")
+                        return
+                elif v is not None and not isinstance(v, str):
+                    self._json_error(400, f"{k} must be a string.")
+                    return
                 updates[k] = v
         if not updates and not github_token_val and not aws_access_key_val and not aws_secret_key_val and not webhook_secret_val:
             self._json_error(400, "No valid fields to update.")
+            return
+
+        if "aws_account_id" in updates and (
+            not isinstance(updates["aws_account_id"], str)
+            or not re.fullmatch(r"\d{12}", updates["aws_account_id"].strip())
+        ):
+            self._json_error(400, "aws_account_id must be a 12-digit AWS account ID.")
+            return
+        if "region" in updates and (
+            not isinstance(updates["region"], str)
+            or not re.fullmatch(r"[a-z]{2}(?:-gov|-iso|-isob)?-[a-z]+-\d", updates["region"].strip())
+        ):
+            self._json_error(400, "region must be a valid AWS region.")
+            return
+        for field in ("aws_role_arn", "scan_role_arn"):
+            if field in updates and updates[field] and not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", updates[field].strip()):
+                self._json_error(400, f"{field} must be a valid IAM role ARN.")
+                return
+        if "repo_url" in updates and updates["repo_url"] and not re.match(r"^(https://|git@|ssh://)", updates["repo_url"].strip()):
+            self._json_error(400, "repo_url must use https, git@, or ssh://.")
             return
 
         # Guard: switching to auth_type='keys' requires keys (either in this
@@ -274,7 +343,7 @@ class EnvironmentsMixin:
             if resp.status_code in (200, 204):
                 secrets_to_write = {}
                 for k, var in [("github_token", github_token_val), ("aws_access_key_id", aws_access_key_val), ("aws_secret_access_key", aws_secret_key_val), ("webhook_secret", webhook_secret_val)]:
-                    if var:
+                    if var or (k == "github_token" and clear_github_token):
                         secrets_to_write[k] = var
                 if secrets_to_write:
                     try:

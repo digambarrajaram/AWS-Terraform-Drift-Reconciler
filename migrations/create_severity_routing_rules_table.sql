@@ -17,11 +17,8 @@ insert into severity_routing_rules (severity, channel) values
   ('LOW',    'slack')
 on conflict do nothing;
 
--- RLS — anon can read, service_role bypasses.
+-- RLS — routing rules are served through the authenticated dashboard API;
+-- do not expose environment routing configuration to anonymous clients.
 alter table severity_routing_rules enable row level security;
 
 drop policy if exists "anon_select_only" on severity_routing_rules;
-create policy "anon_select_only" on severity_routing_rules
-for select
-to anon
-using (true);

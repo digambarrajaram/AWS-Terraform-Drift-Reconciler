@@ -23,6 +23,9 @@ class ConfigMixin:
         repo = os.environ.get("GITHUB_REPO", "").strip()
         if repo:
             payload["githubRepo"] = repo
+        app_url = os.environ.get("PUBLIC_APP_URL", "").strip().rstrip("/")
+        if app_url:
+            payload["appUrl"] = app_url
         data = json.dumps(payload).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

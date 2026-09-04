@@ -36,8 +36,13 @@ export async function signUp(
   config: AppConfig,
   email: string,
   password: string,
+  emailRedirectTo: string,
 ) {
-  return requireClient(config).auth.signUp({ email, password });
+  return requireClient(config).auth.signUp({
+    email,
+    password,
+    options: { emailRedirectTo },
+  });
 }
 
 export async function signOut(config: AppConfig) {
@@ -55,10 +60,12 @@ export async function resetPasswordForEmail(
 export async function resendSignupConfirmation(
   config: AppConfig,
   email: string,
+  emailRedirectTo: string,
 ) {
   return requireClient(config).auth.resend({
     type: 'signup',
     email,
+    options: { emailRedirectTo },
   });
 }
 

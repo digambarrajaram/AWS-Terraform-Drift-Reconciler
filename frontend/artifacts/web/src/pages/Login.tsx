@@ -26,14 +26,16 @@ import {
   RESET_EMAIL_SENT_MESSAGE,
   SIGNUP_SUCCESS_MESSAGE,
 } from '@/lib/authErrors';
+import { authRedirectUrl } from '@/lib/appUrl';
 
 type Mode = 'signin' | 'signup' | 'forgot';
 
-function resetRedirectUrl(): string {
-  return new URL(
-    'reset-password',
-    `${window.location.origin}${import.meta.env.BASE_URL}`,
-  ).href;
+function loginRedirectUrl(config: AppConfig): string {
+  return authRedirectUrl('login', config);
+}
+
+function resetRedirectUrl(config: AppConfig): string {
+  return authRedirectUrl('reset-password', config);
 }
 
 function clearFormFeedback(
@@ -122,7 +124,11 @@ export default function Login() {
     setError('');
     setStatusMessage('');
     try {
-      const result = await resendSignupConfirmation(config, trimmedEmail);
+      const result = await resendSignupConfirmation(
+        config,
+        trimmedEmail,
+        loginRedirectUrl(config),
+      );
       if (result.error) {
         if (isNetworkFailure(result.error)) {
           setError(mapAuthNetworkError());
@@ -166,7 +172,7 @@ export default function Login() {
         const result = await resetPasswordForEmail(
           config,
           trimmedEmail,
-          resetRedirectUrl(),
+          resetRedirectUrl(config),
         );
         if (result.error) {
           if (isNetworkFailure(result.error)) {
@@ -192,7 +198,7 @@ export default function Login() {
       const result =
         mode === 'signin'
           ? await signIn(config, trimmedEmail, password)
-          : await signUp(config, trimmedEmail, password);
+          : await signUp(config, trimmedEmail, password, loginRedirectUrl(config));
 
       if (result.error) {
         if (isNetworkFailure(result.error)) {

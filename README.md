@@ -326,6 +326,7 @@ Copy `.env.example` to `.env` and configure:
 | `SLACK_WEBHOOK_URL` | Slack notifications (legacy — can be managed via dashboard) |
 | `AWS_REGION` | Default region |
 | `SESSION_SECRET` | Required HMAC secret for signed session cookies (min 32 chars) |
+| `PUBLIC_APP_URL` | Public dashboard URL for Supabase email links (e.g. `http://ec2-ip:8080`) |
 | `DRIFT_CLONE_BASE` | Git clone directory (default: `~/.drift-clones`) |
 
 ### GitHub Actions

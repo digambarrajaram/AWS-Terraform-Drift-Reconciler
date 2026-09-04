@@ -5,6 +5,8 @@ export interface AppConfig {
   supabaseUrl: string;
   supabaseAnonKey: string;
   githubRepo?: string;  // e.g. "owner/repo" — used to build GitHub PR links
+  /** Canonical public URL (from PUBLIC_APP_URL). Used for Supabase email redirects. */
+  appUrl?: string;
 }
 
 // apiFetch (not bare fetch) so credentials (session cookie) are sent —

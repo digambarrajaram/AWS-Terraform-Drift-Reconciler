@@ -39,6 +39,7 @@ These must be set for a working deployment (cross-checked against `.env.example`
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend service-role key (server-side DB access) |
 | `SUPABASE_ANON_KEY` | Public anon key (injected to frontend via `/api/config`) |
 | `SESSION_SECRET` | HMAC key for signed session cookies (min 32 chars; required) |
+| `PUBLIC_APP_URL` | Public URL users open in the browser (e.g. `http://54.x.x.x:8080` or `https://drift.example.com`) — used for Supabase email confirmation/reset links |
 
 ### AWS
 
@@ -80,6 +81,9 @@ SUPABASE_ANON_KEY="eyJ..."
 
 # Session auth (required)
 SESSION_SECRET="generate-a-long-random-string-at-least-32-chars"
+
+# Public URL (required on EC2 — no trailing slash)
+PUBLIC_APP_URL="http://YOUR_EC2_PUBLIC_IP:8080"
 
 # LLM — set one
 GROQ_API_KEY=""
@@ -223,6 +227,19 @@ server {
 Session cookies are `HttpOnly; Secure; SameSite=Strict`. Clients must reach the app over HTTPS (or localhost) so the browser will store/send them.
 
 Auth model: after Supabase sign-in the UI calls `POST /api/login` with `Authorization: Bearer <jwt>`; the server verifies the JWT and sets a 1-hour HMAC-signed `session` cookie. State-changing requests also require double-submit CSRF (`csrf` cookie + `X-CSRF-Token` header).
+
+### Supabase Auth redirect URLs
+
+Email confirmation and password-reset links use `PUBLIC_APP_URL` (exposed to the frontend as `appUrl` via `/api/config`). You must also allow that URL in the Supabase project:
+
+1. Supabase Dashboard → **Authentication** → **URL Configuration**
+2. Set **Site URL** to your `PUBLIC_APP_URL` (e.g. `http://54.x.x.x:8080`)
+3. Add these to **Redirect URLs** (one per line):
+   - `http://YOUR_EC2_PUBLIC_IP:8080/login`
+   - `http://YOUR_EC2_PUBLIC_IP:8080/reset-password`
+   - (If using a domain + TLS, repeat with `https://your-domain/...`)
+
+After changing `PUBLIC_APP_URL` or Supabase settings, **resend** the confirmation email (old emails still point at the previous URL).
 
 ---
 

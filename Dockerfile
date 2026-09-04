@@ -7,12 +7,14 @@ FROM node:22-slim AS frontend-builder
 
 WORKDIR /build/frontend
 
-RUN corepack enable
+# Pin pnpm to match local dev. pnpm 11 requires allowBuilds in pnpm-workspace.yaml.
+RUN corepack enable && corepack prepare pnpm@11.25.0 --activate
 
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/tsconfig.base.json ./
 COPY frontend/artifacts/web ./artifacts/web
 
-ENV NODE_ENV=production
+ENV CI=true \
+    NODE_ENV=production
 RUN pnpm install --frozen-lockfile --filter @workspace/web...
 RUN pnpm --filter @workspace/web run build
 

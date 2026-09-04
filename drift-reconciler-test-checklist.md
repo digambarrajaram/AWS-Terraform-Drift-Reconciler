@@ -74,7 +74,7 @@ For at least 2-3 of the confirmed drifts above:
 - [ ] 8.2 Confirm PR idempotency: run analyze twice on the same drift — does it create a duplicate PR or reuse the existing one (per the SHA256 dedup logic found in the earlier audit)?
 - [ ] 8.3 **Low/Moderate risk merge:** confirm it merges without requiring `approvedBy`
 - [ ] 8.4 **Critical/High risk merge:** confirm it's blocked without `approvedBy`, succeeds with it
-- [ ] 8.5 Confirm `API_ACCESS_TOKEN` gating works — try merge/reject without the token header, confirm rejection
+- [ ] 8.5 Confirm session auth gating works — try merge/reject without a `session` cookie, confirm 401 `{"error":"unauthorized"}`
 - [ ] 8.6 Confirm `/api/merge-pr/reject` requires a `reason` of minimum length (per earlier audit finding) and logs `rejectedBy`
 - [ ] 8.7 Confirm audit trail entries are actually written to DynamoDB for: PR created, PR merged, PR rejected, reset
 - [ ] 8.8 Confirm merging does **NOT** run `terraform apply` — verify actual AWS state is unchanged after merge, only the reconciliation record updates (per the disclaimer added earlier)

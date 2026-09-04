@@ -155,7 +155,7 @@ class PendingAppliesRouteTests(unittest.TestCase):
             "single", called["single"] + 1
         )
         h._serve_pr_details = lambda: None
-        h._check_auth = lambda: True
+        h._require_api_auth = lambda **kw: True
         # do_GET may call other helpers; stub the ones we might touch.
         h._serve_injected = lambda: None
         h._serve_config = lambda: None
@@ -166,8 +166,8 @@ class PendingAppliesRouteTests(unittest.TestCase):
         h._serve_api_exceptions = lambda: None
         h._serve_static = lambda p: None
         # Auth gate at top of do_GET
-        real_check = getattr(h, "_check_auth", None)
-        serve._Handler._check_auth = lambda self: True
+        real_check = getattr(h, "_require_api_auth", None)
+        serve._Handler._require_api_auth = lambda self, **kw: True
         try:
             # Invoke only the pending-applies branch logic by calling do_GET
             # with stubs; if auth helpers differ, call the route block via

@@ -2,7 +2,8 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 
 /**
- * Requires a Supabase Auth session. Separate from the API-token AuthGuard —
+ * Requires a Supabase Auth session. Server API auth uses the session cookie
+ * issued by POST /api/login after sign-in.
  * both layers must pass for protected app routes.
  */
 export default function SessionGuard() {

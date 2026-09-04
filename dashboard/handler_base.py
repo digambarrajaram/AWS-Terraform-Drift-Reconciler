@@ -1,12 +1,17 @@
 """HTTP handler base: auth, routing, static file helpers."""
 from __future__ import annotations
 
+import hashlib
 import hmac
+import http.cookies
 import http.server
 import json
 import os
+import secrets
 import sys
 import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -37,6 +42,21 @@ _JWKS_CLIENT_LOCK = threading.Lock()
 _jwks_client: PyJWKClient | None = None
 _jwks_client_url: str | None = None
 _JWKS_CACHE_TTL_SEC = 600  # 10 minutes
+
+_SESSION_TTL_SEC = 3600
+_SESSION_COOKIE = "session"
+_CSRF_COOKIE = "csrf"
+_CSRF_HEADER = "X-CSRF-Token"
+
+# Public paths that skip session auth (UI shell + login bootstrap + static).
+_PUBLIC_EXACT = frozenset({"/login", "/api/login", "/api/config"})
+_PUBLIC_PREFIXES = ("/static/",)
+
+# In-memory sliding-window rate limit for auth endpoints (per client IP).
+_AUTH_RATE_LOCK = threading.Lock()
+_AUTH_RATE_HITS: dict[str, deque[float]] = defaultdict(deque)
+_AUTH_RATE_WINDOW_SEC = 60
+_AUTH_RATE_MAX = 20
 
 
 def _supabase_jwks_url() -> str | None:
@@ -89,6 +109,53 @@ def _decode_supabase_jwt(token: str) -> dict | None:
             return None
 
 
+def _session_secret() -> bytes:
+    """Return SESSION_SECRET bytes (required at startup — never empty here)."""
+    return os.environ["SESSION_SECRET"].strip().encode("utf-8")
+
+
+def _sign_session(user_id: str, exp: int) -> str:
+    """Build HMAC-signed session token: user_id.exp.sig."""
+    payload = f"{user_id}.{exp}"
+    sig = hmac.new(_session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_session_token(token: str) -> str | None:
+    """Validate session token; return user_id or None."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    user_id, exp_s, sig = parts
+    if not user_id or not exp_s or not sig:
+        return None
+    try:
+        exp = int(exp_s)
+    except ValueError:
+        return None
+    if exp < int(time.time()):
+        return None
+    expected = hmac.new(
+        _session_secret(), f"{user_id}.{exp}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return None
+    return user_id
+
+
+def _auth_rate_allow(ip: str) -> bool:
+    """Sliding-window rate limit for auth endpoints. True if request allowed."""
+    now = time.time()
+    with _AUTH_RATE_LOCK:
+        hits = _AUTH_RATE_HITS[ip]
+        while hits and hits[0] <= now - _AUTH_RATE_WINDOW_SEC:
+            hits.popleft()
+        if len(hits) >= _AUTH_RATE_MAX:
+            return False
+        hits.append(now)
+        return True
+
+
 class HandlerBase(http.server.SimpleHTTPRequestHandler):
     _CACHEABLE = {".js", ".css", ".png", ".svg", ".woff2"}
     _STATIC_EXTENSIONS = (
@@ -100,31 +167,80 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         self.auth_user_id: str | None = None
         super().__init__(*args, **kwargs)
 
-    def _check_auth(self) -> bool:
-        """Return True if the request is authorised.
+    def _client_ip(self) -> str:
+        # Prefer direct peer; X-Forwarded-For only when behind a trusted proxy.
+        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+        return self.client_address[0] if self.client_address else "unknown"
 
-        When ``API_ACCESS_TOKEN`` is not configured in the environment
-        every request passes (a warning is logged once at startup).
-        When it *is* configured the ``X-Api-Access-Token`` request
-        header must match, using a constant-time comparison."""
-        token = os.environ.get("API_ACCESS_TOKEN", "").strip()
+    def _parse_cookies(self) -> http.cookies.SimpleCookie:
+        raw = self.headers.get("Cookie") or ""
+        jar = http.cookies.SimpleCookie()
+        try:
+            jar.load(raw)
+        except http.cookies.CookieError:
+            pass
+        return jar
+
+    def _cookie_value(self, name: str) -> str:
+        jar = self._parse_cookies()
+        morsel = jar.get(name)
+        return morsel.value if morsel else ""
+
+    def _set_cookie(
+        self,
+        name: str,
+        value: str,
+        *,
+        max_age: int,
+        httponly: bool,
+    ) -> None:
+        # Secure+SameSite=Strict as required; reverse-proxy TLS terminates upstream.
+        flags = f"{name}={value}; Path=/; Max-Age={max_age}; SameSite=Strict; Secure"
+        if httponly:
+            flags += "; HttpOnly"
+        self.send_header("Set-Cookie", flags)
+
+    def _clear_cookie(self, name: str, *, httponly: bool) -> None:
+        flags = f"{name}=; Path=/; Max-Age=0; SameSite=Strict; Secure"
+        if httponly:
+            flags += "; HttpOnly"
+        self.send_header("Set-Cookie", flags)
+
+    def _is_public_path(self, path: str) -> bool:
+        if path in _PUBLIC_EXACT:
+            return True
+        if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+            return True
+        if path == "/static":
+            return True
+        # Static asset files (JS/CSS/fonts/images) — treat as /static allowlist.
+        if path.endswith(self._STATIC_EXTENSIONS) and not path.startswith("/api/"):
+            return True
+        return False
+
+    def _check_session(self) -> bool:
+        """Verify session cookie and attach ``auth_user_id``. Return True if valid."""
+        self.auth_user_id = None
+        token = self._cookie_value(_SESSION_COOKIE)
         if not token:
-            return True  # auth disabled — startup warning already printed
-        request_token = (self.headers.get("X-Api-Access-Token") or "").strip()
-        if not request_token:
             return False
-        return hmac.compare_digest(token, request_token)
+        user_id = _verify_session_token(token)
+        if not user_id:
+            return False
+        self.auth_user_id = user_id
+        return True
 
     def _check_jwt(self) -> bool:
         """Verify Supabase Auth JWT (ES256 via JWKS) and attach ``auth_user_id``.
 
-        When ``SUPABASE_URL`` is unset, JWT auth is disabled (same pattern as
-        ``API_ACCESS_TOKEN``). When set, ``Authorization: Bearer`` must
-        contain a valid ES256 JWT with ``aud`` = ``authenticated``.
+        Used by ``/api/login`` to exchange a valid Supabase credential for a
+        session cookie. Requires ``Authorization: Bearer`` with aud=authenticated.
         """
         self.auth_user_id = None
         if not _supabase_jwks_url():
-            return True  # JWT auth disabled — SUPABASE_URL not configured
+            return False
         auth_header = (self.headers.get("Authorization") or "").strip()
         if not auth_header.lower().startswith("bearer "):
             return False
@@ -140,17 +256,15 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         self.auth_user_id = sub
         return True
 
-    def _unauthorized(self) -> None:
-        body = json.dumps(
-            {"error": "Missing or invalid X-Api-Access-Token header"}
-        ).encode("utf-8")
-        self.send_response(401)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def _check_csrf(self) -> bool:
+        """Double-submit CSRF: cookie value must match request header."""
+        cookie_tok = self._cookie_value(_CSRF_COOKIE)
+        header_tok = (self.headers.get(_CSRF_HEADER) or "").strip()
+        if not cookie_tok or not header_tok:
+            return False
+        return hmac.compare_digest(cookie_tok, header_tok)
 
-    def _unauthorized_jwt(self) -> None:
+    def _unauthorized(self) -> None:
         body = json.dumps({"error": "unauthorized"}).encode("utf-8")
         self.send_response(401)
         self.send_header("Content-Type", "application/json")
@@ -158,19 +272,76 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _require_api_auth(self, *, require_jwt: bool = True) -> bool:
-        """API-token check, then optional Supabase JWT. Both must pass when enabled."""
-        if not self._check_auth():
+    def _forbidden_csrf(self) -> None:
+        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _rate_limited(self) -> None:
+        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _require_api_auth(self, *, require_csrf: bool = False) -> bool:
+        """Central session gate for /api/* — call before every API dispatch."""
+        if not self._check_session():
             self._unauthorized()
             return False
-        if require_jwt and not self._check_jwt():
-            self._unauthorized_jwt()
+        if require_csrf and not self._check_csrf():
+            self._forbidden_csrf()
             return False
         return True
 
+    def _handle_api_login(self) -> None:
+        """POST /api/login — verify Supabase JWT, issue session + CSRF cookies."""
+        if not _auth_rate_allow(self._client_ip()):
+            self._rate_limited()
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            body = {}
+
+        if isinstance(body, dict) and body.get("logout") is True:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._clear_cookie(_SESSION_COOKIE, httponly=True)
+            self._clear_cookie(_CSRF_COOKIE, httponly=False)
+            resp = b'{"ok":true}'
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+            return
+
+        if not self._check_jwt():
+            self._unauthorized()
+            return
+
+        assert self.auth_user_id is not None
+        exp = int(time.time()) + _SESSION_TTL_SEC
+        session_tok = _sign_session(self.auth_user_id, exp)
+        csrf_tok = secrets.token_urlsafe(32)
+
+        resp = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self._set_cookie(_SESSION_COOKIE, session_tok, max_age=_SESSION_TTL_SEC, httponly=True)
+        self._set_cookie(_CSRF_COOKIE, csrf_tok, max_age=_SESSION_TTL_SEC, httponly=False)
+        self.end_headers()
+        self.wfile.write(resp)
 
     def _ownership_enforced(self) -> bool:
-        """True when a verified Supabase user is attached (JWT auth active)."""
+        """True when a verified session user is attached."""
         return bool(self.auth_user_id)
 
     def _owned_scopes(self) -> set[str]:
@@ -219,13 +390,10 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
 
-        # Auth-gate API data endpoints — everything under /api/ returns
-        # infrastructure details, masked secrets, or exception entries.
-        # /api/config is exempt from JWT so the login page can bootstrap
-        # the Supabase client after the shared API token is present.
-        if path.startswith("/api/"):
-            require_jwt = path != "/api/config"
-            if not self._require_api_auth(require_jwt=require_jwt):
+        # Central session gate for every /api/* route (allowlist: /api/login,
+        # /api/config for login bootstrap — anon key is public by design).
+        if path.startswith("/api/") and not self._is_public_path(path):
+            if not self._require_api_auth():
                 return
 
         if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html", "/exceptions", "/exceptions.html", "/alerts", "/alerts.html", "/environments", "/environments.html"):
@@ -283,12 +451,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
 
         # GitHub webhook — authenticated by X-Hub-Signature-256, not the
-        # dashboard API token.  Must run BEFORE the _check_auth() gate.
+        # dashboard session.  Must run BEFORE the session gate.
         if path == "/api/webhooks/github":
             self._handle_github_webhook()
             return
 
-        if not self._require_api_auth():
+        if path == "/api/login":
+            self._handle_api_login()
+            return
+
+        if path.startswith("/api/") and not self._require_api_auth(require_csrf=True):
             return
 
         if path.startswith("/api/scan/") and path.endswith("/cancel"):
@@ -622,10 +794,16 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_PUT(self):
+        path = self.path.split("?")[0]
+        if path.startswith("/api/") and not self._require_api_auth(require_csrf=True):
+            return
+        self.send_error(404)
+
     def do_PATCH(self):
         path = self.path.split("?")[0]
 
-        if not self._require_api_auth():
+        if not self._require_api_auth(require_csrf=True):
             return
 
         if path.startswith("/api/environments/"):
@@ -637,7 +815,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
     def do_DELETE(self):
         path = self.path.split("?")[0]
 
-        if not self._require_api_auth():
+        if not self._require_api_auth(require_csrf=True):
             return
 
         if path.startswith("/api/environments/"):
@@ -647,7 +825,10 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def end_headers(self):
-        ext = os.path.splitext(self.path.split("?")[0])[1]
+        # Malformed requests (e.g. raw TLS on the HTTP port) may reach here
+        # before ``self.path`` is set — guard to avoid AttributeError.
+        path = getattr(self, "path", "") or ""
+        ext = os.path.splitext(path.split("?")[0])[1]
         if ext in self._CACHEABLE:
             self.send_header("Cache-Control", "public, max-age=86400")
         super().end_headers()

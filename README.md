@@ -190,9 +190,9 @@ An automated drift-detection pipeline that compares Terraform desired state agai
 | Structured scan results (mode banner, drift/unmanaged/security blocks, per-type PR links) | ✅ |
 | Structured error display (summary, suggestion, expandable details) | ✅ |
 | Shared environment selector component (`env-selector.js`) | ✅ |
-| API access token gating (`X-Api-Access-Token` header, constant-time check) | ✅ |
+| API session cookie auth (`session` HttpOnly cookie, CSRF double-submit) | ✅ |
 | Live execution log streaming (serialized poll — no overlapping abort races) | ✅ |
-| One-time browser token prompt with localStorage persistence | ✅ |
+| Server session issued at login (`POST /api/login`) | ✅ |
 
 ### Environments & credentials
 
@@ -325,7 +325,7 @@ Copy `.env.example` to `.env` and configure:
 | `PAGERDUTY_ROUTING_KEY` | PagerDuty alerts (legacy — can be managed via dashboard) |
 | `SLACK_WEBHOOK_URL` | Slack notifications (legacy — can be managed via dashboard) |
 | `AWS_REGION` | Default region |
-| `API_ACCESS_TOKEN` | Optional dashboard auth token (shared secret, `X-Api-Access-Token` header) |
+| `SESSION_SECRET` | Required HMAC secret for signed session cookies (min 32 chars) |
 | `DRIFT_CLONE_BASE` | Git clone directory (default: `~/.drift-clones`) |
 
 ### GitHub Actions

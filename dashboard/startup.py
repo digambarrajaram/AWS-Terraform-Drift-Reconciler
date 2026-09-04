@@ -39,18 +39,22 @@ def main() -> int:
     logger.info("AWS backend credential mode: %s", _backend_aws_credential_mode())
 
     # ── Auth gate ──────────────────────────────────────────────────
-    _api_token = os.environ.get("API_ACCESS_TOKEN", "").strip()
-    if not _api_token:
-        print("=" * 68)
-        print("WARNING: API_ACCESS_TOKEN is not set.")
-        print("The dashboard is running with NO authentication —")
-        print("anyone who can reach this port can trigger scans,")
-        print("execute rollbacks, and modify environments.")
-        print(f"Set API_ACCESS_TOKEN in .env and restart.")
-        print("=" * 68)
+    _session_secret = os.environ.get("SESSION_SECRET", "").strip()
+    if not _session_secret:
+        print("SESSION_SECRET must be set in .env (HMAC key for session cookies)")
+        return 1
+    if len(_session_secret) < 32:
+        print("SESSION_SECRET must be at least 32 characters")
+        return 1
+    os.environ["SESSION_SECRET"] = _session_secret
 
     parser = argparse.ArgumentParser(description="Serve the drift dashboard")
     parser.add_argument("--port", type=int, default=8080, help="Listen port")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default 127.0.0.1; use a reverse proxy for external access)",
+    )
     args = parser.parse_args()
 
     url = os.environ.get("SUPABASE_URL", "")
@@ -199,8 +203,10 @@ def main() -> int:
 
     _cleanup_old_logs()
 
-    print(f"Dashboard → http://localhost:{args.port}")
-    httpd = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), _Handler)
+    print(f"Dashboard → http://{args.host}:{args.port}")
+    if args.host in ("127.0.0.1", "localhost"):
+        print("Bound to loopback only — put a TLS reverse proxy in front for external access.")
+    httpd = http.server.ThreadingHTTPServer((args.host, args.port), _Handler)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

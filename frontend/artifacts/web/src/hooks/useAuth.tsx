@@ -10,10 +10,14 @@ import {
 import type { Session, User } from '@supabase/supabase-js';
 import { useAppConfig } from '@/api/config';
 import {
+  clearServerSession,
+  establishSession,
+  setSupabaseAccessToken,
+} from '@/api/apiFetch';
+import {
   getSupabaseClient,
   signOut as supabaseSignOut,
 } from '@/api/supabaseClient';
-import { setSupabaseAccessToken } from '@/api/apiFetch';
 
 interface AuthContextValue {
   session: Session | null;
@@ -23,6 +27,16 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+async function syncServerSession(accessToken: string | null): Promise<void> {
+  if (!accessToken) return;
+  setSupabaseAccessToken(accessToken);
+  try {
+    await establishSession();
+  } catch {
+    // Session cookie may already be valid, or login rate-limited — UI still works via JWT exchange retry.
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { data: config, isLoading: configLoading } = useAppConfig();
@@ -36,7 +50,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     if (!config) {
-      // Config not available yet (e.g. API token still required).
       setSession(null);
       setSupabaseAccessToken(null);
       setLoading(false);
@@ -46,11 +59,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const client = getSupabaseClient(config);
     let cancelled = false;
 
-    client.auth.getSession().then(({ data }) => {
+    client.auth.getSession().then(async ({ data }) => {
       if (cancelled) return;
       setSession(data.session);
       setSupabaseAccessToken(data.session?.access_token ?? null);
-      setLoading(false);
+      if (data.session?.access_token) {
+        await syncServerSession(data.session.access_token);
+      }
+      if (!cancelled) setLoading(false);
     });
 
     const {
@@ -58,6 +74,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } = client.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setSupabaseAccessToken(nextSession?.access_token ?? null);
+      if (nextSession?.access_token) {
+        void syncServerSession(nextSession.access_token);
+      }
       setLoading(false);
     });
 
@@ -68,6 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [config, configLoading]);
 
   const signOut = useCallback(async () => {
+    await clearServerSession();
     if (!config) {
       setSession(null);
       setSupabaseAccessToken(null);

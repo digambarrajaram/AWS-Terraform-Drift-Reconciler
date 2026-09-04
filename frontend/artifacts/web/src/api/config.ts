@@ -7,8 +7,8 @@ export interface AppConfig {
   githubRepo?: string;  // e.g. "owner/repo" — used to build GitHub PR links
 }
 
-// apiFetch (not bare fetch) so the X-Api-Access-Token header is sent —
-// serve.py auth-gates every /api/* route when API_ACCESS_TOKEN is set.
+// apiFetch (not bare fetch) so credentials (session cookie) are sent —
+// serve.py auth-gates every /api/* route except the public allowlist.
 async function fetchConfig(): Promise<AppConfig> {
   return apiFetch<AppConfig>('/config');
 }

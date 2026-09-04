@@ -63,7 +63,7 @@ pip install -r requirements.txt
 # ── 3. Start (after .env is in place) ──────────────────────────────────
 echo
 echo "Setup complete."
-echo "1. Copy your .env (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, API_ACCESS_TOKEN,"
+echo "1. Copy your .env (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SESSION_SECRET,"
 echo "   GITHUB_TOKEN, GITHUB_REPO, LLM keys) into: $REPO_ROOT/.env"
 echo "2. Start the dashboard:"
 echo "   source .venv/bin/activate && python dashboard/serve.py --port 8080"

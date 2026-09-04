@@ -296,14 +296,18 @@ All endpoints are served by `dashboard/serve.py` on `http://localhost:8080`.
 
 ### Authentication
 
-When `API_ACCESS_TOKEN` is set in `.env`, all `/api/*` endpoints require the header:
-```
-X-Api-Access-Token: <token>
-```
+`SESSION_SECRET` (min 32 chars) is **required** at startup. All `/api/*` endpoints require a valid HMAC-signed `session` cookie (`user_id.exp.sig`, TTL 1 hour, `HttpOnly; Secure; SameSite=Strict`), except the public allowlist:
 
-The comparison uses `hmac.compare_digest` (constant-time). When `API_ACCESS_TOKEN` is empty/unset, auth is disabled (a warning is printed at startup).
+- `POST /api/login` — verify Supabase JWT (`Authorization: Bearer`), issue session + CSRF cookies (no token in body)
+- `GET /api/config` — login bootstrap (anon key only)
+- `POST /api/webhooks/github` — GitHub HMAC signature (not session)
+- `/login`, `/static/*`, and static asset extensions
 
-**Frontend behavior**: `auth.js` prompts the user once for the token, stores it in `localStorage` under key `drift_api_token`, and exposes `window._authHeaders()` which returns `{}` or `{"X-Api-Access-Token": token}`.
+Unauthenticated API calls return `401 {"error":"unauthorized"}`.
+
+State-changing methods (`POST` / `PUT` / `PATCH` / `DELETE`) also require CSRF double-submit: readable `csrf` cookie must match `X-CSRF-Token` header.
+
+**Frontend behavior**: after Supabase sign-in, call `POST /api/login` with the Bearer JWT; send `credentials: "include"` on all `/api/*` fetches and attach `X-CSRF-Token` on mutations.
 
 ### Static / Page Serving
 
@@ -1246,7 +1250,7 @@ Likely handles PR preview/draft scanning on PR open.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `API_ACCESS_TOKEN` | (empty = auth disabled) | Dashboard API auth |
+| `SESSION_SECRET` | (required, min 32 chars) | HMAC secret for session cookies |
 | `GITHUB_BASE_BRANCH` | `main` | Base branch for PRs |
 | `PAGERDUTY_ROUTING_KEY` | (empty) | Fallback if not in Supabase |
 | `SLACK_WEBHOOK_URL` | (empty) | Fallback if not in Supabase |
@@ -1363,11 +1367,10 @@ The new frontend should maintain this pattern or use a lightweight store.
 ### Authentication Integration
 
 The frontend must:
-1. Include `auth.js` (or equivalent)
-2. Call `window._authHeaders()` before every `/api/*` fetch
-3. Merge the returned headers: `Object.assign({}, _authHeaders(), { "Content-Type": "application/json" })`
-4. The `auth.js` script handles the one-time prompt + localStorage persistence
-5. Supabase direct queries use the anon key (via `window.supabase.createClient(url, anonKey)`) — no auth header needed for reads
+1. After Supabase sign-in, `POST /api/login` with `Authorization: Bearer <access_token>` to receive session + CSRF cookies
+2. Send `credentials: "include"` on every `/api/*` fetch
+3. On `POST`/`PUT`/`PATCH`/`DELETE`, send `X-CSRF-Token` matching the `csrf` cookie (legacy pages: `window._authHeaders()`)
+4. Supabase direct queries use the anon key (via `window.supabase.createClient(url, anonKey)`) — no session header needed for those reads
 
 ### Error Handling Patterns
 
@@ -1375,7 +1378,7 @@ The frontend must:
 2. **409 Conflict**: Indicates a scan/rollback is already running — show the existing run ID with a link
 3. **502 Bad Gateway**: Supabase is unreachable — show a "database unreachable" message with retry
 4. **Supabase query errors**: Check `error` in `{ data, error }` response, show message
-5. **401 Unauthorized**: Token is missing/invalid — re-prompt (clear localStorage `drift_api_token`)
+5. **401 Unauthorized**: Session cookie missing/invalid — redirect to `/login`
 
 ### Realtime & Polling
 

@@ -38,7 +38,7 @@ These must be set for a working deployment (cross-checked against `.env.example`
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend service-role key (server-side DB access) |
 | `SUPABASE_ANON_KEY` | Public anon key (injected to frontend via `/api/config`) |
-| `API_ACCESS_TOKEN` | Shared secret; required header `X-Api-Access-Token` on `/api/*` when set |
+| `SESSION_SECRET` | HMAC key for signed session cookies (min 32 chars; required) |
 
 ### AWS
 
@@ -78,8 +78,8 @@ SUPABASE_URL="https://xxxxxxxxxxxx.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY="eyJ..."
 SUPABASE_ANON_KEY="eyJ..."
 
-# API access control (strongly recommended in production)
-API_ACCESS_TOKEN="generate-a-long-random-string"
+# Session auth (required)
+SESSION_SECRET="generate-a-long-random-string-at-least-32-chars"
 
 # LLM — set one
 GROQ_API_KEY=""
@@ -134,13 +134,13 @@ docker run -d \
   --name drift-reconciler \
   --restart unless-stopped \
   --env-file /home/ubuntu/drift-reconciler/.env \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   <dockerhub-username>/drift-reconciler:<tag>
 ```
 
 `--restart unless-stopped` keeps the service up across EC2 reboots.
 
-Open `http://<ec2-public-ip>:8080` (or your TLS proxy URL).
+Open your TLS proxy URL (or `http://127.0.0.1:8080` on the host). Do not publish `0.0.0.0:8080` on the EC2 security group unless a reverse proxy is handling TLS and access control.
 
 ### Optional: persist git clones across restarts
 
@@ -155,7 +155,7 @@ docker run -d \
   --env-file /home/ubuntu/drift-reconciler/.env \
   -e DRIFT_CLONE_BASE=/var/lib/drift-clones \
   -v /home/ubuntu/drift-reconciler/clones:/var/lib/drift-clones \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   <dockerhub-username>/drift-reconciler:<tag>
 ```
 
@@ -177,17 +177,52 @@ Scan/rollback subprocess logs are also written ephemerally under `/tmp/drift-log
 
 The image `HEALTHCHECK` calls **`GET /api/config`** on port 8080.
 
-- JWT is **not** required for this endpoint.
-- When `API_ACCESS_TOKEN` is set, Docker passes `X-Api-Access-Token` from the container environment (supplied via `--env-file`).
+- `/api/config` is on the public allowlist (login bootstrap; returns the anon key only).
 - Returns **200** when `SUPABASE_URL` and `SUPABASE_ANON_KEY` are configured; **503** if not.
 
 Manual check from the EC2 host:
 
 ```bash
-source /home/ubuntu/drift-reconciler/.env
-curl -fsS -H "X-Api-Access-Token: ${API_ACCESS_TOKEN}" \
-  http://127.0.0.1:8080/api/config
+curl -fsS http://127.0.0.1:8080/api/config
 ```
+
+---
+
+## 7b. Bind address & reverse proxy
+
+Bare-metal `python dashboard/serve.py` binds **`127.0.0.1:8080` by default** so the dashboard is not reachable from other hosts. Put a TLS reverse proxy on the same machine in front of it.
+
+The Docker image listens on **`0.0.0.0:8080` inside the container** (required for `-p` publish). Prefer binding the host publish to loopback and proxying locally:
+
+```bash
+docker run -d \
+  --name drift-reconciler \
+  --restart unless-stopped \
+  --env-file /home/ubuntu/drift-reconciler/.env \
+  -p 127.0.0.1:8080:8080 \
+  <dockerhub-username>/drift-reconciler:<tag>
+```
+
+Example nginx upstream (TLS termination + proxy to loopback):
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name drift.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Session cookies are `HttpOnly; Secure; SameSite=Strict`. Clients must reach the app over HTTPS (or localhost) so the browser will store/send them.
+
+Auth model: after Supabase sign-in the UI calls `POST /api/login` with `Authorization: Bearer <jwt>`; the server verifies the JWT and sets a 1-hour HMAC-signed `session` cookie. State-changing requests also require double-submit CSRF (`csrf` cookie + `X-CSRF-Token` header).
 
 ---
 
@@ -204,7 +239,7 @@ docker run -d \
   --name drift-reconciler \
   --restart unless-stopped \
   --env-file /home/ubuntu/drift-reconciler/.env \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   <dockerhub-username>/drift-reconciler:<new-tag>
 ```
 

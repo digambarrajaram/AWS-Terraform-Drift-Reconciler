@@ -1,23 +1,3 @@
-import { useAuthStore } from '@/hooks/useAuthStore';
-
-export const TOKEN_KEY = 'drift_api_token';
-
-// ---------------------------------------------------------------------------
-// Token helpers
-// ---------------------------------------------------------------------------
-
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-export function saveToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token);
-}
-
-export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
-}
-
 // Module-level Supabase access token — synced by AuthProvider.
 let supabaseAccessToken: string | null = null;
 
@@ -27,6 +7,32 @@ export function setSupabaseAccessToken(token: string | null): void {
 
 export function getSupabaseAccessToken(): string | null {
   return supabaseAccessToken;
+}
+
+function getCsrfToken(): string | null {
+  if (typeof document === 'undefined') return null;
+  const match = document.cookie.match(/(?:^|; )csrf=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+/** Exchange Supabase JWT for HttpOnly session + CSRF cookies. */
+export async function establishSession(): Promise<void> {
+  await apiFetch<{ ok: boolean }>('/login', {
+    method: 'POST',
+    body: '{}',
+  });
+}
+
+/** Clear server session cookies. */
+export async function clearServerSession(): Promise<void> {
+  try {
+    await apiFetch<{ ok: boolean }>('/login', {
+      method: 'POST',
+      body: JSON.stringify({ logout: true }),
+    });
+  } catch {
+    // Best-effort — local sign-out still proceeds.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -53,9 +59,10 @@ export class ApiError extends Error {
  * Wraps fetch() for /api/* calls:
  *  - Prefixes path with /api
  *  - Injects Content-Type: application/json
- *  - Injects X-Api-Access-Token from localStorage (when present)
- *  - Injects Authorization: Bearer <supabase access token> (when present)
- *  - On 401: distinguishes JWT failure ("unauthorized") from API-token failure
+ *  - Sends credentials (session + CSRF cookies)
+ *  - Injects Authorization: Bearer <supabase access token> (for /api/login)
+ *  - Injects X-CSRF-Token on state-changing methods (double-submit)
+ *  - On 401: {"error":"unauthorized"}
  *  - On !ok: parses { error, run_id? } and throws ApiError
  *  - On success: returns parsed JSON as T
  */
@@ -63,41 +70,42 @@ export async function apiFetch<T = unknown>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const token = getToken();
   const supabaseToken = getSupabaseAccessToken();
+  const method = (init.method || 'GET').toUpperCase();
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(init.headers as Record<string, string> | undefined),
   };
 
-  if (token) {
-    headers['X-Api-Access-Token'] = token;
-  }
   if (supabaseToken) {
     headers['Authorization'] = `Bearer ${supabaseToken}`;
   }
 
-  const res = await fetch(`/api${path}`, { ...init, headers });
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    const csrf = getCsrfToken();
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+  }
+
+  const res = await fetch(`/api${path}`, {
+    ...init,
+    headers,
+    credentials: 'include',
+  });
 
   if (res.status === 401) {
-    let message = 'Unauthorized — token required or invalid';
-    let jwtUnauthorized = false;
+    let message = 'Unauthorized — session required or invalid';
     try {
       const body = (await res.json()) as { error?: string };
-      if (body.error === 'unauthorized') {
-        jwtUnauthorized = true;
-        message = 'Unauthorized — session required or invalid';
-      } else if (body.error) {
-        message = body.error;
+      if (body.error) {
+        message = body.error === 'unauthorized'
+          ? 'Unauthorized — session required or invalid'
+          : body.error;
       }
     } catch {
       // body is not JSON
-    }
-
-    if (!jwtUnauthorized) {
-      clearToken();
-      useAuthStore.getState().setNeedsToken(true);
     }
 
     throw new ApiError(message, 401);
@@ -116,5 +124,9 @@ export async function apiFetch<T = unknown>(
     throw new ApiError(message, res.status, runId);
   }
 
-  return res.json() as Promise<T>;
+  const text = await res.text();
+  if (!text) {
+    return undefined as T;
+  }
+  return JSON.parse(text) as T;
 }

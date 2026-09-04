@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import logging
 import os
 import sys
 import threading
@@ -13,6 +14,8 @@ import requests
 from dashboard.paths import _REPO_ROOT, _DASHBOARD_DIR
 from dashboard.process_runner import _cleanup_old_logs
 from dashboard.supabase_http import _supabase_headers
+
+logger = logging.getLogger(__name__)
 
 def _load_env() -> None:
     env_path = _REPO_ROOT / ".env"
@@ -30,6 +33,10 @@ def _load_env() -> None:
 def main() -> int:
     from dashboard.serve import _Handler  # composed handler facade
     _load_env()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    from drift_reconciler.environment_credentials import _backend_aws_credential_mode
+    logger.info("AWS backend credential mode: %s", _backend_aws_credential_mode())
 
     # ── Auth gate ──────────────────────────────────────────────────
     _api_token = os.environ.get("API_ACCESS_TOKEN", "").strip()

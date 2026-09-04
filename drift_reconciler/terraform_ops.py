@@ -12,7 +12,7 @@ from terraform_errors import humanize_terraform_error
 
 def _terraform_sub_env_for_scope(scope: str) -> dict:
     """Return a subprocess env with *scope*'s AWS credentials injected
-    (role/keys via ``_resolve_env_credentials``), or a plain os.environ
+    (role via ``_resolve_env_credentials`` / AssumeRole), or a plain os.environ
     copy when the environment row can't be fetched — falling back to the
     server's ambient credentials exactly like before."""
     import requests as _requests

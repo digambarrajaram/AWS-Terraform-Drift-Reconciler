@@ -34,16 +34,17 @@ class DriftPRError(RuntimeError):
 def _resolve_github_client(account_label: str):
     """Return (github_client, repo, base_branch) for *account_label*.
 
-    Prefers the environment row's repo_url + environment_secrets.github_token
-    when both resolve; falls back to the global GITHUB_TOKEN/GITHUB_REPO env
-    vars (legacy / default environments).  Returns (None, None, "main") when
-    nothing resolves."""
+    Requires the environment row's repo_url + environment_secrets.github_token
+    to be configured; no shared .env fallback is allowed."""
     repo_slug, token, branch = resolve_repo_target(account_label)
     if token and repo_slug:
         auth = Auth.Token(token)
         g = Github(auth=auth)
         return g, g.get_repo(repo_slug), branch
-    return None, None, "main"
+    raise RuntimeError(
+        f"GitHub token not configured for environment '{account_label}' — "
+        "set repo_url and github_token in environment settings."
+    )
 
 UNPATCHABLE_BLOCK_FIELDS = {
     "aws_security_group": {"ingress", "egress"},
@@ -64,9 +65,8 @@ def merge_pr(account_label: str, pr_number: int, commit_message: str | None = No
     repo_slug, token, _branch = resolve_repo_target(account_label)
     if not repo_slug or not token:
         raise RuntimeError(
-            f"No GitHub client could be resolved for account_label='{account_label}' — "
-            f"neither the environment row nor the global GITHUB_TOKEN/GITHUB_REPO "
-            f"env vars are configured."
+            f"GitHub token not configured for environment '{account_label}' — "
+            "set repo_url and github_token in environment settings."
         )
 
     auth = Auth.Token(token)
@@ -102,9 +102,8 @@ def close_pr(account_label: str, pr_number: int) -> None:
     repo_slug, token, _branch = resolve_repo_target(account_label)
     if not repo_slug or not token:
         raise RuntimeError(
-            f"No GitHub client could be resolved for account_label='{account_label}' — "
-            f"neither the environment row nor the global GITHUB_TOKEN/GITHUB_REPO "
-            f"env vars are configured."
+            f"GitHub token not configured for environment '{account_label}' — "
+            "set repo_url and github_token in environment settings."
         )
 
     auth = Auth.Token(token)
@@ -247,10 +246,8 @@ def create_drift_pr(
     g, repo, env_branch = _resolve_github_client(account_label)
     if g is None or repo is None:
         raise RuntimeError(
-            "No GitHub client could be resolved for "
-            f"account_label='{account_label}' — neither the environment row "
-            "(repo_url + environment_secrets.github_token) nor the global "
-            "GITHUB_TOKEN/GITHUB_REPO env vars are configured."
+            f"GitHub token not configured for environment '{account_label}' — "
+            "set repo_url and github_token in environment settings."
         )
 
     base_branch = base_branch or env_branch

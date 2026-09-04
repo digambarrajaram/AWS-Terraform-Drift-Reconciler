@@ -26,8 +26,6 @@ export function useEnvironments() {
 type EnvPayload = Partial<Omit<Environment, 'id' | 'is_active'>> & {
   slug?:                    string;
   _github_token?:           string;
-  _aws_access_key_id?:      string;
-  _aws_secret_access_key?:  string;
 };
 
 export function useCreateEnvironment() {

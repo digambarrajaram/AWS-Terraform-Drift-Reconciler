@@ -12,15 +12,11 @@ def trigger_pagerduty_alert(summary: str, severity: str = "error", source: str =
     try:
         from notification_config import get_notification_secrets
         secrets = get_notification_secrets()
-        key = (secrets.get("pagerduty_routing_key") or "").strip()
-        if key:
-            routing_key = key
+        routing_key = (secrets.get("pagerduty_routing_key") or "").strip()
     except Exception:
         pass
     if not routing_key:
-        routing_key = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip()
-    if not routing_key:
-        print("[ERROR] PAGERDUTY_ROUTING_KEY is empty!")
+        print("[ERROR] PagerDuty routing key not configured in notification_secrets — skipping alert")
         return {}
 
     if account_label:

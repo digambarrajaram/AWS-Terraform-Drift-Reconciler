@@ -81,8 +81,7 @@ class GitHubMixin:
         approval.  Everything else is a silent 204 no-op.
 
         Authenticated by X-Hub-Signature-256 (HMAC-SHA256 over the raw
-        body) using the environment's webhook_secret, or the global GitHub
-        token (GITHUB_TOKEN env or app_settings.github_token) as fallback.
+        body) using the environment's configured webhook_secret.
 
         If no environment matches the repo, or signature verification fails,
         returns 401 Unauthorized (same response for both, to avoid leaking
@@ -125,7 +124,7 @@ class GitHubMixin:
         try:
             resp = requests.get(
                 f"{url_base}/rest/v1/environments"
-                f"?select=id,slug,repo_url&is_active=eq.true&repo_url=not.is.null",
+                f"?select=id,slug,repo_url,user_id&is_active=eq.true&repo_url=not.is.null",
                 headers=headers_auth,
                 timeout=10,
             )
@@ -163,18 +162,9 @@ class GitHubMixin:
         except requests.RequestException:
             pass
 
-        # Fall back to global GITHUB_TOKEN if no webhook_secret set
+        # Webhook verification must use the environment's configured secret.
+        # No global GitHub token fallback is allowed.
         if not webhook_secret:
-            webhook_secret = os.environ.get("GITHUB_TOKEN", "").strip()
-            if not webhook_secret:
-                try:
-                    from drift_reconciler.github_settings import get_github_token
-                    webhook_secret = (get_github_token() or "").strip()
-                except Exception:
-                    webhook_secret = ""
-        
-        if not webhook_secret:
-            # No secret available for verification
             self._json_error(401, "Unauthorized")
             return
 
@@ -267,6 +257,7 @@ class GitHubMixin:
                     "pr_type": pr_type,
                     "merged_at": merged_at,
                     "merge_commit_sha": merge_commit_sha or None,
+                    **({"user_id": resolved_env["user_id"]} if resolved_env.get("user_id") else {}),
                 },
                 timeout=10,
             )

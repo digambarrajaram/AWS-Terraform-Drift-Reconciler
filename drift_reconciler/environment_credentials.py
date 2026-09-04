@@ -1,12 +1,11 @@
 """
-Build a boto3 Session for an environment, resolving credentials from
-the new auth_type/aws_role_arn/environment_secrets columns, or falling
-back to the legacy aws_profile column for backward compatibility.
+Build a boto3 Session for an environment via STS AssumeRole only.
 
 Service-role only — the environment_secrets table has zero anon RLS
 policies, same pattern as notification_secrets.
 """
 
+import logging
 import os
 import subprocess
 from typing import Any
@@ -21,6 +20,36 @@ except ImportError:
     from env_loader import load_env
 load_env()
 
+logger = logging.getLogger(__name__)
+
+
+def _backend_aws_credential_mode() -> str:
+    """Return the backend AWS credential mode for the STS base identity."""
+    access_key = os.environ.get("DRIFT_BACKEND_AWS_ACCESS_KEY_ID", "").strip()
+    secret_key = os.environ.get("DRIFT_BACKEND_AWS_SECRET_ACCESS_KEY", "").strip()
+    if access_key and secret_key:
+        return "explicit backend keys"
+    return "default credential chain (instance role or ambient)"
+
+
+def _build_backend_sts_client(region_name: str):
+    """Create the STS client for the backend identity.
+
+    Use explicit static keys when provided; otherwise let boto3 resolve the
+    ambient/default credential chain so EC2 instance-role deployments still work
+    with zero code changes.
+    """
+    access_key = os.environ.get("DRIFT_BACKEND_AWS_ACCESS_KEY_ID", "").strip()
+    secret_key = os.environ.get("DRIFT_BACKEND_AWS_SECRET_ACCESS_KEY", "").strip()
+    if access_key and secret_key:
+        return boto3.client(
+            "sts",
+            region_name=region_name,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+        )
+    return boto3.client("sts", region_name=region_name)
+
 _URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
 _KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 _HEADERS = {
@@ -30,31 +59,29 @@ _HEADERS = {
 
 
 def _resolve_env_credentials(environment: dict) -> dict:
-    """Return a subprocess env dict with *environment*'s AWS credentials
-    injected, for terraform-CLI subprocess calls.
+    """Return a subprocess env dict with *environment*'s AssumeRole
+    credentials injected for terraform-CLI subprocess calls.
 
-    auth_type 'role'/'keys' → ``get_aws_session()`` credentials injected as
-    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN, with
-    AWS_PROFILE removed (a stale named profile would break session auth).
-    auth_type 'profile'/unset → plain ``os.environ`` copy — AWS_PROFILE
-    passthrough (serve.py's ``_configure_aws_env`` already set it at spawn).
+    Always uses ``get_aws_session()`` (role-only). Temporary session
+    credentials are injected as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+    AWS_SESSION_TOKEN, and AWS_PROFILE is removed so a stale named profile
+    cannot override the assumed role.
 
-    Raises RuntimeError when get_aws_session fails for role/keys auth."""
+    Raises RuntimeError when AssumeRole or account verification fails.
+    """
     env = os.environ.copy()
-    auth_type = (environment.get("auth_type") or "").strip()
-    if auth_type in ("role", "keys"):
-        session = get_aws_session(environment)
-        creds = session.get_credentials()
-        if creds is None:
-            raise RuntimeError(
-                f"get_aws_session returned no credentials for "
-                f"environment '{environment.get('slug', 'unknown')}'."
-            )
-        env["AWS_ACCESS_KEY_ID"] = creds.access_key
-        env["AWS_SECRET_ACCESS_KEY"] = creds.secret_key
-        if creds.token:
-            env["AWS_SESSION_TOKEN"] = creds.token
-        env.pop("AWS_PROFILE", None)
+    session = get_aws_session(environment)
+    creds = session.get_credentials()
+    if creds is None:
+        raise RuntimeError(
+            f"get_aws_session returned no credentials for "
+            f"environment '{environment.get('slug', 'unknown')}'."
+        )
+    env["AWS_ACCESS_KEY_ID"] = creds.access_key
+    env["AWS_SECRET_ACCESS_KEY"] = creds.secret_key
+    if creds.token:
+        env["AWS_SESSION_TOKEN"] = creds.token
+    env.pop("AWS_PROFILE", None)
     if environment.get("region"):
         env["AWS_REGION"] = environment["region"]
     return env
@@ -69,7 +96,7 @@ def _fetch_environment_secrets(environment_id: str) -> dict[str, Any]:
     try:
         resp = requests.get(
             f"{_URL}/rest/v1/environment_secrets"
-            f"?select=aws_access_key_id,aws_secret_access_key,github_token"
+            f"?select=github_token"
             f"&environment_id=eq.{environment_id}",
             headers=_HEADERS,
             timeout=10,
@@ -83,95 +110,96 @@ def _fetch_environment_secrets(environment_id: str) -> dict[str, Any]:
 
 
 def get_aws_session(environment: dict) -> boto3.Session:
-    """Return a boto3 Session for *environment*.
+    """Return a boto3 Session for *environment* via STS AssumeRole.
 
     *environment* must be a dict with the shape of a row from the
-    ``environments`` table (all columns returned by a ``select *``
-    query, as cached by ``serve.py._get_active_environments``).
+    ``environments`` table (``select *``).
 
-    Credential resolution, in order:
+    After AssumeRole succeeds, calls ``sts.get_caller_identity()`` with the
+    temporary credentials and verifies the Account matches
+    ``environments.aws_account_id``. Mismatch raises RuntimeError and blocks
+    Terraform execution.
 
-    1. ``auth_type == 'role'``  → STS AssumeRole with the stored ARN.
-    2. ``auth_type == 'keys'``  → static access key from environment_secrets.
-    3. No auth_type (legacy)    → boto3 profile from ``aws_profile`` column.
+    This is the single credential-resolution entry point — call sites must
+    not reimplement AssumeRole.
     """
     slug = environment.get("slug", "unknown")
     region = environment.get("region", "us-east-1")
+    expected_account = (environment.get("aws_account_id") or "").strip()
+    role_arn = (environment.get("aws_role_arn") or "").strip()
+    external_id = (environment.get("aws_external_id") or "").strip()
 
-    auth_type = (environment.get("auth_type") or "").strip()
-
-    if auth_type == "role":
-        role_arn = (environment.get("aws_role_arn") or "").strip()
-        if not role_arn:
-            raise RuntimeError(
-                f"Environment '{slug}' has auth_type='role' but aws_role_arn is empty."
-            )
-        try:
-            sts_client = boto3.client("sts", region_name=region)
-            assume_kwargs: dict[str, Any] = {
-                "RoleArn": role_arn,
-                "RoleSessionName": f"drift-reconciler-{slug}",
-            }
-            external_id = (environment.get("aws_external_id") or "").strip()
-            if external_id:
-                assume_kwargs["ExternalId"] = external_id
-            assumed = sts_client.assume_role(**assume_kwargs)
-            creds = assumed["Credentials"]
-            return boto3.Session(
-                aws_access_key_id=creds["AccessKeyId"],
-                aws_secret_access_key=creds["SecretAccessKey"],
-                aws_session_token=creds["SessionToken"],
-                region_name=region,
-            )
-        except (botocore.exceptions.ClientError,
-                botocore.exceptions.BotoCoreError,
-                KeyError) as exc:
-            raise RuntimeError(
-                f"Failed to assume IAM role for environment '{slug}' "
-                f"(auth_type=role, role_arn={role_arn}): {exc}"
-            ) from exc
-
-    if auth_type == "keys":
-        env_id = environment.get("id")
-        if not env_id:
-            raise RuntimeError(
-                f"Environment '{slug}' has auth_type='keys' but no id — "
-                f"cannot look up environment_secrets."
-            )
-        secrets = _fetch_environment_secrets(env_id)
-        access_key = (secrets.get("aws_access_key_id") or "").strip()
-        secret_key = (secrets.get("aws_secret_access_key") or "").strip()
-        if not access_key or not secret_key:
-            raise RuntimeError(
-                f"Environment '{slug}' has auth_type='keys' but "
-                f"environment_secrets.aws_access_key_id or "
-                f"aws_secret_access_key is missing."
-            )
-        return boto3.Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
+    if not role_arn:
+        raise RuntimeError(
+            f"Environment '{slug}' has no aws_role_arn — "
+            f"AssumeRole is the only supported AWS auth method."
+        )
+    if not expected_account:
+        raise RuntimeError(
+            f"Environment '{slug}' has no aws_account_id — "
+            f"cannot verify assumed-role account."
         )
 
-    # -- Transitional fallback: environments created before the auth_type
-    #    migration (scope-a, scope-b, scope-c, etc.) rely on the legacy
-    #    aws_profile column.  Remove this branch once all environments
-    #    have been migrated to an explicit auth_type.
-    profile = (environment.get("aws_profile") or "").strip()
-    if profile:
-        try:
-            return boto3.Session(profile_name=profile, region_name=region)
-        except botocore.exceptions.ProfileNotFound as exc:
-            raise RuntimeError(
-                f"AWS named profile '{profile}' not found for environment "
-                f"'{slug}'.  Create it in ~/.aws/config, or update this "
-                f"environment's auth_type to 'role' or 'keys'."
-            ) from exc
+    assume_kwargs: dict[str, str] = {
+        "RoleArn": role_arn,
+        "RoleSessionName": f"drift-reconciler-{slug}",
+    }
+    if external_id:
+        assume_kwargs["ExternalId"] = external_id
 
-    raise RuntimeError(
-        f"Environment '{slug}' has no auth_type, no aws_profile, and no "
-        f"credential configuration — cannot build an AWS session."
-    )
+    try:
+        sts_client = _build_backend_sts_client(region)
+        assumed = sts_client.assume_role(**assume_kwargs)
+        creds = assumed["Credentials"]
+        session = boto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=region,
+        )
+    except (botocore.exceptions.ClientError,
+            botocore.exceptions.BotoCoreError,
+            KeyError) as exc:
+        logger.warning(
+            "AssumeRole failed for environment '%s' (role_arn=%s): %s",
+            slug,
+            role_arn,
+            exc,
+        )
+        raise RuntimeError(
+            f"Failed to assume IAM role for environment '{slug}'. "
+            f"Check the role ARN, trust policy, and external ID (if used)."
+        ) from exc
+
+    try:
+        identity = session.client("sts", region_name=region).get_caller_identity()
+        actual_account = (identity.get("Account") or "").strip()
+    except (botocore.exceptions.ClientError,
+            botocore.exceptions.BotoCoreError) as exc:
+        logger.warning(
+            "get_caller_identity failed after AssumeRole for environment '%s': %s",
+            slug,
+            exc,
+        )
+        raise RuntimeError(
+            f"Assumed role for environment '{slug}' but could not verify the "
+            f"AWS account — refusing to run Terraform."
+        ) from exc
+
+    if actual_account != expected_account:
+        logger.warning(
+            "Assumed-role account mismatch for environment '%s': "
+            "expected aws_account_id=%s, get_caller_identity returned %s",
+            slug,
+            expected_account,
+            actual_account,
+        )
+        raise RuntimeError(
+            f"Assumed-role account mismatch for environment '{slug}': "
+            f"configured aws_account_id does not match the assumed role's account."
+        )
+
+    return session
 
 
 # ── Git clone / tf_dir resolution ────────────────────────────────────
@@ -253,7 +281,7 @@ def resolve_tf_dir(environment: dict) -> str:
     git_dir = os.path.join(clone_path, ".git")
     needs_clone = not os.path.isdir(git_dir)
 
-    # Build the clone URL — inject token if auth_type == 'token'.
+    # Build the clone URL — inject token if git_auth_type == 'token'.
     url = repo_url
     git_auth = (environment.get("git_auth_type") or "").strip()
     if git_auth == "token":

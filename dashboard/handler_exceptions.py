@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from dashboard.env import _get_valid_scopes
 from dashboard.exceptions_policy import _validate_exception_entry_local
 
 
@@ -23,8 +22,7 @@ class ExceptionsMixin:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         scope_raw = params.get("scope", [None])[0]
-        if not scope_raw or scope_raw not in _get_valid_scopes():
-            self._json_error(400, "Invalid or missing scope. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
+        if not self._require_owned_scope(scope_raw or ""):
             return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -67,8 +65,7 @@ class ExceptionsMixin:
             return
 
         scope = body.get("scope", "")
-        if scope not in _get_valid_scopes():
-            self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
+        if not self._require_owned_scope(scope):
             return
 
         exception_type = body.get("exception_type", "")

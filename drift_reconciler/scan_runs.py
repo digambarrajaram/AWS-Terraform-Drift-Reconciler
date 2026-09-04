@@ -39,12 +39,22 @@ def report_stage(run_id: str | None, stage_name: str) -> None:
     update_scan_run(run_id, current_stage=stage_name)
 
 
-def create_scan_run(scope: str, unmanaged_flag: bool = False, scan_type: str | None = None) -> str:
+def create_scan_run(
+    scope: str,
+    unmanaged_flag: bool = False,
+    scan_type: str | None = None,
+    user_id: str | None = None,
+) -> str:
     if not _URL or not _KEY:
         raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
     payload: dict = {"scope": scope, "unmanaged_flag": unmanaged_flag, "status": "running"}
     if scan_type is not None:
         payload["scan_type"] = scan_type
+    if user_id is None:
+        from drift_reconciler.ownership import owner_user_id_for_scope
+        user_id = owner_user_id_for_scope(scope)
+    if user_id:
+        payload["user_id"] = user_id
     resp = requests.post(
         f"{_URL}/rest/v1/{_TABLE}",
         headers=_HEADERS,

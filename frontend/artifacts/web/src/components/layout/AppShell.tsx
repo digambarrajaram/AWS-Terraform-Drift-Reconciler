@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
   ScanSearch,
@@ -12,10 +12,13 @@ import {
   Globe,
   Compass,
   Menu,
+  LogOut,
 } from 'lucide-react';
 import ScopeSelector from './ScopeSelector';
 import ThemeToggle from './ThemeToggle';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { useAuth } from '@/hooks/useAuth';
+import { Button } from '@/components/ui/button';
 
 const NAV_ITEMS = [
   { label: 'Overview',     to: '/',             icon: LayoutDashboard },
@@ -55,6 +58,13 @@ function ScopeNavLink({
 export default function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { search } = useLocation();
+  const navigate = useNavigate();
+  const { user, signOut } = useAuth();
+
+  async function handleSignOut() {
+    await signOut();
+    navigate('/login', { replace: true });
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
@@ -108,7 +118,25 @@ export default function AppShell() {
             </button>
             <ScopeSelector />
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            {user?.email && (
+              <span className="hidden max-w-[12rem] truncate text-xs text-muted-foreground sm:inline">
+                {user.email}
+              </span>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={handleSignOut}
+              aria-label="Sign out"
+              className="text-muted-foreground"
+            >
+              <LogOut size={15} />
+              <span className="hidden sm:inline">Sign out</span>
+            </Button>
+            <ThemeToggle />
+          </div>
         </header>
 
         {/* Page content */}

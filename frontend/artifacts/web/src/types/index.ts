@@ -8,7 +8,7 @@ export interface Environment {
   region:                    string;
   tf_state_bucket:           string;
   tf_directory_path:         string;
-  auth_type:                 'profile' | 'role' | 'keys' | null;
+  auth_type:                 'role' | null;
   aws_profile:               string | null;
   aws_role_arn:              string | null;
   scan_role_arn:             string | null;
@@ -20,10 +20,6 @@ export interface Environment {
   git_auth_type:             'none' | 'token' | null;
   github_token_configured:   boolean;
   github_token_masked:       string | null;
-  aws_access_key_configured: boolean;
-  aws_access_key_masked:     string | null;
-  aws_secret_key_configured: boolean;
-  aws_secret_key_masked:     string | null;
   created_at?:               string;
   updated_at?:               string;
   clone_path?:               string | null;

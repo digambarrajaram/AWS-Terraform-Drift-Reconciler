@@ -324,8 +324,7 @@ def _fetch_pr_state(pr_number: int, account_label: str | None = None) -> str | N
     'merged' (a merged PR reports state='closed' plus merged=true).
 
     Resolves repo + token per-environment when *account_label* is given
-    (environment row repo_url + environment_secrets.github_token),
-    falling back to the global GITHUB_REPO/GITHUB_TOKEN env vars.
+    (environment row repo_url + environment_secrets.github_token).
 
     Returns None when the state can't be determined (no repo/token,
     network error) — callers treat None as "unknown".  A 404 (PR

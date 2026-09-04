@@ -44,15 +44,7 @@ def _force_unlock_tf(run_id: str, scope: str, env: dict | None = None) -> None:
         import boto3
         import botocore.exceptions
 
-        access_key = (env or os.environ).get("AWS_ACCESS_KEY_ID", "").strip()
-        secret_key = (env or os.environ).get("AWS_SECRET_ACCESS_KEY", "").strip()
-
-        if access_key and secret_key:
-            ddb = boto3.client("dynamodb", region_name=region,
-                               aws_access_key_id=access_key,
-                               aws_secret_access_key=secret_key)
-        else:
-            ddb = boto3.client("dynamodb", region_name=region)
+        ddb = boto3.client("dynamodb", region_name=region)
 
         resp = ddb.scan(TableName=lock_table, Limit=5)
         items = resp.get("Items", [])

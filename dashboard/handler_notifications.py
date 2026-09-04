@@ -12,8 +12,7 @@ from drift_reconciler.utils import mask_secret as _mask
 class NotificationsMixin:
     def _serve_routing_rules(self):
         scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, "A valid scope is required")
+        if not self._require_owned_scope(scope):
             return
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -59,8 +58,7 @@ class NotificationsMixin:
             return
 
         scope = body.get("scope") or None
-        if scope is not None and scope not in _get_valid_scopes():
-            self._json_error(400, "scope must be a valid active environment.")
+        if scope is not None and not self._require_owned_scope(scope):
             return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -118,8 +116,7 @@ class NotificationsMixin:
             return
 
         scope = body.get("scope") or None
-        if scope is not None and scope not in _get_valid_scopes():
-            self._json_error(400, "scope must be a valid active environment.")
+        if scope is not None and not self._require_owned_scope(scope):
             return
 
         def _fail(msg):

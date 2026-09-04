@@ -1,0 +1,68 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Secrets — never bake into image layers
+.env
+.env.*
+!.env.example
+
+# Python caches and virtualenvs
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+test
+drift_reconciler/pyvenv.cfg
+
+# Node / frontend (rebuilt in stage 1)
+frontend/node_modules
+**/node_modules
+frontend/artifacts/web/dist
+frontend/artifacts/web/node_modules
+
+# Frontend sources not needed in the Python runtime stage
+frontend/lib
+frontend/scripts
+
+# Tests and local scratch
+tests
+_tmp_*
+*.md
+
+# Terraform fixtures (not used at runtime — customer repos are cloned)
+*.tf
+*.tfvars
+terraform_code
+
+# DB migrations (applied manually in Supabase SQL editor, not at container start)
+migrations
+
+# IDE / editor / agent tooling
+.claude
+.cursor
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Legacy dashboard static assets (React build replaces these in-image)
+dashboard/*.html
+dashboard/*.js
+dashboard/*.css
+dashboard/*.png
+
+# Build artifacts
+dist
+build
+coverage
+htmlcov

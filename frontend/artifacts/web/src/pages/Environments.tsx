@@ -129,15 +129,10 @@ function SecretField({
 
 // ── AuthBadge / ActiveBadge ─────────────────────────────────────────────────
 
-function AuthBadge({ type }: { type: Exclude<Environment['auth_type'], null> }) {
-  const styles: Record<Exclude<Environment['auth_type'], null>, string> = {
-    profile: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400',
-    role:    'bg-sky-100    text-sky-700    dark:bg-sky-900/30    dark:text-sky-400',
-    keys:    'bg-amber-100  text-amber-700  dark:bg-amber-900/30  dark:text-amber-400',
-  };
+function AuthBadge() {
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${styles[type]}`}>
-      {type}
+    <span className="inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/30 dark:text-sky-400">
+      role
     </span>
   );
 }
@@ -163,8 +158,6 @@ type FormState = {
   region:                 string;
   tf_state_bucket:        string;
   tf_directory_path:      string;
-  auth_type:              'profile' | 'role' | 'keys';
-  aws_profile:            string;
   aws_role_arn:           string;
   scan_role_arn:          string;
   aws_external_id:        string;
@@ -174,20 +167,17 @@ type FormState = {
   repo_branch:            string;
   git_auth_type:          'none' | 'token';
   _github_token:          string;
-  _aws_access_key_id:     string;
-  _aws_secret_access_key: string;
 };
 
 const BLANK_FORM: FormState = {
   slug: '', name: '', aws_account_id: '', region: '',
   tf_state_bucket: '', tf_directory_path: '',
-  auth_type: 'role',
-  aws_profile: '', aws_role_arn: '', scan_role_arn: '', aws_external_id: '',
+  aws_role_arn: '', scan_role_arn: '', aws_external_id: '',
   tf_lock_table: '',
   apply_environment_name: '',
   repo_url: '', repo_branch: '',
   git_auth_type: 'none',
-  _github_token: '', _aws_access_key_id: '', _aws_secret_access_key: '',
+  _github_token: '',
 };
 
 function envToForm(e: Environment): FormState {
@@ -198,8 +188,6 @@ function envToForm(e: Environment): FormState {
     region:                 e.region,
     tf_state_bucket:        e.tf_state_bucket,
     tf_directory_path:      e.tf_directory_path,
-    auth_type:              e.auth_type ?? 'role',
-    aws_profile:            e.aws_profile            ?? '',
     aws_role_arn:           e.aws_role_arn            ?? '',
     scan_role_arn:          e.scan_role_arn           ?? '',
     aws_external_id:        e.aws_external_id         ?? '',
@@ -209,8 +197,6 @@ function envToForm(e: Environment): FormState {
     repo_branch:            e.repo_branch             ?? '',
     git_auth_type:          e.git_auth_type ?? 'none',
     _github_token:          '',
-    _aws_access_key_id:     '',
-    _aws_secret_access_key: '',
   };
 }
 
@@ -221,28 +207,16 @@ function buildPayload(form: FormState, isEdit: boolean): Record<string, unknown>
     region:                 form.region.trim(),
     tf_state_bucket:        form.tf_state_bucket.trim(),
     tf_directory_path:      form.tf_directory_path.trim(),
-    auth_type:              form.auth_type,
     git_auth_type:          form.git_auth_type,
     tf_lock_table:          form.tf_lock_table.trim()          || null,
     apply_environment_name: form.apply_environment_name.trim() || null,
     repo_url:               form.repo_url.trim()               || null,
     repo_branch:            form.repo_branch.trim()            || null,
+    aws_role_arn:           form.aws_role_arn.trim(),
+    scan_role_arn:          form.scan_role_arn.trim()          || null,
+    aws_external_id:        form.aws_external_id.trim() || null,
   };
   if (!isEdit) p.slug = form.slug.trim();
-
-  if (form.auth_type === 'profile') {
-    p.aws_profile = form.aws_profile.trim() || null;
-  } else if (form.auth_type === 'keys') {
-    if (form._aws_access_key_id.trim())     p._aws_access_key_id     = form._aws_access_key_id.trim();
-    if (form._aws_secret_access_key.trim()) p._aws_secret_access_key = form._aws_secret_access_key.trim();
-  }
-
-  // CI/CD role fields are independent of the dashboard's own auth method —
-  // always sent so an environment with auth_type='keys' doesn't silently
-  // lose its role ARNs on save.
-  p.aws_role_arn    = form.aws_role_arn.trim()    || null;
-  p.scan_role_arn   = form.scan_role_arn.trim()   || null;
-  p.aws_external_id = form.aws_external_id.trim() || null;
 
   if (form.git_auth_type === 'token' && form._github_token.trim()) {
     p._github_token = form._github_token.trim();
@@ -256,24 +230,17 @@ function validateForm(form: FormState, isEdit: boolean, env?: Environment): stri
   if (!isEdit && !SLUG_RE.test(form.slug.trim())) {
     errs.push('Slug must match ^[a-z0-9][a-z0-9-]*$ (lowercase, no underscores, must start with a letter or digit)');
   }
-  if (!form.name.trim())             errs.push('Name is required');
-  if (!form.aws_account_id.trim())   errs.push('AWS Account ID is required');
-  if (!form.region.trim())           errs.push('Region is required');
-  if (!form.tf_state_bucket.trim())  errs.push('Terraform state bucket is required');
+  if (!form.name.trim())              errs.push('Name is required');
+  if (!form.aws_account_id.trim())    errs.push('AWS Account ID is required');
+  if (!form.region.trim())            errs.push('Region is required');
+  if (!form.tf_state_bucket.trim())   errs.push('Terraform state bucket is required');
   if (!form.tf_directory_path.trim()) errs.push('Terraform directory path is required');
-  if (!form.aws_role_arn.trim())     errs.push('AWS Role ARN is required (used by GitHub Actions workflows)');
-
-  if (!isEdit && !['role', 'keys'].includes(form.auth_type)) {
-    errs.push('Auth type must be "role" or "keys" for new environments');
+  if (!form.aws_role_arn.trim())      errs.push('AWS Role ARN is required');
+  if (form.repo_url.trim() && form.git_auth_type === 'token') {
+    if (!form._github_token.trim() && !env?.github_token_configured) {
+      errs.push('GitHub token is required when repo URL uses token auth');
+    }
   }
-
-  if (form.auth_type === 'keys') {
-    const hasStoredKey    = env?.aws_access_key_configured;
-    const hasStoredSecret = env?.aws_secret_key_configured;
-    if (!hasStoredKey    && !form._aws_access_key_id.trim())     errs.push('AWS Access Key ID is required');
-    if (!hasStoredSecret && !form._aws_secret_access_key.trim()) errs.push('AWS Secret Access Key is required');
-  }
-
   return errs;
 }
 
@@ -333,7 +300,6 @@ function EnvForm({
     }
   }
 
-  const authType    = form.auth_type;
   const gitAuthType = form.git_auth_type;
 
   return (
@@ -388,128 +354,74 @@ function EnvForm({
             </div>
           </div>
 
-          {/* ── Authentication ────────────────────────────────────── */}
+          {/* ── AWS Authentication (AssumeRole only) ──────────── */}
           <div className="space-y-3">
             <p className={sectionHeadingCls}>AWS Authentication</p>
-            <Field label="Auth Type" required>
-              <div className="flex gap-3">
-                {((isEdit && env?.auth_type === 'profile'
-                  ? ['profile', 'role', 'keys']
-                  : ['role', 'keys']) as ('profile' | 'role' | 'keys')[]).map((t) => (
-                  <label key={t} className="flex items-center gap-1.5 cursor-pointer select-none text-xs">
-                    <input
-                      type="radio"
-                      name="auth_type"
-                      value={t}
-                      checked={authType === t}
-                      onChange={() => set('auth_type', t)}
-                      className="accent-primary"
-                    />
-                    {t}
-                  </label>
-                ))}
-              </div>
-            </Field>
-
-            {/* ── CI/CD roles — always visible, independent of Auth Type ── */}
-            <div className="space-y-3">
-              <p className={sectionHeadingCls}>CI/CD Roles (GitHub Actions)</p>
-              <p className="text-[11px] text-muted-foreground -mt-2">
-                Required for GitHub Actions workflows, independent of the Auth Type below.
-              </p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="Apply Role ARN">
-                  <div className="relative">
-                    <input
-                      type={showRoleArn ? 'text' : 'password'}
-                      placeholder="arn:aws:iam::123456789012:role/MyRole"
-                      value={form.aws_role_arn}
-                      onChange={(e) => set('aws_role_arn', e.target.value)}
-                      autoComplete="new-password"
-                      className={`${inputCls} pr-8`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowRoleArn((v) => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                      {showRoleArn ? <EyeOff size={12} /> : <Eye size={12} />}
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    Used by the apply workflow (terraform apply).
-                  </p>
-                </Field>
-                <Field label="Scan Role ARN">
-                  <div className="relative">
-                    <input
-                      type={showScanRoleArn ? 'text' : 'password'}
-                      placeholder="arn:aws:iam::123456789012:role/MyScanRole"
-                      value={form.scan_role_arn}
-                      onChange={(e) => set('scan_role_arn', e.target.value)}
-                      autoComplete="new-password"
-                      className={`${inputCls} pr-8`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowScanRoleArn((v) => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                      {showScanRoleArn ? <EyeOff size={12} /> : <Eye size={12} />}
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    Optional — used by the preview/scan workflow (read-only). Falls back to Apply Role ARN if left blank.
-                  </p>
-                </Field>
-                <Field label="External ID">
-                  <div className="relative">
-                    <input
-                      type={showExternalId ? 'text' : 'password'}
-                      placeholder="optional" value={form.aws_external_id}
-                      onChange={(e) => set('aws_external_id', e.target.value)}
-                      autoComplete="new-password"
-                      className={`${inputCls} pr-8`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowExternalId((v) => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                      {showExternalId ? <EyeOff size={12} /> : <Eye size={12} />}
-                    </button>
-                  </div>
-                </Field>
-              </div>
-            </div>
-
-            {authType === 'profile' && (
-              <Field label="AWS Profile">
-                <input type="text" placeholder="default" value={form.aws_profile}
-                  onChange={(e) => set('aws_profile', e.target.value)} className={inputCls} />
+            <p className="text-[11px] text-muted-foreground -mt-2">
+              AssumeRole is the only supported method. Role ARN is required; External ID is optional.
+            </p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Role ARN" required>
+                <div className="relative">
+                  <input
+                    type={showRoleArn ? 'text' : 'password'}
+                    placeholder="arn:aws:iam::123456789012:role/MyRole"
+                    value={form.aws_role_arn}
+                    onChange={(e) => set('aws_role_arn', e.target.value)}
+                    autoComplete="new-password"
+                    className={`${inputCls} pr-8`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowRoleArn((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {showRoleArn ? <EyeOff size={12} /> : <Eye size={12} />}
+                  </button>
+                </div>
               </Field>
-            )}
-
-            {authType === 'keys' && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <SecretField
-                  label="Access Key ID"
-                  required={!env?.aws_access_key_configured}
-                  value={form._aws_access_key_id}
-                  onChange={(v) => set('_aws_access_key_id', v)}
-                  configured={env?.aws_access_key_configured}
-                  masked={env?.aws_access_key_masked}
-                />
-                <SecretField
-                  label="Secret Access Key"
-                  required={!env?.aws_secret_key_configured}
-                  value={form._aws_secret_access_key}
-                  onChange={(v) => set('_aws_secret_access_key', v)}
-                  configured={env?.aws_secret_key_configured}
-                  masked={env?.aws_secret_key_masked}
-                />
-              </div>
-            )}
+              <Field label="External ID">
+                <div className="relative">
+                  <input
+                    type={showExternalId ? 'text' : 'password'}
+                    placeholder="optional external ID"
+                    value={form.aws_external_id}
+                    onChange={(e) => set('aws_external_id', e.target.value)}
+                    autoComplete="new-password"
+                    className={`${inputCls} pr-8`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowExternalId((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {showExternalId ? <EyeOff size={12} /> : <Eye size={12} />}
+                  </button>
+                </div>
+              </Field>
+              <Field label="Scan Role ARN">
+                <div className="relative">
+                  <input
+                    type={showScanRoleArn ? 'text' : 'password'}
+                    placeholder="arn:aws:iam::123456789012:role/MyScanRole"
+                    value={form.scan_role_arn}
+                    onChange={(e) => set('scan_role_arn', e.target.value)}
+                    autoComplete="new-password"
+                    className={`${inputCls} pr-8`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowScanRoleArn((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {showScanRoleArn ? <EyeOff size={12} /> : <Eye size={12} />}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Optional — used by the preview/scan workflow (read-only).
+                </p>
+              </Field>
+            </div>
           </div>
 
           {/* ── Terraform options ─────────────────────────────────── */}
@@ -567,6 +479,7 @@ function EnvForm({
             {gitAuthType === 'token' && (
               <SecretField
                 label="GitHub Token"
+                required={!!form.repo_url.trim() && !env?.github_token_configured}
                 value={form._github_token}
                 onChange={(v) => set('_github_token', v)}
                 configured={env?.github_token_configured}
@@ -762,7 +675,7 @@ export default function Environments() {
                       {env.region}
                     </td>
                     <td className="px-4 py-3">
-                      <AuthBadge type={env.auth_type || 'profile'} />
+                      <AuthBadge />
                     </td>
                     <td className="px-4 py-3">
                       <ActiveBadge active={env.is_active} />

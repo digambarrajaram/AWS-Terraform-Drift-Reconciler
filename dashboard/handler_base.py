@@ -6,11 +6,15 @@ import http.server
 import json
 import os
 import sys
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import jwt
 import requests
+from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientError, PyJWTError
 
 from drift_reconciler.scan_runs import create_scan_run, update_scan_run
 from drift_reconciler.rollback_runs import create_rollback_run
@@ -29,8 +33,72 @@ from dashboard.process_runner import (
 )
 from dashboard.supabase_http import _supabase_get
 
+_JWKS_CLIENT_LOCK = threading.Lock()
+_jwks_client: PyJWKClient | None = None
+_jwks_client_url: str | None = None
+_JWKS_CACHE_TTL_SEC = 600  # 10 minutes
+
+
+def _supabase_jwks_url() -> str | None:
+    """Derive Supabase JWKS endpoint from SUPABASE_URL (no hardcoded project ref)."""
+    base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/auth/v1/.well-known/jwks.json"
+
+
+def _get_jwks_client() -> PyJWKClient | None:
+    """Return a cached PyJWKClient for the current SUPABASE_URL JWKS endpoint."""
+    global _jwks_client, _jwks_client_url
+    url = _supabase_jwks_url()
+    if not url:
+        return None
+    with _JWKS_CLIENT_LOCK:
+        if _jwks_client is None or _jwks_client_url != url:
+            _jwks_client = PyJWKClient(
+                url,
+                cache_jwk_set=True,
+                lifespan=_JWKS_CACHE_TTL_SEC,
+            )
+            _jwks_client_url = url
+    return _jwks_client
+
+
+def _decode_supabase_jwt(token: str) -> dict | None:
+    """Verify ES256 Supabase session JWT via JWKS; return payload or None."""
+    client = _get_jwks_client()
+    if client is None:
+        return None
+
+    refreshed = False
+    while True:
+        try:
+            signing_key = client.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=["ES256"],
+                audience="authenticated",
+            )
+        except PyJWKClientError:
+            if refreshed:
+                return None
+            client.get_signing_keys(refresh=True)
+            refreshed = True
+        except PyJWTError:
+            return None
+
+
 class HandlerBase(http.server.SimpleHTTPRequestHandler):
     _CACHEABLE = {".js", ".css", ".png", ".svg", ".woff2"}
+    _STATIC_EXTENSIONS = (
+        ".js", ".css", ".png", ".svg", ".woff2", ".woff", ".ico", ".map",
+        ".webp", ".gif", ".json",
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.auth_user_id: str | None = None
+        super().__init__(*args, **kwargs)
 
     def _check_auth(self) -> bool:
         """Return True if the request is authorised.
@@ -47,6 +115,31 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return False
         return hmac.compare_digest(token, request_token)
 
+    def _check_jwt(self) -> bool:
+        """Verify Supabase Auth JWT (ES256 via JWKS) and attach ``auth_user_id``.
+
+        When ``SUPABASE_URL`` is unset, JWT auth is disabled (same pattern as
+        ``API_ACCESS_TOKEN``). When set, ``Authorization: Bearer`` must
+        contain a valid ES256 JWT with ``aud`` = ``authenticated``.
+        """
+        self.auth_user_id = None
+        if not _supabase_jwks_url():
+            return True  # JWT auth disabled — SUPABASE_URL not configured
+        auth_header = (self.headers.get("Authorization") or "").strip()
+        if not auth_header.lower().startswith("bearer "):
+            return False
+        token = auth_header[7:].strip()
+        if not token:
+            return False
+        payload = _decode_supabase_jwt(token)
+        if not payload:
+            return False
+        sub = payload.get("sub")
+        if not sub or not isinstance(sub, str):
+            return False
+        self.auth_user_id = sub
+        return True
+
     def _unauthorized(self) -> None:
         body = json.dumps(
             {"error": "Missing or invalid X-Api-Access-Token header"}
@@ -57,14 +150,83 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _unauthorized_jwt(self) -> None:
+        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _require_api_auth(self, *, require_jwt: bool = True) -> bool:
+        """API-token check, then optional Supabase JWT. Both must pass when enabled."""
+        if not self._check_auth():
+            self._unauthorized()
+            return False
+        if require_jwt and not self._check_jwt():
+            self._unauthorized_jwt()
+            return False
+        return True
+
+
+    def _ownership_enforced(self) -> bool:
+        """True when a verified Supabase user is attached (JWT auth active)."""
+        return bool(self.auth_user_id)
+
+    def _owned_scopes(self) -> set[str]:
+        """Active environment slugs owned by the current user.
+
+        When JWT auth is disabled (no auth_user_id), falls back to all active
+        scopes so local/dev without Supabase Auth keeps working.
+        """
+        if not self._ownership_enforced():
+            return set(_get_valid_scopes())
+        base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not base or not key:
+            return set()
+        try:
+            resp = requests.get(
+                f"{base}/rest/v1/environments"
+                f"?select=slug&user_id=eq.{self.auth_user_id}&is_active=eq.true",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return set()
+            return {row["slug"] for row in (resp.json() or []) if row.get("slug")}
+        except (requests.RequestException, ValueError, TypeError):
+            return set()
+
+    def _require_owned_scope(self, scope: str) -> bool:
+        """Validate *scope* exists and is owned by auth_user_id. Sends error on failure."""
+        if not scope:
+            self._json_error(400, "A valid scope is required")
+            return False
+        owned = self._owned_scopes()
+        if scope in owned:
+            return True
+        if scope in _get_valid_scopes():
+            self._json_error(403, "Forbidden — environment not owned by this user")
+            return False
+        self._json_error(
+            400,
+            f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(owned)) + ".",
+        )
+        return False
+
+
     def do_GET(self):
         path = self.path.split("?")[0]
 
         # Auth-gate API data endpoints — everything under /api/ returns
         # infrastructure details, masked secrets, or exception entries.
-        if path.startswith("/api/") and not self._check_auth():
-            self._unauthorized()
-            return
+        # /api/config is exempt from JWT so the login page can bootstrap
+        # the Supabase client after the shared API token is present.
+        if path.startswith("/api/"):
+            require_jwt = path != "/api/config"
+            if not self._require_api_auth(require_jwt=require_jwt):
+                return
 
         if path in ("/", "/index.html", "/explorer", "/explorer.html", "/scan", "/scan.html", "/pr-queue", "/pr-queue.html", "/rollback", "/rollback.html", "/trends", "/trends.html", "/exceptions", "/exceptions.html", "/alerts", "/alerts.html", "/environments", "/environments.html"):
             self._serve_injected()
@@ -110,10 +272,12 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             self._serve_api_exceptions()
         elif path.startswith("/api/scan/") and path.endswith("/logs"):
             self._serve_run_logs()
-        elif path.endswith((".js", ".css", ".png")):
+        elif path.endswith(self._STATIC_EXTENSIONS):
             self._serve_static(path)
+        elif path.startswith("/api/"):
+            self.send_error(404)
         else:
-            super().do_GET()
+            self._serve_spa_index()
 
     def do_POST(self):
         path = self.path.split("?")[0]
@@ -124,8 +288,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             self._handle_github_webhook()
             return
 
-        if not self._check_auth():
-            self._unauthorized()
+        if not self._require_api_auth():
             return
 
         if path.startswith("/api/scan/") and path.endswith("/cancel"):
@@ -146,8 +309,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             scope = body.get("scope", "")
-            if scope not in _get_valid_scopes():
-                self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
+            if not self._require_owned_scope(scope):
                 return
 
             # Reject local overlaps before inserting a run row.
@@ -177,7 +339,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             try:
-                run_id = create_scan_run(scope, unmanaged_flag=False, scan_type="trivy_only")
+                run_id = create_scan_run(scope, unmanaged_flag=False, scan_type="trivy_only", user_id=self.auth_user_id)
             except Exception as se:
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
@@ -223,8 +385,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             scope = body.get("scope", "")
-            if scope not in _get_valid_scopes():
-                self._json_error(400, f"Invalid scope: {scope}. Must be one of: " + ", ".join(sorted(_get_valid_scopes())) + ".")
+            if not self._require_owned_scope(scope):
                 return
 
             # Reject local overlaps before inserting a run row.
@@ -258,7 +419,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, f"Cannot resolve Terraform directory: {se}")
                 return
             try:
-                run_id = create_scan_run(scope, unmanaged_flag_for_db, scan_type=scan_mode)
+                run_id = create_scan_run(scope, unmanaged_flag_for_db, scan_type=scan_mode, user_id=self.auth_user_id)
             except Exception as se:
                 self._json_error(502, f"Failed to create scan run: {se}")
                 return
@@ -307,8 +468,10 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             pr_number = body.get("pr_number")
             scope = body.get("scope", "")
 
-            if not pr_number or scope not in _get_valid_scopes():
-                self._json_error(400, "pr_number (integer) and a valid scope are required")
+            if not pr_number:
+                self._json_error(400, "pr_number and a valid owned scope are required")
+                return
+            if not self._require_owned_scope(scope):
                 return
 
             with _RUNNING_LOCK:
@@ -333,7 +496,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             try:
-                run_id = create_rollback_run(pr_number, scope, mode="preview")
+                run_id = create_rollback_run(pr_number, scope, mode="preview", user_id=self.auth_user_id)
             except Exception as se:
                 self._json_error(502, f"Failed to create rollback run: {se}")
                 return
@@ -379,8 +542,10 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             pr_number = body.get("pr_number")
             scope = body.get("scope", "")
 
-            if not pr_number or scope not in _get_valid_scopes():
-                self._json_error(400, "pr_number (integer) and a valid scope are required")
+            if not pr_number:
+                self._json_error(400, "pr_number and a valid owned scope are required")
+                return
+            if not self._require_owned_scope(scope):
                 return
 
             with _RUNNING_LOCK:
@@ -408,7 +573,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(400, f"Cannot resolve Terraform directory: {se}")
                 return
             try:
-                run_id = create_rollback_run(pr_number, scope, mode="execute")
+                run_id = create_rollback_run(pr_number, scope, mode="execute", user_id=self.auth_user_id)
             except Exception as se:
                 self._json_error(502, f"Failed to create rollback run: {se}")
                 return
@@ -460,8 +625,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
     def do_PATCH(self):
         path = self.path.split("?")[0]
 
-        if not self._check_auth():
-            self._unauthorized()
+        if not self._require_api_auth():
             return
 
         if path.startswith("/api/environments/"):
@@ -473,8 +637,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
     def do_DELETE(self):
         path = self.path.split("?")[0]
 
-        if not self._check_auth():
-            self._unauthorized()
+        if not self._require_api_auth():
             return
 
         if path.startswith("/api/environments/"):
@@ -501,9 +664,33 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return
         data = fpath.read_bytes()
         ext = os.path.splitext(path)[1]
-        ctype = {".js": "application/javascript", ".css": "text/css", ".png": "image/png"}.get(ext, "application/octet-stream")
+        ctype = {
+            ".js": "application/javascript",
+            ".css": "text/css",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".ico": "image/x-icon",
+            ".json": "application/json",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(ext, "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_spa_index(self) -> None:
+        """SPA fallback — serve index.html for client-side routes (e.g. /reset-password)."""
+        fpath = _DASHBOARD_DIR / "index.html"
+        if not fpath.is_file():
+            self.send_error(404)
+            return
+        data = fpath.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -511,8 +698,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
     def _serve_overview(self):
         """Return scope-validated summary data for the Overview page."""
         scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, f"Invalid scope: {scope}")
+        if not self._require_owned_scope(scope):
             return
 
         base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -581,8 +767,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
     def _serve_scan_runs(self):
         """Return scan history for one validated active environment."""
         scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, f"Invalid scope: {scope}")
+        if not self._require_owned_scope(scope):
             return
         base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -592,7 +777,8 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         try:
             resp = requests.get(
                 f"{base}/rest/v1/scan_runs?select=*&scope=eq.{scope}"
-                "&order=started_at.desc&limit=20",
+                + (f"&user_id=eq.{self.auth_user_id}" if self._ownership_enforced() else "")
+                + "&order=started_at.desc&limit=20",
                 headers={"apikey": key, "Authorization": f"Bearer {key}"},
                 timeout=10,
             )
@@ -617,8 +803,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return
         run_id = parts[3]
         scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, f"Invalid scope: {scope}")
+        if not self._require_owned_scope(scope):
             return
         base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -627,7 +812,9 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return
         try:
             resp = requests.get(
-                f"{base}/rest/v1/scan_runs?select=*&id=eq.{run_id}&scope=eq.{scope}&limit=1",
+                f"{base}/rest/v1/scan_runs?select=*&id=eq.{run_id}&scope=eq.{scope}"
+                + (f"&user_id=eq.{self.auth_user_id}" if self._ownership_enforced() else "")
+                + "&limit=1",
                 headers={"apikey": key, "Authorization": f"Bearer {key}"},
                 timeout=10,
             )
@@ -652,8 +839,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         """Return filtered, paginated PR queue data for a validated scope."""
         params = parse_qs(urlparse(self.path).query)
         scope = params.get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, f"Invalid scope: {scope}")
+        if not self._require_owned_scope(scope):
             return
         try:
             page = max(0, int(params.get("page", ["0"])[0]))
@@ -730,8 +916,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
 
     def _rollback_scope(self):
         scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, "A valid scope is required")
+        if not self._require_owned_scope(scope):
             return None
         return scope
 
@@ -754,7 +939,8 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             )
             history = requests.get(
                 f"{base}/rest/v1/rollback_runs?select=*&scope=eq.{scope}"
-                "&order=started_at.desc",
+                + (f"&user_id=eq.{self.auth_user_id}" if self._ownership_enforced() else "")
+                + "&order=started_at.desc",
                 headers=headers, timeout=10,
             )
             if eligible.status_code != 200 or history.status_code != 200:
@@ -788,7 +974,9 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return
         try:
             resp = requests.get(
-                f"{base}/rest/v1/rollback_runs?select=*&id=eq.{parts[3]}&scope=eq.{scope}&limit=1",
+                f"{base}/rest/v1/rollback_runs?select=*&id=eq.{parts[3]}&scope=eq.{scope}"
+                + (f"&user_id=eq.{self.auth_user_id}" if self._ownership_enforced() else "")
+                + "&limit=1",
                 headers={"apikey": key, "Authorization": f"Bearer {key}"}, timeout=10,
             )
             if resp.status_code != 200:
@@ -812,8 +1000,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         """Return all Trends data for one validated scope and period."""
         params = parse_qs(urlparse(self.path).query)
         scope = params.get("scope", [""])[0]
-        if scope not in _get_valid_scopes():
-            self._json_error(400, "A valid scope is required")
+        if not self._require_owned_scope(scope):
             return
         try:
             days = int(params.get("days", ["30"])[0])

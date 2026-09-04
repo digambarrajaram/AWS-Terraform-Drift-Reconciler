@@ -53,6 +53,10 @@ class RunsMixin:
             cancel_body["completed_at"] = datetime.now(timezone.utc).isoformat()
         status_filter = "in.(approved,rejected)" if table == "pending_applies" else "eq.running"
         cancel_url = f"{url_base}/rest/v1/{table}?id=eq.{run_id}&status={status_filter}"
+        if getattr(self, "auth_user_id", None) and table in (
+            "scan_runs", "rollback_runs", "pending_applies",
+        ):
+            cancel_url += f"&user_id=eq.{self.auth_user_id}"
         try:
             response = requests.patch(
                 cancel_url,

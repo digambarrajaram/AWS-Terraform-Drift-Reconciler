@@ -5,7 +5,9 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import AppShell from '@/components/layout/AppShell';
 import AuthPromptModal from '@/components/layout/AuthPromptModal';
+import SessionGuard from '@/components/auth/SessionGuard';
 import { Toaster } from '@/components/ui/sonner';
+import { AuthProvider } from '@/hooks/useAuth';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { getToken } from '@/api/apiFetch';
 import { ApiError } from '@/api/apiFetch';
@@ -20,6 +22,8 @@ import Exceptions from '@/pages/Exceptions';
 import Alerts from '@/pages/Alerts';
 import Environments from '@/pages/Environments';
 import Explorer from '@/pages/Explorer';
+import Login from '@/pages/Login';
+import ResetPassword from '@/pages/ResetPassword';
 import NotFound from '@/pages/NotFound';
 
 // ── QueryClient ─────────────────────────────────────────────────────────────
@@ -73,26 +77,32 @@ export default function App() {
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter basename={import.meta.env.BASE_URL}>
-          <AuthGuard>
-            <Routes>
-              <Route element={<AppShell />}>
-                <Route path="/"            element={<Overview />} />
-                <Route path="/scan"        element={<Scan />} />
-                <Route path="/pr-queue"    element={<PrQueue />} />
-                <Route path="/approvals"   element={<Approvals />} />
-                <Route path="/rollback"    element={<Rollback />} />
-                <Route path="/trends"      element={<Trends />} />
-                <Route path="/exceptions"  element={<Exceptions />} />
-                <Route path="/alerts"      element={<Alerts />} />
-                <Route path="/environments" element={<Environments />} />
-                <Route path="/explorer"    element={<Explorer />} />
-                {/* 404 — must be last inside AppShell so the shell still renders */}
-                <Route path="*"            element={<NotFound />} />
-              </Route>
-            </Routes>
-            <AuthPromptModal />
-            <Toaster richColors position="top-right" />
-          </AuthGuard>
+          <AuthProvider>
+            <AuthGuard>
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/reset-password" element={<ResetPassword />} />
+                <Route element={<SessionGuard />}>
+                  <Route element={<AppShell />}>
+                    <Route path="/"            element={<Overview />} />
+                    <Route path="/scan"        element={<Scan />} />
+                    <Route path="/pr-queue"    element={<PrQueue />} />
+                    <Route path="/approvals"   element={<Approvals />} />
+                    <Route path="/rollback"    element={<Rollback />} />
+                    <Route path="/trends"      element={<Trends />} />
+                    <Route path="/exceptions"  element={<Exceptions />} />
+                    <Route path="/alerts"      element={<Alerts />} />
+                    <Route path="/environments" element={<Environments />} />
+                    <Route path="/explorer"    element={<Explorer />} />
+                    {/* 404 — must be last inside AppShell so the shell still renders */}
+                    <Route path="*"            element={<NotFound />} />
+                  </Route>
+                </Route>
+              </Routes>
+              <AuthPromptModal />
+              <Toaster richColors position="top-right" />
+            </AuthGuard>
+          </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>
     </ErrorBoundary>

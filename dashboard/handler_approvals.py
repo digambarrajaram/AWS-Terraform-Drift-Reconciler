@@ -9,7 +9,7 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 
-from dashboard.env import _configure_aws_env, _get_valid_scopes, _tf_dir_for
+from dashboard.env import _configure_aws_env, _tf_dir_for
 from dashboard.exceptions_policy import auto_add_exceptions_on_merge
 from dashboard.paths import _REPO_ROOT
 from dashboard.process_runner import _spawn_with_capture
@@ -25,8 +25,7 @@ class ApprovalsMixin:
         params = parse_qs(parsed.query)
         status = params.get("status", ["awaiting_approval"])[0]
         scope = params.get("scope", [None])[0]
-        if not scope or scope not in _get_valid_scopes():
-            self._json_error(400, "A valid scope is required")
+        if not self._require_owned_scope(scope or ""):
             return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -41,6 +40,8 @@ class ApprovalsMixin:
             filters.append(f"status=eq.{status}")
         if scope:
             filters.append(f"scope=eq.{scope}")
+        if getattr(self, "auth_user_id", None):
+            filters.append(f"user_id=eq.{self.auth_user_id}")
         query = f"{url}/rest/v1/pending_applies"
         if filters:
             query += "?" + "&".join(filters)
@@ -74,7 +75,7 @@ class ApprovalsMixin:
         headers = {"apikey": key, "Authorization": f"Bearer {key}"}
         try:
             resp = requests.get(
-                f"{url}/rest/v1/pending_applies?select=*&id=eq.{pending_id}&limit=1",
+                f"{url}/rest/v1/pending_applies?select=*&id=eq.{pending_id}" + (f"&user_id=eq.{self.auth_user_id}" if getattr(self, "auth_user_id", None) else "") + "&limit=1",
                 headers=headers, timeout=10,
             )
             rows = resp.json() if resp.text and resp.status_code == 200 else []
@@ -100,8 +101,7 @@ class ApprovalsMixin:
         sees on GitHub, so Approve/Reject can be decided in-dashboard."""
         pending_id = self.path.split("/")[3]
         requested_scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
-        if requested_scope not in _get_valid_scopes():
-            self._json_error(400, "A valid scope is required")
+        if not self._require_owned_scope(requested_scope):
             return
 
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -211,6 +211,28 @@ class ApprovalsMixin:
         headers = {"apikey": key, "Authorization": f"Bearer {key}",
                    "Content-Type": "application/json", "Prefer": "return=representation"}
         table_url = f"{url}/rest/v1/pending_applies"
+
+        # Ownership gate before claim — deny cross-user decisions.
+        if getattr(self, "auth_user_id", None):
+            try:
+                own = requests.get(
+                    f"{table_url}?select=id,user_id,scope&id=eq.{pending_id}&limit=1",
+                    headers=headers,
+                    timeout=10,
+                )
+                rows = own.json() if own.text and own.status_code == 200 else []
+            except requests.RequestException as exc:
+                self._json_error(502, f"Supabase unreachable: {exc}")
+                return
+            if not rows:
+                self._json_error(404, "Pending apply row not found.")
+                return
+            owner = rows[0].get("user_id")
+            if owner and owner != self.auth_user_id:
+                self._json_error(403, "Forbidden — pending apply not owned by this user")
+                return
+            if not owner and not self._require_owned_scope(rows[0].get("scope") or ""):
+                return
 
         # ── Atomically claim the row first (compare-and-set) ────────────
         # The conditional UPDATE is the single source of truth for who

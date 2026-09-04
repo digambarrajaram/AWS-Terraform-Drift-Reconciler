@@ -18,6 +18,17 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// Module-level Supabase access token — synced by AuthProvider.
+let supabaseAccessToken: string | null = null;
+
+export function setSupabaseAccessToken(token: string | null): void {
+  supabaseAccessToken = token;
+}
+
+export function getSupabaseAccessToken(): string | null {
+  return supabaseAccessToken;
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -43,7 +54,8 @@ export class ApiError extends Error {
  *  - Prefixes path with /api
  *  - Injects Content-Type: application/json
  *  - Injects X-Api-Access-Token from localStorage (when present)
- *  - On 401: clears token and signals the auth store to re-prompt
+ *  - Injects Authorization: Bearer <supabase access token> (when present)
+ *  - On 401: distinguishes JWT failure ("unauthorized") from API-token failure
  *  - On !ok: parses { error, run_id? } and throws ApiError
  *  - On success: returns parsed JSON as T
  */
@@ -52,6 +64,7 @@ export async function apiFetch<T = unknown>(
   init: RequestInit = {},
 ): Promise<T> {
   const token = getToken();
+  const supabaseToken = getSupabaseAccessToken();
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -61,13 +74,33 @@ export async function apiFetch<T = unknown>(
   if (token) {
     headers['X-Api-Access-Token'] = token;
   }
+  if (supabaseToken) {
+    headers['Authorization'] = `Bearer ${supabaseToken}`;
+  }
 
   const res = await fetch(`/api${path}`, { ...init, headers });
 
   if (res.status === 401) {
-    clearToken();
-    useAuthStore.getState().setNeedsToken(true);
-    throw new ApiError('Unauthorized — token required or invalid', 401);
+    let message = 'Unauthorized — token required or invalid';
+    let jwtUnauthorized = false;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error === 'unauthorized') {
+        jwtUnauthorized = true;
+        message = 'Unauthorized — session required or invalid';
+      } else if (body.error) {
+        message = body.error;
+      }
+    } catch {
+      // body is not JSON
+    }
+
+    if (!jwtUnauthorized) {
+      clearToken();
+      useAuthStore.getState().setNeedsToken(true);
+    }
+
+    throw new ApiError(message, 401);
   }
 
   if (!res.ok) {

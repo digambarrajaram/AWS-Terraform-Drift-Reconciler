@@ -63,15 +63,12 @@ def _tf_dir_for(scope: str) -> str:
         raise
 
 
-def _aws_profile_for(scope: str) -> str:
-    return _get_env_field(scope, "aws_profile") or ("account-a" if scope == "scope-a" else "account-b")
-
-
 def _configure_aws_env(env: dict, scope: str) -> None:
-    """Set AWS_PROFILE in *env* only when the environment's auth_type
-    is 'profile' or unset (transitional fallback).  For 'role'/'keys',
-    the agent resolves credentials itself — a stale profile would break
-    boto3 session creation."""
-    auth_type = _get_env_field(scope, "auth_type") or ""
-    if not auth_type or auth_type == "profile":
-        env["AWS_PROFILE"] = _aws_profile_for(scope)
+    """Strip AWS_PROFILE from spawned agent env.
+
+    Role-only auth: the agent resolves credentials via AssumeRole
+    (``get_aws_session``). A stale named profile must not override
+    temporary session credentials. Legacy ``auth_type='profile'`` /
+    ``keys`` paths have been removed.
+    """
+    env.pop("AWS_PROFILE", None)

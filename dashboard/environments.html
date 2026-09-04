@@ -28,12 +28,11 @@
   <main>
     <section>
       <h2>Add Environment</h2>
-      <p class="empty" style="margin-bottom:16px">Register infrastructure that already exists — IAM roles, GitHub Secrets/Variables, and Terraform directories must be created beforehand. This page only records the wiring metadata.</p>
+      <p class="empty" style="margin-bottom:16px">Register infrastructure that already exists — IAM roles, GitHub Secrets/Variables, and Terraform directories must be created beforehand. This page only records the wiring metadata. AWS auth is AssumeRole only.</p>
       <form id="add-form" class="exception-form">
         <label>Name <input type="text" name="name" placeholder="Production A" required></label>
         <label>Slug <input type="text" name="slug" placeholder="scope-a" required pattern="[a-z0-9][a-z0-9-]*"></label>
         <label>AWS Account ID <input type="text" name="aws_account_id" placeholder="123456789012" required></label>
-        <label id="aws-profile-add-group" style="display:none">AWS Profile <input type="text" name="aws_profile" placeholder="account-a"></label>
         <label>Region <input type="text" name="region" placeholder="us-east-1" required></label>
         <label>TF State Bucket <input type="text" name="tf_state_bucket" placeholder="scope-a-tf-state-123" required></label>
         <label>TF Lock Table <input type="text" name="tf_lock_table" placeholder="terraform-locks"></label>
@@ -41,16 +40,6 @@
           TF Directory Path
           <input type="text" name="tf_directory_path" placeholder="terraform_code/ec2_terraform_account_a" required>
           <span class="empty">Must exist in the repo.</span>
-        </label>
-        <label>
-          Scan Role Variable
-          <input type="text" name="scan_role_variable" placeholder="SCOPE_A_SCAN_ROLE_ARN">
-          <span class="empty">GitHub Actions Variable — must exist already.</span>
-        </label>
-        <label>
-          Apply Role Secret
-          <input type="text" name="apply_role_secret_name" placeholder="SCOPE_A_APPLY_ROLE_ARN">
-          <span class="empty">GitHub Secret — must exist already.</span>
         </label>
         <label>
           Apply Environment
@@ -75,35 +64,18 @@
           </select>
         </label>
         <label id="github-token-add-group" style="display:none">
-          GitHub Token
+          GitHub Token *
           <input type="password" name="github_token" placeholder="ghp_...">
-          <span class="empty">Stored in environment_secrets — never visible after save.</span>
+          <span class="empty">Required when repo URL + token auth. Stored in environment_secrets.</span>
         </label>
         <hr style="grid-column:1/-1; border-color:#30363d; margin:4px 0">
         <label>
-          Auth Type
-          <select name="auth_type" id="auth-type-add">
-            <option value="role" selected>role (OIDC assume-role)</option>
-            <option value="keys">keys (static access key)</option>
-          </select>
+          Role ARN *
+          <input type="text" name="aws_role_arn" placeholder="arn:aws:iam::123456789012:role/drift-reconciler-scan-scope-a" required>
         </label>
-        <label id="aws-role-arn-add-group" style="display:none">
-          Role ARN
-          <input type="text" name="aws_role_arn" placeholder="arn:aws:iam::123456789012:role/drift-reconciler-scan-scope-a">
-        </label>
-        <label id="aws-external-id-add-group" style="display:none">
-          External ID (optional)
-          <input type="text" name="aws_external_id" placeholder="optional-external-id">
-        </label>
-        <label id="aws-access-key-add-group" style="display:none">
-          Access Key ID
-          <input type="password" name="aws_access_key_id" placeholder="AKIA...">
-          <span class="empty">Stored in environment_secrets.</span>
-        </label>
-        <label id="aws-secret-key-add-group" style="display:none">
-          Secret Access Key
-          <input type="password" name="aws_secret_access_key" placeholder="...">
-          <span class="empty">Stored in environment_secrets.</span>
+        <label>
+          External ID
+          <input type="text" name="aws_external_id" placeholder="optional external ID">
         </label>
         <div class="form-actions">
           <button type="submit" class="btn-primary">Add Environment</button>

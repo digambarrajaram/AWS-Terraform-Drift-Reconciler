@@ -31,13 +31,24 @@ def _debug(msg: str) -> None:
         print(msg)
 
 
-def create_rollback_run(pr_number: int, scope: str, mode: str = "preview") -> str:
+def create_rollback_run(
+    pr_number: int,
+    scope: str,
+    mode: str = "preview",
+    user_id: str | None = None,
+) -> str:
     if not _URL or not _KEY:
         raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
+    payload: dict = {"pr_number": pr_number, "scope": scope, "mode": mode, "status": "running"}
+    if user_id is None:
+        from drift_reconciler.ownership import owner_user_id_for_scope
+        user_id = owner_user_id_for_scope(scope)
+    if user_id:
+        payload["user_id"] = user_id
     resp = requests.post(
         f"{_URL}/rest/v1/{_TABLE}",
         headers=_HEADERS,
-        json={"pr_number": pr_number, "scope": scope, "mode": mode, "status": "running"},
+        json=payload,
         timeout=10,
     )
     _debug(f"  [rollback_runs] POST → {resp.status_code} {resp.text[:120]}")

@@ -4,7 +4,7 @@ Post workflow outcome to Slack.
 Usage:
     python drift_reconciler/workflow_notify.py <outcome> <scope> <pr_number> [details]
 
-Requires SLACK_WEBHOOK_URL in the environment.
+Uses the configured Slack webhook from notification_secrets.
 """
 
 import os
@@ -44,15 +44,11 @@ def main() -> int:
     try:
         from notification_config import get_notification_secrets
         secrets = get_notification_secrets()
-        url = (secrets.get("slack_webhook_url") or "").strip()
-        if url:
-            webhook_url = url
+        webhook_url = (secrets.get("slack_webhook_url") or "").strip()
     except Exception:
         pass
     if not webhook_url:
-        webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        print("[workflow-notify] SLACK_WEBHOOK_URL is empty — skipping")
+        print("[workflow-notify] No Slack webhook configured in notification_secrets — skipping")
         return 0
 
     pr_link = f"<https://github.com/{os.environ.get('GITHUB_REPOSITORY', '')}/pull/{pr_number}|PR #{pr_number}>"

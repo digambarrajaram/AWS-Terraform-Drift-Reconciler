@@ -38,10 +38,10 @@ def _parse_repo_url(repo_url: str) -> str:
 def resolve_repo_target(account_label: str | None) -> tuple[str, str, str]:
     """Return ``(repo_slug, token, base_branch)`` for *account_label*.
 
-    Resolves the environment row (repo_url + environment_secrets.github_token)
-    first; falls back to the global GITHUB_REPO/GITHUB_TOKEN env vars.
-    Returns empty strings for anything that doesn't resolve — callers
-    decide the safe-default behavior."""
+    All GitHub repo and token configuration must be stored on the
+    environment row / environment_secrets records. No fallback to root
+    .env variables is allowed.
+    """
     env_dict: dict = {}
     url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -67,7 +67,4 @@ def resolve_repo_target(account_label: str | None) -> tuple[str, str, str]:
         if token and slug:
             return slug, token, branch
 
-    # Global fallback — legacy env vars (pre-environments behavior).
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    repo_name = os.getenv("GITHUB_REPO", "").strip()
-    return repo_name, token, os.getenv("GITHUB_BASE_BRANCH", "main")
+    return "", "", "main"

@@ -102,7 +102,7 @@ def claim_decision(pending_id: str, decision: str, approved_by: str) -> dict:
 
 
 def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
-                         review_only: bool = False) -> bool:
+                         review_only: bool = False, user_id: str | None = None) -> bool:
     """Insert an awaiting_approval row for a newly-created PR.
 
     This is the PRIMARY trigger for the dashboard Approve/Reject flow:
@@ -111,7 +111,11 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
     *pr_type* mirrors the drift_events vocabulary (fix/batch/unmanaged/
     security_only/rollback) so the queue can label and filter PR kinds.
     *review_only* marks security PRs that carry no .tf patch (manual
-    review) — Approvals treats them differently from real-fix PRs."""
+    review) — Approvals treats them differently from real-fix PRs.
+
+    *user_id* is stamped from the owning environment when omitted (agent /
+    webhook paths have no JWT — option (a) via environment owner lookup).
+    """
     if not _URL or not _KEY:
         print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
@@ -125,16 +129,23 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
         if existing.status_code == 200 and existing.json():
             return False  # already tracked
 
+        if user_id is None:
+            from drift_reconciler.ownership import owner_user_id_for_scope
+            user_id = owner_user_id_for_scope(scope)
+        row = {
+            "pr_number": pr_number,
+            "scope": scope,
+            "status": "awaiting_approval",
+            "pr_type": pr_type,
+            "review_only": bool(review_only),
+        }
+        if user_id:
+            row["user_id"] = user_id
+
         resp = requests.post(
             f"{_URL}/rest/v1/{_TABLE}",
             headers=_HEADERS,
-            json={
-                "pr_number": pr_number,
-                "scope": scope,
-                "status": "awaiting_approval",
-                "pr_type": pr_type,
-                "review_only": bool(review_only),
-            },
+            json=row,
             timeout=10,
         )
         if resp.status_code in (200, 201):

@@ -2,6 +2,7 @@
 # Pin to the versions validated in development (Aug 2026).
 requests==2.32.5
 boto3==1.43.62
+PyJWT==2.10.1
 PyGithub==2.9.1
 langgraph==1.2.9
 langchain-core==1.5.3

@@ -8,7 +8,7 @@ import sys
 
 import requests
 
-from drift_reconciler.utils import mask_secret as _mask
+from drift_reconciler.utils import is_valid_github_pat, mask_secret as _mask
 
 class EnvironmentsMixin:
     def _env_table(self):
@@ -23,7 +23,7 @@ class EnvironmentsMixin:
 
         Raises RuntimeError on ANY failed write (non-200 PATCH, failed
         INSERT, or failed value-PATCH) — a silent half-write leaves a row
-        with NULL keys, which later breaks auth_type='keys' with no trace."""
+        with NULL secrets, which later breaks token auth with no trace."""
         secrets_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Prefer": "return=representation"}
@@ -60,7 +60,7 @@ class EnvironmentsMixin:
         table_url, headers = self._env_table()
         try:
             resp = requests.get(
-                f"{table_url}?select=*&order=created_at",
+                f"{table_url}?select=*&order=created_at" + (f"&user_id=eq.{self.auth_user_id}" if getattr(self, "auth_user_id", None) else ""),
                 headers={k: v for k, v in headers.items() if k != "Prefer"},
                 timeout=10,
             )
@@ -76,7 +76,7 @@ class EnvironmentsMixin:
                     s_headers = {"apikey": s_key, "Authorization": f"Bearer {s_key}"}
                     try:
                         s_resp = requests.get(
-                            f"{s_url}?select=environment_id,github_token,aws_access_key_id,aws_secret_access_key,webhook_secret&environment_id=in.({ids})",
+                            f"{s_url}?select=environment_id,github_token,webhook_secret&environment_id=in.({ids})",
                             headers=s_headers, timeout=10,
                         )
                         if s_resp.status_code != 200:
@@ -91,15 +91,9 @@ class EnvironmentsMixin:
                 for e in envs:
                     sec = secrets_lookup.get(e["id"], {})
                     tok = sec.get("github_token", "") if isinstance(sec, dict) else ""
-                    access_key = sec.get("aws_access_key_id", "") if isinstance(sec, dict) else ""
-                    secret_key = sec.get("aws_secret_access_key", "") if isinstance(sec, dict) else ""
                     webhook_sec = sec.get("webhook_secret", "") if isinstance(sec, dict) else ""
                     e["github_token_configured"] = bool(tok)
                     e["github_token_masked"] = _mask(tok)
-                    e["aws_access_key_configured"] = bool(access_key)
-                    e["aws_access_key_masked"] = _mask(access_key)
-                    e["aws_secret_key_configured"] = bool(secret_key)
-                    e["aws_secret_key_masked"] = _mask(secret_key)
                     e["webhook_secret_configured"] = bool(webhook_sec)
                     e["webhook_secret_masked"] = _mask(webhook_sec)
 
@@ -148,36 +142,59 @@ class EnvironmentsMixin:
             self._json_error(400, "region must be a valid AWS region.")
             return
 
-        # Optional fields
-        for opt in ["aws_profile", "tf_lock_table", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "scan_role_arn", "aws_external_id"]:
+        # Optional fields (auth_type is hardcoded to role — not client-chosen)
+        for opt in ["aws_profile", "tf_lock_table", "apply_environment_name", "repo_url", "repo_branch", "git_auth_type", "scan_role_arn"]:
             if opt in body and body[opt] is not None and not isinstance(body[opt], str):
                 self._json_error(400, f"{opt} must be a string.")
                 return
             if body.get(opt):
                 row[opt] = body[opt].strip()
 
-        for field in ("aws_role_arn", "scan_role_arn"):
-            if row.get(field) and not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", row[field]):
-                self._json_error(400, f"{field} must be a valid IAM role ARN.")
-                return
+        # Role-only: aws_role_arn required; aws_external_id optional.
+        role_arn = (body.get("aws_role_arn") or "").strip()
+        if not isinstance(body.get("aws_role_arn", ""), (str, type(None))):
+            self._json_error(400, "aws_role_arn must be a string.")
+            return
+        if not role_arn or not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", role_arn):
+            self._json_error(400, "aws_role_arn is required and must be a valid IAM role ARN.")
+            return
+        row["aws_role_arn"] = role_arn
+
+        external_id = body.get("aws_external_id")
+        if external_id is not None and not isinstance(external_id, str):
+            self._json_error(400, "aws_external_id must be a string.")
+            return
+        external_id = (external_id or "").strip()
+        if external_id:
+            row["aws_external_id"] = external_id
+
+        # Keep column for schema stability; always stamp role (ignore client).
+        row["auth_type"] = "role"
+
+        if row.get("scan_role_arn") and not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", row["scan_role_arn"]):
+            self._json_error(400, "scan_role_arn must be a valid IAM role ARN.")
+            return
         if row.get("repo_url") and not re.match(r"^(https://|git@|ssh://)", row["repo_url"]):
             self._json_error(400, "repo_url must use https, git@, or ssh://.")
             return
 
-        # Guard: auth_type='keys' requires keys.
-        if row.get("auth_type") == "keys":
-            keys_in_request = (body.get("_aws_access_key_id") or "").strip() and (body.get("_aws_secret_access_key") or "").strip()
-            if not keys_in_request:
-                self._json_error(400, "auth_type='keys' requires both aws_access_key_id and aws_secret_access_key.")
+        git_auth = (row.get("git_auth_type") or "").strip()
+        repo_url = (row.get("repo_url") or "").strip()
+        if repo_url and git_auth == "token":
+            gh = (body.get("_github_token") or "").strip()
+            if not gh:
+                self._json_error(400, "github_token is required when repo_url is set and git_auth_type='token'.")
+                return
+            if not is_valid_github_pat(gh):
+                self._json_error(400, "github_token must be a valid GitHub personal access token.")
                 return
 
-        # Guard: auth_type is required for new environments and must be
-        # 'role' or 'keys'.  Legacy values ('profile' / NULL) are only
-        # permitted on UPDATE for existing environments (scope-a, scope-b).
-        at = (row.get("auth_type") or "").strip()
-        if at not in ("role", "keys"):
-            self._json_error(400, "auth_type is required for new environments and must be 'role' or 'keys'.")
+        # Ownership: always stamp from verified JWT; never trust client body.
+        body.pop("user_id", None)
+        if not getattr(self, "auth_user_id", None):
+            self._json_error(401, "unauthorized")
             return
+        row["user_id"] = self.auth_user_id
 
         table_url, headers = self._env_table()
         try:
@@ -188,7 +205,7 @@ class EnvironmentsMixin:
                 env_id = new_row.get("id")
                 # Write secrets to environment_secrets if provided.
                 secrets_to_write = {}
-                for k in ("_github_token", "_aws_access_key_id", "_aws_secret_access_key", "_webhook_secret"):
+                for k in ("_github_token", "_webhook_secret"):
                     val = (body.get(k) or "").strip()
                     if val:
                         secrets_to_write[k.lstrip("_")] = val
@@ -218,7 +235,7 @@ class EnvironmentsMixin:
                 # Slug exists — apply the submitted configuration when
                 # reactivating a soft-deleted row.
                 existing = requests.get(
-                    f"{table_url}?select=id&slug=eq.{slug}&is_active=eq.false&limit=1",
+                    f"{table_url}?select=id&slug=eq.{slug}&is_active=eq.false" + (f"&user_id=eq.{self.auth_user_id}" if getattr(self, "auth_user_id", None) else "") + "&limit=1",
                     headers=headers, timeout=10,
                 )
                 if existing.status_code != 200 or not existing.json():
@@ -234,7 +251,7 @@ class EnvironmentsMixin:
                 if reactivate.status_code in (200, 204):
                     secrets_to_write = {
                         k.lstrip("_"): (body.get(k) or "").strip()
-                        for k in ("_github_token", "_aws_access_key_id", "_aws_secret_access_key", "_webhook_secret")
+                        for k in ("_github_token", "_webhook_secret")
                         if isinstance(body.get(k), str) and body.get(k).strip()
                     }
                     if secrets_to_write:
@@ -261,20 +278,16 @@ class EnvironmentsMixin:
             self._json_error(400, "Invalid or empty JSON body")
             return
 
-        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type", "auth_type", "aws_role_arn", "scan_role_arn", "aws_external_id"}
+        allowed = {"name", "aws_account_id", "aws_profile", "region", "tf_state_bucket", "tf_lock_table", "tf_directory_path", "apply_environment_name", "is_active", "repo_url", "repo_branch", "git_auth_type", "aws_role_arn", "scan_role_arn", "aws_external_id"}
         updates = {}
         github_token_val = None
-        aws_access_key_val = None
-        aws_secret_key_val = None
         webhook_secret_val = None
         clear_github_token = body.get("git_auth_type") == "none"
         for k, v in body.items():
+            if k in ("_aws_access_key_id", "_aws_secret_access_key", "auth_type"):
+                continue  # keys auth removed; auth_type hardcoded server-side
             if k == "_github_token":
                 github_token_val = (str(v).strip() or None)
-            elif k == "_aws_access_key_id":
-                aws_access_key_val = (str(v).strip() or None)
-            elif k == "_aws_secret_access_key":
-                aws_secret_key_val = (str(v).strip() or None)
             elif k == "_webhook_secret":
                 webhook_secret_val = (str(v).strip() or None)
             elif k in allowed:
@@ -286,7 +299,11 @@ class EnvironmentsMixin:
                     self._json_error(400, f"{k} must be a string.")
                     return
                 updates[k] = v
-        if not updates and not github_token_val and not aws_access_key_val and not aws_secret_key_val and not webhook_secret_val:
+        updates.pop("user_id", None)  # never allow client to reassign owner
+        # Any non-trivial config patch re-asserts role-only auth.
+        if any(k in updates for k in ("aws_role_arn", "aws_external_id", "repo_url", "git_auth_type", "name", "aws_account_id", "region", "tf_state_bucket", "tf_directory_path")):
+            updates["auth_type"] = "role"
+        if not updates and not github_token_val and not webhook_secret_val:
             self._json_error(400, "No valid fields to update.")
             return
 
@@ -302,47 +319,87 @@ class EnvironmentsMixin:
         ):
             self._json_error(400, "region must be a valid AWS region.")
             return
-        for field in ("aws_role_arn", "scan_role_arn"):
-            if field in updates and updates[field] and not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", updates[field].strip()):
-                self._json_error(400, f"{field} must be a valid IAM role ARN.")
+        if "aws_role_arn" in updates:
+            arn = (updates["aws_role_arn"] or "").strip() if isinstance(updates["aws_role_arn"], str) else ""
+            if not arn or not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", arn):
+                self._json_error(400, "aws_role_arn is required and must be a valid IAM role ARN.")
                 return
+            updates["aws_role_arn"] = arn
+        if "aws_external_id" in updates:
+            ext = (updates["aws_external_id"] or "").strip() if isinstance(updates["aws_external_id"], str) else ""
+            updates["aws_external_id"] = ext or None
+        if "scan_role_arn" in updates and updates["scan_role_arn"] and not re.fullmatch(r"arn:aws[a-z-]*:iam::\d{12}:role/.+", updates["scan_role_arn"].strip()):
+            self._json_error(400, "scan_role_arn must be a valid IAM role ARN.")
+            return
         if "repo_url" in updates and updates["repo_url"] and not re.match(r"^(https://|git@|ssh://)", updates["repo_url"].strip()):
             self._json_error(400, "repo_url must use https, git@, or ssh://.")
             return
 
-        # Guard: switching to auth_type='keys' requires keys (either in this
-        # request or already stored).
-        if updates.get("auth_type") == "keys":
-            have_new_keys = aws_access_key_val and aws_secret_key_val
-            if not have_new_keys:
-                # Check if keys already exist in environment_secrets.
-                have_existing = False
+        # github_token required when resulting git auth is token + repo_url set.
+        # Fetch current row when fields are only partially present in the PATCH.
+        need_git_check = (
+            "repo_url" in updates
+            or "git_auth_type" in updates
+            or github_token_val is not None
+        )
+        if need_git_check:
+            cur_repo = updates.get("repo_url")
+            cur_git = updates.get("git_auth_type")
+            if cur_repo is None or cur_git is None:
                 try:
-                    s_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
-                    s_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-                    s_resp = requests.get(
-                        f"{s_url}?select=aws_access_key_id,aws_secret_access_key&environment_id=eq.{env_id}",
-                        headers={"apikey": s_key, "Authorization": f"Bearer {s_key}"},
+                    look = requests.get(
+                        f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environments"
+                        f"?select=repo_url,git_auth_type&id=eq.{env_id}&limit=1",
+                        headers={
+                            "apikey": os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
+                            "Authorization": f"Bearer {os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()}",
+                        },
                         timeout=10,
                     )
-                    if s_resp.status_code == 200 and s_resp.json():
-                        row = s_resp.json()[0]
-                        have_existing = bool((row.get("aws_access_key_id") or "").strip()) and bool((row.get("aws_secret_access_key") or "").strip())
-                except Exception:
-                    pass
-                if not have_existing:
-                    self._json_error(400, "auth_type='keys' requires both aws_access_key_id and aws_secret_access_key.")
-                    return
+                    existing = (look.json() or [{}])[0] if look.status_code == 200 else {}
+                except requests.RequestException:
+                    existing = {}
+                if cur_repo is None:
+                    cur_repo = existing.get("repo_url")
+                if cur_git is None:
+                    cur_git = existing.get("git_auth_type")
+            if (cur_repo or "").strip() and (cur_git or "").strip() == "token":
+                if not (github_token_val or "").strip():
+                    # Allow keep-existing token if one is already stored.
+                    have_token = False
+                    try:
+                        s_url = f"{os.environ.get('SUPABASE_URL', '').strip().rstrip('/')}/rest/v1/environment_secrets"
+                        s_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+                        s_resp = requests.get(
+                            f"{s_url}?select=github_token&environment_id=eq.{env_id}",
+                            headers={"apikey": s_key, "Authorization": f"Bearer {s_key}"},
+                            timeout=10,
+                        )
+                        if s_resp.status_code == 200 and s_resp.json():
+                            have_token = bool((s_resp.json()[0].get("github_token") or "").strip())
+                    except Exception:
+                        pass
+                    if not have_token:
+                        self._json_error(
+                            400,
+                            "github_token is required when repo_url is set and git_auth_type='token'.",
+                        )
+                        return
+
+        if github_token_val and not is_valid_github_pat(github_token_val):
+            self._json_error(400, "github_token must be a valid GitHub personal access token.")
+            return
 
         from datetime import datetime, timezone
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         table_url, headers = self._env_table()
         try:
-            resp = requests.patch(f"{table_url}?id=eq.{env_id}", headers=headers, json=updates, timeout=10)
+            owner_q = f"&user_id=eq.{self.auth_user_id}" if getattr(self, "auth_user_id", None) else ""
+            resp = requests.patch(f"{table_url}?id=eq.{env_id}{owner_q}", headers=headers, json=updates, timeout=10)
             if resp.status_code in (200, 204):
                 secrets_to_write = {}
-                for k, var in [("github_token", github_token_val), ("aws_access_key_id", aws_access_key_val), ("aws_secret_access_key", aws_secret_key_val), ("webhook_secret", webhook_secret_val)]:
+                for k, var in [("github_token", github_token_val), ("webhook_secret", webhook_secret_val)]:
                     if var or (k == "github_token" and clear_github_token):
                         secrets_to_write[k] = var
                 if secrets_to_write:
@@ -379,13 +436,22 @@ class EnvironmentsMixin:
         table_url, headers = self._env_table()
         from datetime import datetime, timezone
         try:
+            owner_q = f"&user_id=eq.{self.auth_user_id}" if getattr(self, "auth_user_id", None) else ""
             resp = requests.patch(
-                f"{table_url}?id=eq.{env_id}",
+                f"{table_url}?id=eq.{env_id}{owner_q}",
                 headers=headers,
                 json={"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()},
                 timeout=10,
             )
             if resp.status_code in (200, 204):
+                if resp.status_code == 200 and resp.text:
+                    try:
+                        deleted_rows = resp.json()
+                    except ValueError:
+                        deleted_rows = None
+                    if isinstance(deleted_rows, list) and len(deleted_rows) == 0:
+                        self._json_error(404, "Environment not found.")
+                        return
                 data = json.dumps({"status": "ok"}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

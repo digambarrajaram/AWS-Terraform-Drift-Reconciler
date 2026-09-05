@@ -80,7 +80,7 @@ EXPOSE 8080
 
 # /api/config is on the public allowlist (login bootstrap + health).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-    CMD curl -fsS http://0.0.0.0:8080/api/config || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/api/config || exit 1
 
 # Bind 0.0.0.0 inside the container so published ports / reverse proxies can reach
 # the process. On bare metal the default is 127.0.0.1 — put TLS proxy in front.

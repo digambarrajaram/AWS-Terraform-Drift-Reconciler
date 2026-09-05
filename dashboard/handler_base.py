@@ -1227,9 +1227,13 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 rpc_results[name] = resp.json() or []
 
             since = (datetime.now(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
+            drift_only = {
+                "unmanaged": "eq.false",
+                "pr_type": "not.in.(unmanaged,security_only)",
+            }
 
             def fetch_events(extra=None):
-                query = {"account": f"eq.{scope}", "created_at": f"gte.{since}"}
+                query = {"account": f"eq.{scope}", "created_at": f"gte.{since}", **drift_only}
                 query.update(extra or {})
                 return requests.get(
                     f"{base}/rest/v1/drift_events", params={"select": "resource_id", **query},

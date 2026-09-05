@@ -351,7 +351,9 @@ async function fetchSummary(scope, days) {
   var q = _supabase()
     .from("drift_events")
     .select("id,resource_id,status")
-    .eq("account", scope);
+    .eq("account", scope)
+    .eq("unmanaged", false)
+    .not("pr_type", "in", "(unmanaged,security_only)");
 
   if (days > 0) {
     var since = new Date(Date.now() - days * 86400000).toISOString();

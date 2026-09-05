@@ -101,14 +101,16 @@ def generate_report(account: str, days: int = 90) -> str:
     # ── Drift volume over time (RPC) ──
     volume_rows = _rpc("get_drift_volume_daily", rpc_params)
 
+    drift_filter = "&unmanaged=eq.false&pr_type=not.in.(unmanaged,security_only)"
+
     # ── Rollbacks (raw query — no RPC yet) ──
     rollbacks = _get(f"select=pr_number&{acct_filter}{date_filter}&pr_type=eq.rollback")
 
-    # ── Unresolved (raw query — no RPC yet) ──
-    unresolved = _get(f"select=*&{acct_filter}{date_filter}&status=eq.open")
+    # ── Unresolved drift (raw query — no RPC yet) ──
+    unresolved = _get(f"select=*&{acct_filter}{date_filter}&status=eq.open{drift_filter}")
 
-    # ── Total counts (raw query) ──
-    total_raw = _get(f"select=resource_id&{acct_filter}{date_filter}")
+    # ── Total counts (raw query — drift only, exclude unmanaged/security) ──
+    total_raw = _get(f"select=resource_id&{acct_filter}{date_filter}{drift_filter}")
     total = len(total_raw)
     unique = len(set(r.get("resource_id", "") for r in total_raw))
 

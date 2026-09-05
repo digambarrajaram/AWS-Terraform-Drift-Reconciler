@@ -16,6 +16,8 @@ as $$
     select resource_id, count(*) as drift_count
     from drift_events
     where account = p_account
+      and coalesce(unmanaged, false) = false
+      and coalesce(pr_type, 'fix') not in ('unmanaged', 'security_only')
       and (p_days = 0 or created_at >= current_date - ((p_days - 1) || ' days')::interval)
     group by resource_id
     order by drift_count desc
@@ -54,6 +56,8 @@ as $$
            count(*)::bigint as count
     from drift_events
     where account = p_account
+      and coalesce(unmanaged, false) = false
+      and coalesce(pr_type, 'fix') not in ('unmanaged', 'security_only')
       and (p_days = 0 or created_at >= current_date - ((p_days - 1) || ' days')::interval)
     group by 1
     order by 1;

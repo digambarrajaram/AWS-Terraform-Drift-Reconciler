@@ -29,10 +29,15 @@ class ExceptionsMixin:
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         headers = {"apikey": key, "Authorization": f"Bearer {key}"}
         base = f"{url}/rest/v1/drift_exception_registry"
+        user_filter = (
+            f"&user_id=eq.{self.auth_user_id}"
+            if getattr(self, "auth_user_id", None) else ""
+        )
 
         def _fetch(exception_type):
             resp = requests.get(
-                f"{base}?select=*&scope=eq.{scope_raw}&exception_type=eq.{exception_type}&active=eq.true&order=created_at.desc",
+                f"{base}?select=*&scope=eq.{scope_raw}&exception_type=eq.{exception_type}"
+                f"{user_filter}&active=eq.true&order=created_at.desc",
                 headers=headers, timeout=10,
             )
             if resp.status_code != 200:
@@ -95,6 +100,8 @@ class ExceptionsMixin:
                 return
 
             row = {"scope": scope, "exception_type": exception_type, "reason": entry.get("reason", "").strip()}
+            if getattr(self, "auth_user_id", None):
+                row["user_id"] = self.auth_user_id
             if exception_type == "drift":
                 row["resource_address"] = (entry.get("resource_address") or "").strip()
                 row["drift_type"] = (entry.get("drift_type") or "*").strip()
@@ -167,6 +174,10 @@ class ExceptionsMixin:
         Prefer ``entry.id`` when the dashboard sends it (all three tabs do).
         Fall back to the composite natural key for older clients / scripts.
         """
+        user_filter = (
+            f"user_id=eq.{self.auth_user_id}&"
+            if getattr(self, "auth_user_id", None) else ""
+        )
         row_id = entry.get("id")
         if row_id is not None and str(row_id).strip():
             filter_parts = [
@@ -200,7 +211,7 @@ class ExceptionsMixin:
                 filter_parts.append(f"resource_type=eq.{rt}")
                 filter_parts.append(f"resource_id_pattern=eq.{pat}")
 
-        filter_str = "&".join(filter_parts)
+        filter_str = user_filter + "&".join(filter_parts)
         try:
             resp = requests.patch(f"{table_url}?{filter_str}", headers=headers, json=updates, timeout=10)
             if resp.status_code in (200, 204):

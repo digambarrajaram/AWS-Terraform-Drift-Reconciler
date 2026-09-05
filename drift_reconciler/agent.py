@@ -310,6 +310,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    from drift_reconciler.environment_credentials import verify_clone_base_writable
+    try:
+        verify_clone_base_writable()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
     # Set module-level globals before the pipeline runs so graph nodes
     # (alerts, LLM calls, unmanaged scanner) pick up the right values.
     _region = args.region

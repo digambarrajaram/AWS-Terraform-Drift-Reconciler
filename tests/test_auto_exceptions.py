@@ -47,6 +47,10 @@ class _Resp:
         return self.data
 
 
+def _owner_lookup_resp(user_id="00000000-0000-0000-0000-000000000001"):
+    return _Resp([{"user_id": user_id}])
+
+
 class UnmanagedMergeTests(unittest.TestCase):
     def test_merge_adds_exception_per_open_resource(self):
         posted = []
@@ -55,7 +59,8 @@ class UnmanagedMergeTests(unittest.TestCase):
         os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "key"
         try:
             real_get, real_post = _patch_requests(
-                [_Resp([{"resource_id": "aws_instance.prod-web"},
+                [_owner_lookup_resp(),
+                 _Resp([{"resource_id": "aws_instance.prod-web"},
                         {"resource_id": "aws_s3_bucket.data-bucket"}]),  # drift_events
                  _Resp([]),  # registry dedup — row 1
                  _Resp([])],  # registry dedup — row 2
@@ -88,7 +93,8 @@ class UnmanagedMergeTests(unittest.TestCase):
         os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "key"
         try:
             real_get, real_post = _patch_requests(
-                [_Resp([{"resource_id": "aws_security_group.launch-wizard-1",
+                [_owner_lookup_resp(),
+                 _Resp([{"resource_id": "aws_security_group.launch-wizard-1",
                          "status": "resolved"}]),  # drift_events — already resolved
                  _Resp([])],  # registry dedup
                 posted,
@@ -105,8 +111,10 @@ class UnmanagedMergeTests(unittest.TestCase):
         self.assertEqual(len(posted), 1)
         self.assertEqual(posted[0]["resource_type"], "aws_security_group")
         self.assertEqual(posted[0]["resource_id_pattern"], "launch-wizard-1")
-        self.assertIn("account=eq.prod-cra", urls[0])
-        self.assertNotIn("status=eq", urls[0])
+        drift_urls = [u for u in urls if "drift_events" in u]
+        self.assertTrue(drift_urls)
+        self.assertIn("account=eq.prod-cra", drift_urls[0])
+        self.assertNotIn("status=eq", drift_urls[0])
 
     def test_existing_exception_not_duplicated(self):
         posted = []
@@ -115,7 +123,8 @@ class UnmanagedMergeTests(unittest.TestCase):
         os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "key"
         try:
             real_get, real_post = _patch_requests(
-                [_Resp([{"resource_id": "aws_instance.prod-web"}]),  # drift_events
+                [_owner_lookup_resp(),
+                 _Resp([{"resource_id": "aws_instance.prod-web"}]),  # drift_events
                  _Resp([{"id": "already-there"}])],  # registry dedup — hit
                 posted,
             )
@@ -136,7 +145,8 @@ class SecurityMergeTests(unittest.TestCase):
         os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "key"
         try:
             real_get, real_post = _patch_requests(
-                [_Resp([{"fixes_jsonb": [
+                [_owner_lookup_resp(),
+                 _Resp([{"fixes_jsonb": [
                     {"resource_address": "aws_s3_bucket.data", "rule_id": "AVD-AWS-0086"},
                     {"resource_address": "aws_s3_bucket.data", "rule_id": "AVD-AWS-0090"},
                 ]}]),  # pending_applies fixes

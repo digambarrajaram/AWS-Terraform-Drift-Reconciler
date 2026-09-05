@@ -360,6 +360,7 @@ class ApprovalsMixin:
                 try:
                     auto_add_exceptions_on_merge(
                         pr_number, scope, _pr_type, approved_by=approved_by,
+                        user_id=row.get("user_id") or self.auth_user_id,
                     )
                     print("  [approve] auto_add_exceptions_on_merge returned "
                           "without exception", file=sys.stderr)
@@ -430,6 +431,7 @@ class ApprovalsMixin:
                     pr_number, scope, "security_only", approved_by=approved_by,
                     reason=f"Excepted via dashboard on security PR #{pr_number}",
                     strict=True,
+                    user_id=row.get("user_id") or self.auth_user_id,
                 )
                 print(f"  [except] auto_add inserted {n} exception row(s) "
                       f"for PR #{pr_number}", file=sys.stderr)
@@ -499,7 +501,7 @@ class ApprovalsMixin:
             # the log viewer can be pointed at it later if desired.
             apply_run_id = row.get("id") or f"apply-{pr_number}-{int(datetime.now().timestamp())}"
             try:
-                tf_dir = _tf_dir_for(scope)
+                tf_dir = _tf_dir_for(scope, self.auth_user_id)
             except RuntimeError as exc:
                 print(f"  ⚠ Apply spawn aborted for {scope}: {exc}", file=sys.stderr)
                 # Mark the row failed so the dashboard shows the true

@@ -12,8 +12,6 @@ create table if not exists environments (
   tf_state_bucket          text,                   -- S3 backend bucket
   tf_lock_table            text default 'terraform-locks',
   tf_directory_path        text,                   -- repo-relative terraform dir
-  scan_role_variable       text,                   -- GitHub Variable name for scan role ARN
-  apply_role_secret_name   text,                   -- GitHub Secret name for apply role ARN
   apply_environment_name   text,                   -- GitHub Environment for approval gate
   is_active                boolean default true,
   created_at               timestamptz default now(),
@@ -23,20 +21,21 @@ create table if not exists environments (
 -- Seed confirmed values from drift-reconciler.yml, backend.tf, and GitHub.
 insert into environments (
   slug, name, aws_account_id, aws_profile, region,
-  tf_state_bucket, tf_directory_path,
-  scan_role_variable, apply_role_secret_name, apply_environment_name
+  tf_state_bucket, tf_directory_path, apply_environment_name
 ) values
   (
     'scope-a', 'Production A', '605134452604', 'account-a', 'us-east-1',
     'scope-a-tf-state-605134452604', 'terraform_code/ec2_terraform_account_a',
-    'SCOPE_A_SCAN_ROLE_ARN', 'SCOPE_A_APPLY_ROLE_ARN', 'scope-a-apply'
+    'scope-a-apply'
   ),
   (
     'scope-b', 'Production B', '605134452604', 'account-b', 'us-west-2',
     'scope-b-tf-state-605134452604', 'terraform_code/ec2_terraform_account_b',
-    'SCOPE_B_SCAN_ROLE_ARN', 'SCOPE_B_APPLY_ROLE_ARN', 'scope-b-apply'
+    'scope-b-apply'
   )
 on conflict (slug) do nothing;
+-- After user_id ownership is added, use on conflict (user_id, slug) instead
+-- (see migrations/environments_user_id_slug_unique.sql).
 
 -- RLS — anon can read active environments only.
 alter table environments enable row level security;

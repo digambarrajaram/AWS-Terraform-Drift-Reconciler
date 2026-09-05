@@ -2,8 +2,8 @@
 Write pending_applies lifecycle events to Supabase.
 
 Same shape as scan_runs.py / rollback_runs.py — the apply job updates its
-own row by (pr_number, scope).  Updates are scoped to ``status=eq.approved``
-so a re-run can't double-apply or clobber a rejected row.
+own row by (user_id, pr_number, scope).  Updates are scoped to
+``status=eq.approved`` so a re-run can't double-apply or clobber a rejected row.
 """
 
 import os
@@ -26,6 +26,21 @@ _HEADERS = {
     "Content-Type": "application/json",
     "Prefer": "return=minimal",
 }
+
+
+def _resolve_user_id(scope: str, user_id: str | None) -> str | None:
+    if user_id:
+        return user_id
+    from drift_reconciler.ownership import owner_user_id_for_scope
+    return owner_user_id_for_scope(scope)
+
+
+def _identity_query(pr_number: int, scope: str, user_id: str | None) -> str:
+    uid = _resolve_user_id(scope, user_id)
+    base = f"pr_number=eq.{pr_number}&scope=eq.{scope}"
+    if uid:
+        return f"{base}&user_id=eq.{uid}"
+    return base
 
 
 def decision_claim_miss_error(row: dict | None) -> tuple[int, str, dict]:
@@ -107,7 +122,7 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
 
     This is the PRIMARY trigger for the dashboard Approve/Reject flow:
     every PR appears in the Approvals page as soon as it's created.
-    Dedup-guarded on (pr_number, scope) so re-runs don't double-insert.
+    Dedup-guarded on (user_id, pr_number, scope) so re-runs don't double-insert.
     *pr_type* mirrors the drift_events vocabulary (fix/batch/unmanaged/
     security_only/rollback) so the queue can label and filter PR kinds.
     *review_only* marks security PRs that carry no .tf patch (manual
@@ -119,19 +134,17 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
     if not _URL or not _KEY:
         print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
+    user_id = _resolve_user_id(scope, user_id)
     try:
         existing = requests.get(
             f"{_URL}/rest/v1/{_TABLE}"
-            f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
+            f"?select=id&{_identity_query(pr_number, scope, user_id)}&limit=1",
             headers=_HEADERS,
             timeout=10,
         )
         if existing.status_code == 200 and existing.json():
             return False  # already tracked
 
-        if user_id is None:
-            from drift_reconciler.ownership import owner_user_id_for_scope
-            user_id = owner_user_id_for_scope(scope)
         row = {
             "pr_number": pr_number,
             "scope": scope,
@@ -157,7 +170,8 @@ def create_pending_apply(pr_number: int, scope: str, pr_type: str | None = None,
         return False
 
 
-def set_security_fixes(pr_number: int, scope: str, fixes: list[dict]) -> bool:
+def set_security_fixes(pr_number: int, scope: str, fixes: list[dict],
+                       user_id: str | None = None) -> bool:
     """Persist the (resource_address, rule_id) pairs a security PR fixes
     onto its awaiting_approval row.  The merge handler reads these back
     to auto-add security exceptions — future scans skip already-fixed
@@ -165,10 +179,11 @@ def set_security_fixes(pr_number: int, scope: str, fixes: list[dict]) -> bool:
     if not _URL or not _KEY:
         print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
+    user_id = _resolve_user_id(scope, user_id)
     try:
         resp = requests.patch(
             f"{_URL}/rest/v1/{_TABLE}"
-            f"?pr_number=eq.{pr_number}&scope=eq.{scope}&status=eq.awaiting_approval",
+            f"?{_identity_query(pr_number, scope, user_id)}&status=eq.awaiting_approval",
             headers=_HEADERS,
             json={"fixes_jsonb": fixes},
             timeout=10,
@@ -182,9 +197,9 @@ def set_security_fixes(pr_number: int, scope: str, fixes: list[dict]) -> bool:
         return False
 
 
-def update_pending_apply(pr_number: int, scope: str, **fields) -> bool:
+def update_pending_apply(pr_number: int, scope: str, user_id: str | None = None, **fields) -> bool:
     """Update the decided (approved OR rejected) pending_applies row for
-    *pr_number* + *scope*.
+    *user_id* + *pr_number* + *scope*.
 
     Terminal statuses: ``applied``, ``failed``, ``reverted`` (file-only
     revert), ``reverted_gate_blocked``, ``manual_revert_required``.
@@ -193,10 +208,11 @@ def update_pending_apply(pr_number: int, scope: str, **fields) -> bool:
     if not _URL or not _KEY:
         print("  [pending_applies] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — skipping")
         return False
+    user_id = _resolve_user_id(scope, user_id)
     try:
         resp = requests.patch(
             f"{_URL}/rest/v1/{_TABLE}"
-            f"?pr_number=eq.{pr_number}&scope=eq.{scope}&status=in.(approved,rejected)",
+            f"?{_identity_query(pr_number, scope, user_id)}&status=in.(approved,rejected)",
             headers=_HEADERS,
             json=fields,
             timeout=10,

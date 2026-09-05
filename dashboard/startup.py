@@ -35,8 +35,18 @@ def main() -> int:
     _load_env()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    from drift_reconciler.environment_credentials import _backend_aws_credential_mode
+    from drift_reconciler.environment_credentials import (
+        _backend_aws_credential_mode,
+        verify_clone_base_writable,
+    )
     logger.info("AWS backend credential mode: %s", _backend_aws_credential_mode())
+
+    try:
+        clone_base = verify_clone_base_writable()
+        logger.info("Git clone directory writable: %s", clone_base)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
 
     # ── Auth gate ──────────────────────────────────────────────────
     _session_secret = os.environ.get("SESSION_SECRET", "").strip()

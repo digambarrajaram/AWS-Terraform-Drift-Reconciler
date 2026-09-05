@@ -520,7 +520,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             try:
-                tf_dir = _tf_dir_for(scope)
+                tf_dir = _tf_dir_for(scope, self.auth_user_id)
             except RuntimeError as se:
                 self._json_error(400, f"Cannot resolve Terraform directory: {se}")
                 return
@@ -601,7 +601,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
             unmanaged_flag_for_db = scan_mode in ("drift_and_unmanaged", "unmanaged_only")
             try:
-                tf_dir = _tf_dir_for(scope)
+                tf_dir = _tf_dir_for(scope, self.auth_user_id)
             except RuntimeError as se:
                 self._json_error(400, f"Cannot resolve Terraform directory: {se}")
                 return
@@ -677,7 +677,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 self._json_error(502, f"Supabase unreachable: {exc}")
                 return
             try:
-                tf_dir = _tf_dir_for(scope)
+                tf_dir = _tf_dir_for(scope, self.auth_user_id)
             except RuntimeError as exc:
                 self._json_error(400, f"Cannot resolve Terraform directory: {exc}")
                 return
@@ -755,7 +755,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
 
             try:
-                tf_dir = _tf_dir_for(scope)
+                tf_dir = _tf_dir_for(scope, self.auth_user_id)
             except RuntimeError as se:
                 self._json_error(400, f"Cannot resolve Terraform directory: {se}")
                 return

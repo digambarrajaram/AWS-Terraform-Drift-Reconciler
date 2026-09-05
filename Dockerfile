@@ -71,12 +71,15 @@ RUN set -eux; \
 
 RUN groupadd --system drift \
     && useradd --system --gid drift --create-home --home-dir /home/drift drift \
-    && mkdir -p /tmp/drift-clones /tmp/drift-logs \
-    && chown -R drift:drift /app /tmp/drift-clones /tmp/drift-logs
+    && mkdir -p /tmp/drift-clones /tmp/drift-logs /var/lib/drift-clones \
+    && chown -R drift:drift /app /tmp/drift-clones /tmp/drift-logs /var/lib/drift-clones
 
-USER drift
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8080
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # /api/config is on the public allowlist (login bootstrap + health).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \

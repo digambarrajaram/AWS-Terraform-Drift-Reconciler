@@ -204,6 +204,54 @@ def get_aws_session(environment: dict) -> boto3.Session:
 
 # ── Git clone / tf_dir resolution ────────────────────────────────────
 
+def clone_base_dir() -> str:
+    """Return the absolute path to ``DRIFT_CLONE_BASE`` (with default)."""
+    return os.path.abspath(os.path.expanduser(os.environ.get(
+        "DRIFT_CLONE_BASE",
+        os.path.join(os.path.expanduser("~"), ".drift-clones"),
+    )))
+
+
+def verify_clone_base_writable() -> str:
+    """Ensure the git clone directory exists and is writable.
+
+    Returns the resolved clone-base path.  Raises ``RuntimeError`` with a
+    clear message when the directory cannot be created or written to —
+    intended for startup fail-fast before any scan attempts ``git clone``.
+    """
+    base = clone_base_dir()
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot create git clone directory {base}: {exc}. "
+            f"Check DRIFT_CLONE_BASE and any Docker volume mount permissions."
+        ) from exc
+
+    probe = os.path.join(base, ".write_probe")
+    try:
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe)
+    except OSError as exc:
+        try:
+            import pwd
+            user = pwd.getpwuid(os.getuid()).pw_name
+        except (ImportError, KeyError, AttributeError):
+            getuid = getattr(os, "getuid", None)
+            user = str(getuid()) if getuid else "unknown"
+        raise RuntimeError(
+            f"Git clone directory {base} is not writable by user '{user}'"
+            f"{f' (uid {os.getuid()})' if getattr(os, 'getuid', None) else ''}. "
+            f"If using a Docker bind mount, ensure the "
+            f"host directory is writable by the container runtime user, or "
+            f"start the container with the image entrypoint (it fixes bind-mount "
+            f"ownership on startup). Original error: {exc}"
+        ) from exc
+
+    return base
+
+
 _TOKEN_RE = None  # compiled lazily when first needed
 
 
@@ -270,10 +318,7 @@ def resolve_tf_dir(environment: dict) -> str:
         return (environment.get("tf_directory_path") or "").strip()
 
     branch = (environment.get("repo_branch") or "main").strip() or "main"
-    base = os.environ.get(
-        "DRIFT_CLONE_BASE",
-        os.path.join(os.path.expanduser("~"), ".drift-clones"),
-    )
+    base = clone_base_dir()
     clone_path = os.path.join(base, slug)
 
     os.makedirs(base, exist_ok=True)

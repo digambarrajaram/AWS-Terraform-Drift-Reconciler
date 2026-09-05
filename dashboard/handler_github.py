@@ -120,7 +120,6 @@ class GitHubMixin:
 
         headers_auth = {"apikey": key, "Authorization": f"Bearer {key}"}
         resolved_env = None
-        resolved_env_id = None
         try:
             resp = requests.get(
                 f"{url_base}/rest/v1/environments"
@@ -130,53 +129,49 @@ class GitHubMixin:
             )
             if resp.status_code == 200:
                 envs = resp.json() if resp.text else []
-                # Match repo_full_name against each environment's repo_url
                 from drift_reconciler.github_client_utils import _parse_repo_url
+                repo_matches = []
                 for env in envs:
                     parsed = _parse_repo_url(env.get("repo_url", ""))
                     if parsed and parsed.lower() == repo_full_name.lower():
-                        resolved_env = env
-                        resolved_env_id = env.get("id")
-                        break
+                        repo_matches.append(env)
+                # Disambiguate per-user environments sharing a repo URL by
+                # verifying the webhook HMAC against each candidate's secret.
+                sig_header = self.headers.get("X-Hub-Signature-256", "")
+                if sig_header.startswith("sha256="):
+                    received = sig_header[len("sha256="):].strip()
+                    for env in repo_matches:
+                        env_id = env.get("id")
+                        if not env_id:
+                            continue
+                        try:
+                            sec_resp = requests.get(
+                                f"{url_base}/rest/v1/environment_secrets"
+                                f"?select=webhook_secret&environment_id=eq.{env_id}",
+                                headers=headers_auth,
+                                timeout=10,
+                            )
+                            if sec_resp.status_code != 200:
+                                continue
+                            rows = sec_resp.json() if sec_resp.text else []
+                            if not rows:
+                                continue
+                            webhook_secret = (rows[0].get("webhook_secret") or "").strip()
+                            if not webhook_secret:
+                                continue
+                            expected = hmac.new(
+                                webhook_secret.encode("utf-8"), raw, hashlib.sha256,
+                            ).hexdigest()
+                            if hmac.compare_digest(expected, received):
+                                resolved_env = env
+                                break
+                        except requests.RequestException:
+                            continue
         except requests.RequestException:
             pass
 
         if not resolved_env:
             # No environment found for this repo — return 401 (don't leak)
-            self._json_error(401, "Unauthorized")
-            return
-
-        # ── Fetch webhook_secret from environment_secrets (or fall back) ─
-        webhook_secret = None
-        try:
-            resp = requests.get(
-                f"{url_base}/rest/v1/environment_secrets"
-                f"?select=webhook_secret&environment_id=eq.{resolved_env_id}",
-                headers=headers_auth,
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                rows = resp.json() if resp.text else []
-                if rows:
-                    webhook_secret = (rows[0].get("webhook_secret") or "").strip() or None
-        except requests.RequestException:
-            pass
-
-        # Webhook verification must use the environment's configured secret.
-        # No global GitHub token fallback is allowed.
-        if not webhook_secret:
-            self._json_error(401, "Unauthorized")
-            return
-
-        # ── Verify signature using the resolved secret ──────────────────
-        sig_header = self.headers.get("X-Hub-Signature-256", "")
-        if not sig_header.startswith("sha256="):
-            self._json_error(401, "Unauthorized")
-            return
-
-        expected = hmac.new(webhook_secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
-        received = sig_header[len("sha256="):].strip()
-        if not hmac.compare_digest(expected, received):
             self._json_error(401, "Unauthorized")
             return
 
@@ -229,18 +224,25 @@ class GitHubMixin:
             pr_type = "fix"
 
         # ── Insert pending_applies row ──────────────────────────────────
-        # Skip if a row already exists for this (pr_number, scope) in ANY
-        # status: the dashboard claim flips awaiting_approval → approved/
-        # rejected BEFORE the merged webhook is delivered, so checking only
-        # awaiting_approval would let a redelivery insert a duplicate.
-        # A (pr_number, scope) unique index backs this up for concurrent
-        # deliveries (see migrations/add_unique_pr_scope_to_pending_applies.sql).
+        # Skip if a row already exists for this (user_id, pr_number, scope)
+        # in ANY status: the dashboard claim flips awaiting_approval →
+        # approved/rejected BEFORE the merged webhook is delivered, so
+        # checking only awaiting_approval would let a redelivery insert a
+        # duplicate.  A (user_id, pr_number, scope) unique index backs
+        # this up for concurrent deliveries (see
+        # migrations/pending_applies_user_id_pr_scope_unique.sql).
+        owner_user_id = resolved_env.get("user_id")
         headers_body = {"apikey": key, "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json", "Prefer": "return=representation"}
         try:
-            existing = requests.get(
+            existing_q = (
                 f"{url_base}/rest/v1/pending_applies"
-                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
+                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}"
+            )
+            if owner_user_id:
+                existing_q += f"&user_id=eq.{owner_user_id}"
+            existing = requests.get(
+                f"{existing_q}&limit=1",
                 headers=headers_body, timeout=10,
             )
             if existing.status_code == 200 and existing.json():
@@ -257,12 +259,12 @@ class GitHubMixin:
                     "pr_type": pr_type,
                     "merged_at": merged_at,
                     "merge_commit_sha": merge_commit_sha or None,
-                    **({"user_id": resolved_env["user_id"]} if resolved_env.get("user_id") else {}),
+                    **({"user_id": owner_user_id} if owner_user_id else {}),
                 },
                 timeout=10,
             )
             if resp.status_code == 409:
-                # Unique (pr_number, scope) violation — a concurrent
+                # Unique (user_id, pr_number, scope) violation — a concurrent
                 # delivery inserted the row first.  Same as a dedup hit.
                 self._send_no_content()
                 return
@@ -288,6 +290,7 @@ class GitHubMixin:
             auto_add_exceptions_on_merge(
                 pr_number, scope, pr_type,
                 approved_by=(payload.get("sender") or {}).get("login") or "webhook",
+                user_id=owner_user_id,
             )
 
         data = json.dumps({"ok": True}).encode("utf-8")

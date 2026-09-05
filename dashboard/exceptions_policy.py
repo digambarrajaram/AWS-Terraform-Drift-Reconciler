@@ -69,7 +69,7 @@ def _validate_exception_entry_local(exception_type: str, entry: dict) -> tuple[b
 
 def auto_add_exceptions_on_merge(
     pr_number: int, scope: str, pr_type: str | None, approved_by: str,
-    reason: str | None = None, strict: bool = False,
+    reason: str | None = None, strict: bool = False, user_id: str | None = None,
 ) -> int:
     """Policy: merging an unmanaged/security PR auto-adds the covered
     resources/rules to the exception registry — no separate manual
@@ -95,12 +95,17 @@ def auto_add_exceptions_on_merge(
     write_headers = {**read_headers, "Content-Type": "application/json"}
     base = f"{url}/rest/v1/drift_exception_registry"
 
+    if user_id is None:
+        from drift_reconciler.ownership import owner_user_id_for_scope
+        user_id = owner_user_id_for_scope(scope)
+
     def _already_exists(exception_type: str, **filters) -> bool:
         q = "&".join(f"{k}=eq.{v}" for k, v in filters.items())
+        user_filter = f"&user_id=eq.{user_id}" if user_id else ""
         try:
             resp = requests.get(
                 f"{base}?select=id&scope=eq.{scope}&exception_type=eq.{exception_type}"
-                f"&{q}&active=eq.true&limit=1",
+                f"{user_filter}&{q}&active=eq.true&limit=1",
                 headers=read_headers, timeout=10,
             )
             return bool(resp.json()) if resp.text and resp.status_code == 200 else False
@@ -111,6 +116,8 @@ def auto_add_exceptions_on_merge(
 
     def _insert(row: dict) -> bool:
         nonlocal inserted
+        if user_id:
+            row = {**row, "user_id": user_id}
         try:
             resp = requests.post(base, headers=write_headers, json=row, timeout=10)
             if resp.status_code >= 300:
@@ -171,9 +178,14 @@ def auto_add_exceptions_on_merge(
         # The (resource_address, rule_id) pairs this PR fixed were
         # recorded on its pending_applies row at scan time.
         try:
-            resp = requests.get(
+            pending_q = (
                 f"{url}/rest/v1/pending_applies"
-                f"?select=fixes_jsonb&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
+                f"?select=fixes_jsonb&pr_number=eq.{pr_number}&scope=eq.{scope}"
+            )
+            if user_id:
+                pending_q += f"&user_id=eq.{user_id}"
+            resp = requests.get(
+                f"{pending_q}&limit=1",
                 headers=read_headers, timeout=10,
             )
             rows = resp.json() if resp.text and resp.status_code == 200 else []

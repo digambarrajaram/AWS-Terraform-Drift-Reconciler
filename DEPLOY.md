@@ -153,6 +153,9 @@ Only needed if you want faster first scan after a container recreate and accept 
 ```bash
 mkdir -p /home/ubuntu/drift-reconciler/clones
 
+# The image entrypoint runs briefly as root and chowns the bind mount to the
+# unprivileged `drift` user before starting the app.  Manual chown is only
+# needed if you override ENTRYPOINT or run with --user.
 docker run -d \
   --name drift-reconciler \
   --restart unless-stopped \

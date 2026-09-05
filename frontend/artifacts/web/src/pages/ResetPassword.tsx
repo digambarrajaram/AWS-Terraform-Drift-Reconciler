@@ -4,7 +4,9 @@ import { AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppConfig } from '@/api/config';
 import { updatePassword } from '@/api/supabaseClient';
+import { establishSession, setSupabaseAccessToken } from '@/api/apiFetch';
 import { useAuth } from '@/hooks/useAuth';
+import { hasAuthRedirectInUrl } from '@/lib/supabaseAuthRedirect';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Spinner } from '@/components/ui/spinner';
@@ -31,7 +33,8 @@ export default function ResetPassword() {
   const [confirmError, setConfirmError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const linkInvalid = !authLoading && !configLoading && !session;
+  const linkInvalid =
+    !authLoading && !configLoading && !session && !hasAuthRedirectInUrl();
 
   if (authLoading || configLoading) {
     return (
@@ -75,6 +78,10 @@ export default function ResetPassword() {
           setError(mapUpdatePasswordError(result.error));
         }
         return;
+      }
+      if (session?.access_token) {
+        setSupabaseAccessToken(session.access_token);
+        await establishSession();
       }
       toast.success('Password updated successfully.');
       navigate('/', { replace: true });

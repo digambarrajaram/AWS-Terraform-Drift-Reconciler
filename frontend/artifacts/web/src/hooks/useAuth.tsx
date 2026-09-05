@@ -18,6 +18,10 @@ import {
   getSupabaseClient,
   signOut as supabaseSignOut,
 } from '@/api/supabaseClient';
+import {
+  establishSessionFromAuthRedirect,
+  hasAuthRedirectInUrl,
+} from '@/lib/supabaseAuthRedirect';
 
 interface AuthContextValue {
   session: Session | null;
@@ -67,7 +71,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const client = getSupabaseClient(config);
     let cancelled = false;
 
-    client.auth.getSession().then(async ({ data }) => {
+    (async () => {
+      // Email links land with #access_token=...&type=recovery (or ?code= for PKCE).
+      // Parse explicitly before getSession so /reset-password does not dead-end.
+      if (hasAuthRedirectInUrl()) {
+        try {
+          const redirected = await establishSessionFromAuthRedirect(config);
+          if (cancelled) return;
+          if (redirected) {
+            setSession(redirected);
+            await syncServerSession(redirected.access_token);
+            setLoading(false);
+            return;
+          }
+        } catch {
+          if (cancelled) return;
+          setSession(null);
+          setServerSessionReady(false);
+          setLoading(false);
+          return;
+        }
+      }
+
+      const { data } = await client.auth.getSession();
       if (cancelled) return;
       setSession(data.session);
       if (data.session?.access_token) {
@@ -75,12 +101,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } else {
         setServerSessionReady(false);
       }
-      if (!cancelled) setLoading(false);
-    });
+      setLoading(false);
+    })();
 
     const {
       data: { subscription },
-    } = client.auth.onAuthStateChange((_event, nextSession) => {
+    } = client.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       if (nextSession?.access_token) {
         void syncServerSession(nextSession.access_token);
@@ -88,7 +114,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSupabaseAccessToken(null);
         setServerSessionReady(false);
       }
-      setLoading(false);
+      if (event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') {
+        setLoading(false);
+      }
     });
 
     return () => {

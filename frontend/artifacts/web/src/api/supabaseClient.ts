@@ -9,7 +9,13 @@ let client: SupabaseClient | null = null;
  */
 export function getSupabaseClient(config: AppConfig): SupabaseClient {
   if (!client) {
-    client = createClient(config.supabaseUrl, config.supabaseAnonKey);
+    client = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+      auth: {
+        detectSessionInUrl: true,
+        persistSession: true,
+        autoRefreshToken: true,
+      },
+    });
   }
   return client;
 }

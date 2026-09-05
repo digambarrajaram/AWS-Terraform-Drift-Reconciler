@@ -188,6 +188,19 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         morsel = jar.get(name)
         return morsel.value if morsel else ""
 
+    def _cookie_secure(self) -> bool:
+        """Secure cookies require HTTPS — skip on plain HTTP (e.g. EC2 IP:port)."""
+        explicit = os.environ.get("SESSION_COOKIE_SECURE", "").strip().lower()
+        if explicit in ("0", "false", "no"):
+            return False
+        if explicit in ("1", "true", "yes"):
+            return True
+        forwarded = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            return True
+        app_url = os.environ.get("PUBLIC_APP_URL", "").strip().lower()
+        return app_url.startswith("https://")
+
     def _set_cookie(
         self,
         name: str,
@@ -196,14 +209,17 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         max_age: int,
         httponly: bool,
     ) -> None:
-        # Secure+SameSite=Strict as required; reverse-proxy TLS terminates upstream.
-        flags = f"{name}={value}; Path=/; Max-Age={max_age}; SameSite=Strict; Secure"
+        flags = f"{name}={value}; Path=/; Max-Age={max_age}; SameSite=Strict"
+        if self._cookie_secure():
+            flags += "; Secure"
         if httponly:
             flags += "; HttpOnly"
         self.send_header("Set-Cookie", flags)
 
     def _clear_cookie(self, name: str, *, httponly: bool) -> None:
-        flags = f"{name}=; Path=/; Max-Age=0; SameSite=Strict; Secure"
+        flags = f"{name}=; Path=/; Max-Age=0; SameSite=Strict"
+        if self._cookie_secure():
+            flags += "; Secure"
         if httponly:
             flags += "; HttpOnly"
         self.send_header("Set-Cookie", flags)
@@ -281,7 +297,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _rate_limited(self) -> None:
-        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+        body = json.dumps({"error": "too many requests"}).encode("utf-8")
         self.send_response(429)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -300,10 +316,6 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
 
     def _handle_api_login(self) -> None:
         """POST /api/login — verify Supabase JWT, issue session + CSRF cookies."""
-        if not _auth_rate_allow(self._client_ip()):
-            self._rate_limited()
-            return
-
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length > 0 else b""
         try:
@@ -323,6 +335,9 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return
 
         if not self._check_jwt():
+            if not _auth_rate_allow(self._client_ip()):
+                self._rate_limited()
+                return
             self._unauthorized()
             return
 

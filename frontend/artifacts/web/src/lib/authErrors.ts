@@ -90,8 +90,18 @@ export function mapSignUpError(error: AuthErr): string {
 }
 
 export function mapResetPasswordRequestError(error: AuthErr): string {
+  const code = (error.code || '').toLowerCase();
+  const msg = (error.message || '').toLowerCase();
+
+  if (msg.includes('redirect') || msg.includes('redirect_to')) {
+    return (
+      'Password reset redirect URL is not allowed. Set PUBLIC_APP_URL on the server ' +
+      'and add the /reset-password URL to Supabase Authentication → Redirect URLs.'
+    );
+  }
+
   if (isRateLimited(error)) {
-    return 'Too many attempts. Please wait a moment and try again.';
+    return 'Too many reset emails requested. Wait about 60 seconds and try again.';
   }
   return error.message || 'Could not send reset email. Please try again.';
 }

@@ -2,18 +2,16 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 
 /**
- * Requires a Supabase Auth session. Server API auth uses the session cookie
- * issued by POST /api/login after sign-in.
- * both layers must pass for protected app routes.
+ * Requires a Supabase Auth session and a server session cookie from POST /api/login.
  */
 export default function SessionGuard() {
-  const { session, loading } = useAuth();
+  const { session, loading, serverSessionReady } = useAuth();
   const location = useLocation();
 
-  if (loading) {
+  if (loading || (session && !serverSessionReady)) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-        Checking session…
+        Signing in…
       </div>
     );
   }

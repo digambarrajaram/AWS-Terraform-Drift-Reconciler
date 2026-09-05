@@ -1,8 +1,14 @@
 // Module-level Supabase access token — synced by AuthProvider.
 let supabaseAccessToken: string | null = null;
+let sessionSyncPromise: Promise<void> | null = null;
+let lastSyncedToken: string | null = null;
 
 export function setSupabaseAccessToken(token: string | null): void {
   supabaseAccessToken = token;
+  if (!token) {
+    lastSyncedToken = null;
+    sessionSyncPromise = null;
+  }
 }
 
 export function getSupabaseAccessToken(): string | null {
@@ -15,12 +21,27 @@ function getCsrfToken(): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-/** Exchange Supabase JWT for HttpOnly session + CSRF cookies. */
-export async function establishSession(): Promise<void> {
+async function establishSessionOnce(token: string): Promise<void> {
   await apiFetch<{ ok: boolean }>('/login', {
     method: 'POST',
     body: '{}',
   });
+  lastSyncedToken = token;
+}
+
+/** Exchange Supabase JWT for HttpOnly session + CSRF cookies (deduped per token). */
+export async function establishSession(): Promise<void> {
+  const token = getSupabaseAccessToken();
+  if (!token) return;
+  if (token === lastSyncedToken) return;
+  if (sessionSyncPromise) {
+    await sessionSyncPromise;
+    if (token === lastSyncedToken) return;
+  }
+  sessionSyncPromise = establishSessionOnce(token).finally(() => {
+    sessionSyncPromise = null;
+  });
+  await sessionSyncPromise;
 }
 
 /** Clear server session cookies. */
@@ -32,6 +53,9 @@ export async function clearServerSession(): Promise<void> {
     });
   } catch {
     // Best-effort — local sign-out still proceeds.
+  } finally {
+    lastSyncedToken = null;
+    sessionSyncPromise = null;
   }
 }
 

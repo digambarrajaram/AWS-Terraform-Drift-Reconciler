@@ -15,7 +15,10 @@ export function errorMessage(err: unknown): string {
       return 'Database unreachable — please retry';
     }
     if (err.status === 401) {
-      return 'Authentication required — please re-enter your token';
+      return 'Session expired — please sign in again';
+    }
+    if (err.status === 429) {
+      return 'Too many requests — please wait a moment and try again';
     }
     if (err.status === 404) {
       return 'Endpoint not found (backend may not be configured)';

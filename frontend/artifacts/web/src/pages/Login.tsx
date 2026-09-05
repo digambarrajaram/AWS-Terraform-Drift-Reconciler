@@ -8,6 +8,10 @@ import {
   signIn,
   signUp,
 } from '@/api/supabaseClient';
+import {
+  establishSession,
+  setSupabaseAccessToken,
+} from '@/api/apiFetch';
 import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -224,6 +228,12 @@ export default function Login() {
         setMode('signin');
         setPassword('');
         return;
+      }
+
+      const accessToken = result.data.session?.access_token;
+      if (accessToken) {
+        setSupabaseAccessToken(accessToken);
+        await establishSession();
       }
 
       navigate(from, { replace: true });

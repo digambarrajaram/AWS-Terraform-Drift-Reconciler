@@ -23,25 +23,32 @@ interface AuthContextValue {
   session: Session | null;
   user: User | null;
   loading: boolean;
+  /** True once POST /api/login has issued the server session cookie. */
+  serverSessionReady: boolean;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-async function syncServerSession(accessToken: string | null): Promise<void> {
-  if (!accessToken) return;
-  setSupabaseAccessToken(accessToken);
-  try {
-    await establishSession();
-  } catch {
-    // Session cookie may already be valid, or login rate-limited — UI still works via JWT exchange retry.
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { data: config, isLoading: configLoading } = useAppConfig();
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [serverSessionReady, setServerSessionReady] = useState(false);
+
+  const syncServerSession = useCallback(async (accessToken: string | null) => {
+    if (!accessToken) {
+      setServerSessionReady(false);
+      return;
+    }
+    setSupabaseAccessToken(accessToken);
+    try {
+      await establishSession();
+      setServerSessionReady(true);
+    } catch {
+      setServerSessionReady(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (configLoading) {
@@ -52,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!config) {
       setSession(null);
       setSupabaseAccessToken(null);
+      setServerSessionReady(false);
       setLoading(false);
       return;
     }
@@ -62,9 +70,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     client.auth.getSession().then(async ({ data }) => {
       if (cancelled) return;
       setSession(data.session);
-      setSupabaseAccessToken(data.session?.access_token ?? null);
       if (data.session?.access_token) {
         await syncServerSession(data.session.access_token);
+      } else {
+        setServerSessionReady(false);
       }
       if (!cancelled) setLoading(false);
     });
@@ -73,9 +82,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       data: { subscription },
     } = client.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
-      setSupabaseAccessToken(nextSession?.access_token ?? null);
       if (nextSession?.access_token) {
         void syncServerSession(nextSession.access_token);
+      } else {
+        setSupabaseAccessToken(null);
+        setServerSessionReady(false);
       }
       setLoading(false);
     });
@@ -84,18 +95,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       subscription.unsubscribe();
     };
-  }, [config, configLoading]);
+  }, [config, configLoading, syncServerSession]);
 
   const signOut = useCallback(async () => {
     await clearServerSession();
     if (!config) {
       setSession(null);
       setSupabaseAccessToken(null);
+      setServerSessionReady(false);
       return;
     }
     await supabaseSignOut(config);
     setSession(null);
     setSupabaseAccessToken(null);
+    setServerSessionReady(false);
   }, [config]);
 
   const value = useMemo<AuthContextValue>(
@@ -103,9 +116,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       user: session?.user ?? null,
       loading,
+      serverSessionReady,
       signOut,
     }),
-    [session, loading, signOut],
+    [session, loading, serverSessionReady, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

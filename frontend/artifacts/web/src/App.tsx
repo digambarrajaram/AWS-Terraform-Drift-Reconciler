@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import AppShell from '@/components/layout/AppShell';
@@ -65,6 +65,7 @@ export default function App() {
               <Route element={<SessionGuard />}>
                 <Route element={<AppShell />}>
                   <Route path="/"            element={<Overview />} />
+                  <Route path="/dashboard"   element={<Navigate to="/" replace />} />
                   <Route path="/scan"        element={<Scan />} />
                   <Route path="/pr-queue"    element={<PrQueue />} />
                   <Route path="/approvals"   element={<Approvals />} />

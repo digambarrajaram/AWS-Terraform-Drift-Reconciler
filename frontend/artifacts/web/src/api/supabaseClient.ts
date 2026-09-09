@@ -38,6 +38,13 @@ export async function signIn(
   return requireClient(config).auth.signInWithPassword({ email, password });
 }
 
+export async function signInWithGoogle(config: AppConfig, redirectTo: string) {
+  return requireClient(config).auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo },
+  });
+}
+
 export async function signUp(
   config: AppConfig,
   email: string,

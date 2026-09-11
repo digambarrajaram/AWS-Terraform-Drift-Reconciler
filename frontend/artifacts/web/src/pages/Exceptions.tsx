@@ -631,7 +631,7 @@ function UnmanagedTab({
                         <ExpiresCell expires={row.expires} />
                       </td>
                       <td className="px-4 py-3">
-                        <ActiveBadge active={row.active} />
+                        <ActiveBadge active={row.active} expires={row.expires} />
                       </td>
                       <td className="px-4 py-3">
                         <RowActions

@@ -42,7 +42,19 @@ class ExceptionsMixin:
             )
             if resp.status_code != 200:
                 raise RuntimeError(f"Supabase query failed ({resp.status_code})")
-            return resp.json() if resp.text else []
+            rows = resp.json() if resp.text else []
+            today = date.today()
+            active_rows = []
+            for row in rows:
+                expires = row.get("expires")
+                if expires:
+                    try:
+                        if datetime.strptime(str(expires)[:10], "%Y-%m-%d").date() <= today:
+                            continue
+                    except ValueError:
+                        pass
+                active_rows.append(row)
+            return active_rows
 
         try:
             payload = {

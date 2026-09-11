@@ -174,55 +174,95 @@ function ScanResult({ run }: { run: ScanRun }) {
 
       {rs && !failed && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {/* Drift */}
-          <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-xs font-medium text-muted-foreground mb-1">Drift</p>
-            {rs.drift?.found ? (
-              <>
-                <p className="text-lg font-semibold text-card-foreground">{rs.drift.count} finding{rs.drift.count !== 1 ? 's' : ''}</p>
-                {(rs.drift.pr_links ?? []).length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {rs.drift.pr_links.map((url) => {
-                      const prNum = url.split('/').pop();
-                      return (
-                        <a key={url} href={url} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
-                          <ExternalLink size={11} /> View PR #{prNum}
-                        </a>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">No drift found</p>
-            )}
-          </div>
+          {/* Drift — omitted when drift detection did not run. */}
+          {rs.drift && (
+            <div className="rounded-lg border border-border bg-card p-3">
+              <p className="text-xs font-medium text-muted-foreground mb-1">Drift</p>
+              {rs.drift.found ? (
+                <>
+                  <p className="text-lg font-semibold text-card-foreground">{rs.drift.count} finding{rs.drift.count !== 1 ? 's' : ''}</p>
+                  {(rs.drift.pr_links ?? []).length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {rs.drift.pr_links.map((url) => {
+                        const prNum = url.split('/').pop();
+                        return (
+                          <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
+                            <ExternalLink size={11} /> View PR #{prNum}
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">No drift found</p>
+              )}
+            </div>
+          )}
 
-          {/* Unmanaged */}
-          <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-xs font-medium text-muted-foreground mb-1">Unmanaged</p>
-            {rs.unmanaged?.found ? (
-              <>
-                <p className="text-lg font-semibold text-card-foreground">{rs.unmanaged.count} finding{rs.unmanaged.count !== 1 ? 's' : ''}</p>
-                {(rs.unmanaged.pr_links ?? []).length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {rs.unmanaged.pr_links.map((url) => {
-                      const prNum = url.split('/').pop();
-                      return (
-                        <a key={url} href={url} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
-                          <ExternalLink size={11} /> View PR #{prNum}
-                        </a>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">No unmanaged resources</p>
-            )}
-          </div>
+          {/* Unmanaged — omitted when unmanaged detection did not run. */}
+          {rs.unmanaged && (
+            <div className="rounded-lg border border-border bg-card p-3">
+              <p className="text-xs font-medium text-muted-foreground mb-1">Unmanaged</p>
+              {rs.unmanaged.found ? (
+                <>
+                  <p className="text-lg font-semibold text-card-foreground">{rs.unmanaged.count} finding{rs.unmanaged.count !== 1 ? 's' : ''}</p>
+                  {(rs.unmanaged.pr_links ?? []).length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {rs.unmanaged.pr_links.map((url) => {
+                        const prNum = url.split('/').pop();
+                        return (
+                          <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
+                            <ExternalLink size={11} /> View PR #{prNum}
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">No unmanaged resources</p>
+              )}
+            </div>
+          )}
+
+          {/* Security — omitted for non-security scans. */}
+          {rs.security && (
+            <div className="rounded-lg border border-border bg-card p-3">
+              <p className="text-xs font-medium text-muted-foreground mb-1">Security</p>
+              {rs.security.found ? (
+                <>
+                  <p className="text-lg font-semibold text-card-foreground">{rs.security.count} PR{rs.security.count !== 1 ? 's' : ''} created</p>
+                  {rs.security.needs_review.length > 0 && (
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {rs.security.needs_review.length} finding{rs.security.needs_review.length !== 1 ? 's' : ''} need{rs.security.needs_review.length === 1 ? 's' : ''} review
+                    </p>
+                  )}
+                  {(rs.security.pr_links ?? []).length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {rs.security.pr_links.map((url) => {
+                        const prNum = url.split('/').pop();
+                        return (
+                          <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent no-underline">
+                            <ExternalLink size={11} /> View PR #{prNum}
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              ) : rs.security.needs_review.length > 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {rs.security.needs_review.length} finding{rs.security.needs_review.length !== 1 ? 's' : ''} need{rs.security.needs_review.length === 1 ? 's' : ''} review
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">No security findings found</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

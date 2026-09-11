@@ -32,6 +32,12 @@ export interface ScanRun {
       findings: unknown[];
       pr_links: string[];
     };
+    security?: {
+      found: boolean;
+      count: number;
+      pr_links: string[];
+      needs_review: unknown[];
+    };
     alerts_sent?: {
       pagerduty: number;
       slack: number;

@@ -646,10 +646,8 @@ if __name__ == "__main__":
             drift_findings = [f for f in _all_findings if f.get("status") not in unmanaged_scanner.UNMANAGED_STATUSES]
             unmanaged_findings = [f for f in _all_findings if f.get("status") in unmanaged_scanner.UNMANAGED_STATUSES]
 
-            if not _terraform_failed:
-                summary["mode"] = "drift_only" if not unmanaged_findings else "full"
-            else:
-                summary["mode"] = "unmanaged_only"
+            summary["mode"] = args.scan_mode
+            if _terraform_failed:
                 summary["notice"] = "Terraform state backend unavailable — only unmanaged resources were scanned. Configuration drift was not checked."
                 summary["skipped_stages"] = ["reconcile_agent", "trivy_gate"]
 
@@ -668,8 +666,10 @@ if __name__ == "__main__":
                 "findings": [{"resource_id": f.get("resource_id", "?"), "risk_level": f.get("risk_level", "LOW")} for f in unmanaged_findings],
                 "pr_links": unmanaged_urls,
             }
-            summary["drift"] = drift_block
-            summary["unmanaged"] = unmanaged_block
+            if args.scan_mode in ("drift_only", "drift_and_unmanaged") and not _terraform_failed:
+                summary["drift"] = drift_block
+            if args.scan_mode in ("drift_and_unmanaged", "unmanaged_only"):
+                summary["unmanaged"] = unmanaged_block
             summary["alerts_sent"] = {"pagerduty": _pd_alerts_sent, "slack": _slack_messages_sent}
 
             update_scan_run(

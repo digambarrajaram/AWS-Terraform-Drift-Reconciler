@@ -217,6 +217,7 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             for key, value in backend_config.items():
                 if value:
                     cmd.append(f"-backend-config={key}={value}")
+            cmd.append("-reconfigure")
         
         # Cold-init detection: no cached providers yet → first-ever init for
         # this clone (new environment) must download providers; 900s for

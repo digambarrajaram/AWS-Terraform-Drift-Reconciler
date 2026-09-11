@@ -10,6 +10,7 @@ import github_integration as gi
 import drift_reconciler.drift_history as drift_history
 from drift_reconciler.environment_credentials import _resolve_env_credentials
 from terraform_errors import humanize_terraform_error, _strip_ansi
+from terraform_ops import _strip_hardcoded_aws_profile
 
 def _revert_on_gate_failure(
     tf_dir: str, pr_number: int, scope: str, reason: str, env_dict: dict,
@@ -211,6 +212,7 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             if env_dict.get("region"):
                 backend_config["region"] = env_dict["region"]
         
+        _strip_hardcoded_aws_profile(tf_dir)
         print(f"[apply] ({mode_label}) terraform init in {tf_dir} …")
         cmd = ["terraform", "init", "-no-color", "-input=false"]
         if backend_config:

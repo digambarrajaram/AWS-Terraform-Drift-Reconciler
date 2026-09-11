@@ -115,12 +115,12 @@ def load_managed_resources(tf_dir: str, env: dict | None = None) -> list[dict[st
     subprocess environment; when None the caller inherits the ambient
     environment.
 
-    Fail-soft via the terraform CLI itself: on an uninitialized dir
-    ``terraform show`` exits nonzero and we return [] (the unmanaged
-    diff is purely live-AWS data).  No modules.json probe — module-less
-    configs (prod-kyc's ``ec2_terraform_account_a/``) never get
-    ``.terraform/modules/modules.json`` written by init, so a probe
-    would skip show for a fully initialized dir."""
+    Raises when Terraform cannot load or parse state.  Continuing with an
+    empty managed-resource list would classify every discovered live resource
+    as unmanaged and could create false-positive PRs.  No modules.json probe —
+    module-less configs (prod-kyc's ``ec2_terraform_account_a/``) never get
+    ``.terraform/modules/modules.json`` written by init, so a probe would skip
+    show for a fully initialized dir."""
     result = subprocess.run(
         ["terraform", "show", "-no-color", "-json"],
         cwd=tf_dir,
@@ -132,17 +132,27 @@ def load_managed_resources(tf_dir: str, env: dict | None = None) -> list[dict[st
     )
     if result.returncode != 0:
         print(f"  ⚠ terraform show -json failed: {result.stderr[:400]}")
-        return []
+        raise RuntimeError(
+            "terraform show -json failed; aborting unmanaged scan so an "
+            f"incomplete state comparison cannot produce false positives:\n"
+            f"{result.stderr[:800]}"
+        )
 
     try:
         state = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         print(f"  ⚠ Failed to parse terraform state JSON: {exc}")
-        return []
+        raise RuntimeError(
+            "terraform show -json returned invalid state JSON; aborting "
+            "unmanaged scan"
+        ) from exc
 
     root = state.get("values", {}).get("root_module")
     if root is None:
-        return []
+        raise RuntimeError(
+            "terraform show -json returned no root module; aborting "
+            "unmanaged scan"
+        )
 
     resources: list[dict[str, Any]] = []
     _walk_state_resources(root, resources)

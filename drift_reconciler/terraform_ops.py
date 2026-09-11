@@ -93,6 +93,15 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
     # _is_terraform_initialized keeps the modules.json probe — it only
     # powers a CLI note, no gate.
     force_reconfigure = False
+    providers_dir = os.path.join(tf_dir, ".terraform", "providers")
+    providers_ready = False
+    if os.path.isdir(providers_dir):
+        try:
+            with os.scandir(providers_dir) as entries:
+                providers_ready = any(entries)
+        except OSError:
+            providers_ready = False
+
     if os.path.isfile(tfstate_file):
         # Backend mismatch detection: compare cached bucket against new backend_config
         if backend_config and backend_config.get("bucket"):
@@ -107,7 +116,7 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
             except (json.JSONDecodeError, IOError):
                 pass  # If we can't read tfstate, proceed without forcing reconfigure
 
-        if not force_reconfigure:
+        if not force_reconfigure and providers_ready:
             return ""  # already initialized with matching backend — skip re-init cost
 
     print(f"Step 0: Running 'terraform init' inside: {tf_dir}...")

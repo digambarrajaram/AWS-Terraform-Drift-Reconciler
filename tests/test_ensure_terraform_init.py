@@ -44,11 +44,14 @@ class EnsureTerraformInitTests(unittest.TestCase):
         agent.subprocess.run = self._orig_run
 
     def test_moduleless_initialized_skips_init(self):
-        # .terraform/terraform.tfstate present, NO .terraform/modules/
-        # modules.json — the prod-kyc/prod-cra layout after a real init.
+        # .terraform/terraform.tfstate and a non-empty providers directory
+        # are present, but there is NO .terraform/modules/modules.json — the
+        # prod-kyc/prod-cra layout after a real init.
         os.makedirs(os.path.join(self.tf_dir, ".terraform"))
         with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:
             f.write(_tfstate("sec-acc-tf-state-285629514281"))
+        os.makedirs(os.path.join(self.tf_dir, ".terraform", "providers"))
+        open(os.path.join(self.tf_dir, ".terraform", "providers", "cached-provider"), "w").close()
         self.assertEqual(agent._ensure_terraform_init(self.tf_dir), "")
         self.assertEqual(self.calls, [])  # init never ran
 
@@ -61,6 +64,8 @@ class EnsureTerraformInitTests(unittest.TestCase):
         os.makedirs(os.path.join(self.tf_dir, ".terraform"))
         with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:
             f.write(_tfstate("old-bucket"))
+        os.makedirs(os.path.join(self.tf_dir, ".terraform", "providers"))
+        open(os.path.join(self.tf_dir, ".terraform", "providers", "cached-provider"), "w").close()
         self.assertEqual(
             agent._ensure_terraform_init(self.tf_dir, backend_config={"bucket": "new-bucket"}),
             "",
@@ -72,11 +77,27 @@ class EnsureTerraformInitTests(unittest.TestCase):
         os.makedirs(os.path.join(self.tf_dir, ".terraform"))
         with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:
             f.write(_tfstate("same-bucket"))
+        os.makedirs(os.path.join(self.tf_dir, ".terraform", "providers"))
+        open(os.path.join(self.tf_dir, ".terraform", "providers", "cached-provider"), "w").close()
         self.assertEqual(
             agent._ensure_terraform_init(self.tf_dir, backend_config={"bucket": "same-bucket"}),
             "",
         )
         self.assertEqual(self.calls, [])
+
+    def test_state_without_providers_reruns_init(self):
+        os.makedirs(os.path.join(self.tf_dir, ".terraform"))
+        with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:
+            f.write(_tfstate("same-bucket"))
+        self.assertEqual(agent._ensure_terraform_init(self.tf_dir), "")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_state_with_empty_providers_reruns_init(self):
+        os.makedirs(os.path.join(self.tf_dir, ".terraform", "providers"))
+        with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:
+            f.write(_tfstate("same-bucket"))
+        self.assertEqual(agent._ensure_terraform_init(self.tf_dir), "")
+        self.assertEqual(len(self.calls), 1)
 
 
 if __name__ == "__main__":

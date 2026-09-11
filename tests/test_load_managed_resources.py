@@ -3,7 +3,7 @@
   still run terraform show and return state (prod-kyc layout: module-less
   config — init never writes modules.json; the old modules.json guard
   returned [] here and flagged every live resource as unmanaged)
-- an uninitialized dir fail-softs to [] via terraform show's exit code
+- a terraform show failure raises rather than treating state as empty
 
 Run: python -m unittest tests.test_load_managed_resources
 """
@@ -41,10 +41,11 @@ class LoadManagedResourcesTests(unittest.TestCase):
         self.assertEqual(resources[0]["type"], "aws_instance")
         self.assertEqual(resources[0]["name"], "WebServer")
 
-    def test_show_failure_fail_softs_to_empty(self):
+    def test_show_failure_aborts_instead_of_empty_state(self):
         us.subprocess.run = lambda *a, **k: self.calls.append(a) or \
             _FakeResult(1, "", "no backend configured — run terraform init")
-        self.assertEqual(us.load_managed_resources("/tmp/uninitialized"), [])
+        with self.assertRaisesRegex(RuntimeError, "terraform show -json failed"):
+            us.load_managed_resources("/tmp/uninitialized")
 
 
 if __name__ == "__main__":

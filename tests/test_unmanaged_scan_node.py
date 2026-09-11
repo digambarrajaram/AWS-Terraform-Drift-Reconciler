@@ -20,6 +20,7 @@ _DR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 sys.path.insert(0, _DR)
 
 import agent  # noqa: E402
+import graph_nodes  # noqa: E402
 
 
 class _FakeSupabase(BaseHTTPRequestHandler):
@@ -69,6 +70,7 @@ class UnmanagedScanNodeTests(unittest.TestCase):
             "tf_dir": agent._tf_dir,
             "account": agent._account_label,
             "session": agent.get_aws_session,
+            "resolve_credentials": graph_nodes._resolve_env_credentials,
             "scan": agent.unmanaged_scanner.scan_unmanaged_resources,
             "managed": agent.unmanaged_scanner.load_managed_resources,
             "stage": agent.report_stage,
@@ -78,7 +80,8 @@ class UnmanagedScanNodeTests(unittest.TestCase):
         agent._tf_dir = "/tmp/fake-tf"
         agent._account_label = "prod-esign"
         agent.report_stage = lambda *a, **k: None
-        agent.get_aws_session = lambda env: object()
+        agent.get_aws_session = lambda env, use_scan_role=False: object()
+        graph_nodes._resolve_env_credentials = lambda env: os.environ.copy()
         agent.unmanaged_scanner.scan_unmanaged_resources = lambda session, region: [
             {"type": "aws_instance", "id": "i-webserver", "raw_name": "WebServer",
              "arn": "arn:aws:ec2:us-east-1:1:instance/i-webserver"},
@@ -94,6 +97,7 @@ class UnmanagedScanNodeTests(unittest.TestCase):
         agent._tf_dir = self._orig["tf_dir"]
         agent._account_label = self._orig["account"]
         agent.get_aws_session = self._orig["session"]
+        graph_nodes._resolve_env_credentials = self._orig["resolve_credentials"]
         agent.unmanaged_scanner.scan_unmanaged_resources = self._orig["scan"]
         agent.unmanaged_scanner.load_managed_resources = self._orig["managed"]
         agent.report_stage = self._orig["stage"]

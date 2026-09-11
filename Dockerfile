@@ -24,6 +24,7 @@ FROM python:3.12-slim AS runtime
 
 ARG TERRAFORM_VERSION=1.9.8
 ARG TRIVY_VERSION=0.74.0
+ARG HCLEDIT_VERSION=0.2.18
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -48,6 +49,13 @@ RUN apt-get update \
     && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
         | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}" \
     && chmod 755 /usr/local/bin/trivy \
+    && curl -fsSL "https://github.com/minamijoyo/hcledit/releases/download/v${HCLEDIT_VERSION}/hcledit_${HCLEDIT_VERSION}_linux_amd64.tar.gz" \
+        -o /tmp/hcledit.tar.gz \
+    && tar -xzf /tmp/hcledit.tar.gz -C /usr/local/bin hcledit \
+    && rm /tmp/hcledit.tar.gz \
+    && terraform version \
+    && trivy version \
+    && hcledit version \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

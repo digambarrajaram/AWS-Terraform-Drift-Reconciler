@@ -400,16 +400,15 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             _finish(self_status["status"], self_status["result"])
             # Close out this PR's drift_events rows too — the apply was
             # blocked, so they must not stay open (the revert branch above
-            # already marks its own rows).  manual_revert_required is the
-            # honest label: the gate blocked the apply, so AWS vs code
-            # must be verified by hand regardless of the auto-revert.
+            # already marks its own rows).  Record the actual auto-revert
+            # outcome so a successful revert is not mislabeled.
             import drift_history as _dh
             _dh.mark_reverted(
-                pr_number, scope, status="manual_revert_required",
+                pr_number, scope, status=self_status["status"],
                 resolution=(
                     f"Apply blocked by safety gate ({gate_failure}) — "
-                    f"auto-revert status: {self_status['status']}; "
-                    f"manual verification required"
+                    f"auto-revert status: {self_status['status']}"
+                    + ("; manual verification required" if self_status["status"] != "reverted_gate_blocked" else "")
                 ),
             )
             return

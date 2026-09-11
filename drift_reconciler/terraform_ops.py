@@ -3,12 +3,40 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 
 from drift_reconciler.environment_credentials import _resolve_env_credentials
 
 from terraform_errors import humanize_terraform_error
+
+def _strip_hardcoded_aws_profile(tf_dir: str) -> None:
+    """Remove hardcoded AWS profile settings from Terraform files."""
+    profile_line = re.compile(r'^\s*profile\s*=\s*".*"\s*$', re.MULTILINE)
+    try:
+        file_names = os.listdir(tf_dir)
+    except OSError as e:
+        print(f"Failed to inspect Terraform directory {tf_dir}: {e}")
+        return
+
+    for file_name in file_names:
+        filepath = os.path.join(tf_dir, file_name)
+        if not file_name.endswith(".tf"):
+            continue
+        try:
+            if not os.path.isfile(filepath):
+                continue
+            with open(filepath, "r", encoding="utf-8") as f:
+                contents = f.read()
+            stripped_contents, count = profile_line.subn("", contents)
+            if count:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(stripped_contents)
+                print(f"Stripped hardcoded AWS profile from {filepath}")
+        except (OSError, UnicodeError) as e:
+            print(f"Failed to strip hardcoded AWS profile from {filepath}: {e}")
+
 
 def _terraform_sub_env_for_scope(scope: str) -> dict:
     """Return a subprocess env with *scope*'s AWS credentials injected
@@ -51,6 +79,7 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
     If .terraform is already initialized but the cached backend differs 
     (detected via .terraform/terraform.tfstate bucket mismatch), forces 
     -reconfigure to re-initialize against the new backend."""
+    _strip_hardcoded_aws_profile(tf_dir)
     tfstate_file = os.path.join(tf_dir, ".terraform", "terraform.tfstate")
 
     # Check if already initialized and whether backend needs reconfiguration.

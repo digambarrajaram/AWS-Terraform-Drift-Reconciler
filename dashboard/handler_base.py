@@ -1077,7 +1077,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                         f"{base}/rest/v1/drift_events", params=batch_query,
                         headers=headers, timeout=10,
                     )
-                    if resp.status_code != 200:
+                    if resp.status_code not in (200, 206):
                         break
                     batch = resp.json() or []
                     rows.extend(batch)
@@ -1094,10 +1094,10 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                     f"{base}/rest/v1/drift_events", params={"select": "*", **query},
                     headers=headers, timeout=10,
                 )
-                rows = resp.json() if resp.status_code == 200 else []
+                rows = resp.json() if resp.status_code in (200, 206) else []
                 content_range = resp.headers.get("Content-Range", "*/0")
                 total = int(content_range.rsplit("/", 1)[-1]) if "/" in content_range else len(rows)
-            if resp.status_code != 200:
+            if resp.status_code not in (200, 206):
                 self._json_error(502, f"PR queue query failed ({resp.status_code})")
                 return
             data = json.dumps({"events": rows, "count": total}).encode("utf-8")

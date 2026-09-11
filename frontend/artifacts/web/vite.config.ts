@@ -51,6 +51,27 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalizedId = id.replaceAll('\\\\', '/');
+          const nodeModulesIndex = normalizedId.lastIndexOf('/node_modules/');
+
+          if (nodeModulesIndex === -1) {
+            return undefined;
+          }
+
+          const packagePath = normalizedId.slice(
+            nodeModulesIndex + '/node_modules/'.length,
+          );
+          const packageName = packagePath.startsWith('@')
+            ? packagePath.split('/').slice(0, 2).join('-')
+            : packagePath.split('/')[0];
+
+          return `vendor-${packageName.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+        },
+      },
+    },
   },
   server: {
     port,

@@ -330,7 +330,7 @@ def unmanaged_scan_node(state: State):
                 env_dict = resp.json()[0]
         if not env_dict:
             raise RuntimeError(f"No environment found for slug '{_ag._account_label}' — check the environments table.")
-        session = _ag.get_aws_session(env_dict)
+        session = _ag.get_aws_session(env_dict, use_scan_role=True)
         live = _ag.unmanaged_scanner.scan_unmanaged_resources(session, _ag._region)
     except Exception as e:
         raise

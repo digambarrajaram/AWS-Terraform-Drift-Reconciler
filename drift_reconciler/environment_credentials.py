@@ -109,7 +109,7 @@ def _fetch_environment_secrets(environment_id: str) -> dict[str, Any]:
         return {}
 
 
-def get_aws_session(environment: dict) -> boto3.Session:
+def get_aws_session(environment: dict, use_scan_role: bool = False) -> boto3.Session:
     """Return a boto3 Session for *environment* via STS AssumeRole.
 
     *environment* must be a dict with the shape of a row from the
@@ -127,6 +127,10 @@ def get_aws_session(environment: dict) -> boto3.Session:
     region = environment.get("region", "us-east-1")
     expected_account = (environment.get("aws_account_id") or "").strip()
     role_arn = (environment.get("aws_role_arn") or "").strip()
+    if use_scan_role:
+        scan_role_arn = (environment.get("scan_role_arn") or "").strip()
+        if scan_role_arn:
+            role_arn = scan_role_arn
     external_id = (environment.get("aws_external_id") or "").strip()
 
     if not role_arn:

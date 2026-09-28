@@ -63,17 +63,27 @@ def update_notification_secret(field: str, value: str | None) -> bool:
     if not _URL or not _KEY:
         return False
     payload = {
+        "id": 1,
         field: value,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        resp = requests.patch(
-            f"{_URL}/rest/v1/{_TABLE}?id=eq.1",
-            headers={**_HEADERS, "Content-Type": "application/json", "Prefer": "return=minimal"},
+        resp = requests.post(
+            f"{_URL}/rest/v1/{_TABLE}",
+            headers={
+                **_HEADERS,
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
             json=payload,
             timeout=10,
         )
-        return resp.status_code in (200, 204)
+        if resp.status_code in (200, 201, 204):
+            return True
+        print(
+            f"  [notif-config] Update failed ({resp.status_code}): {resp.text}"
+        )
+        return False
     except requests.RequestException as exc:
         print(f"  [notif-config] Update failed: {exc}")
         return False

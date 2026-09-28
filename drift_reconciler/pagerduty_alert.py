@@ -1,7 +1,14 @@
 import os
 import requests
 
-def trigger_pagerduty_alert(summary: str, severity: str = "error", source: str = "Terraform Drift Engine", dedup_key: str = None, account_label: str = None) -> dict:
+def trigger_pagerduty_alert(
+    summary: str,
+    severity: str = "error",
+    source: str = "Terraform Drift Engine",
+    dedup_key: str = None,
+    account_label: str = None,
+    error_detail: list[str] | None = None,
+) -> dict:
     """Trigger a PagerDuty alert.
 
     When *account_label* is supplied the summary and dedup_key are
@@ -19,7 +26,10 @@ def trigger_pagerduty_alert(summary: str, severity: str = "error", source: str =
     except Exception as exc:
         print(f"[pagerduty] failed to load routing key: {exc!r}")
     if not routing_key:
-        print("[ERROR] PagerDuty routing key not configured in notification_secrets — skipping alert")
+        msg = "PagerDuty routing key not configured (notification_secrets or PAGERDUTY_ROUTING_KEY)"
+        print(f"[ERROR] {msg}")
+        if error_detail is not None:
+            error_detail.append(msg)
         return {}
 
     if account_label:
@@ -45,9 +55,15 @@ def trigger_pagerduty_alert(summary: str, severity: str = "error", source: str =
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         if response.status_code != 202:
-            print(f"[PagerDuty API Error] {response.status_code}: {response.text}")
+            msg = f"PagerDuty API HTTP {response.status_code}: {response.text[:300]}"
+            print(f"[PagerDuty API Error] {msg}")
+            if error_detail is not None:
+                error_detail.append(msg)
             return {}
         return response.json()
     except requests.exceptions.RequestException as e:
+        msg = f"PagerDuty request failed: {e}"
         print(f"[Network Error] {e}")
+        if error_detail is not None:
+            error_detail.append(msg)
         return {}

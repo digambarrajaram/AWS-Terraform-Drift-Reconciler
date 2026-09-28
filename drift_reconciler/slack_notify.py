@@ -19,6 +19,48 @@ import requests
 _MAX_FINDINGS_PER_CARD = 5
 
 
+def _load_webhook_url(account_label: str) -> str:
+    webhook_url = ""
+    try:
+        try:
+            from .notification_config import get_notification_secrets
+        except ImportError:
+            from notification_config import get_notification_secrets
+        secrets = get_notification_secrets()
+        webhook_url = (secrets.get("slack_webhook_url") or "").strip()
+    except Exception as exc:
+        print(f"[slack] failed to load webhook url: {exc!r}")
+    if not webhook_url:
+        webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    if not webhook_url:
+        print(f"[slack] No Slack webhook configured for account '{account_label}' — skipping batch")
+    return webhook_url
+
+
+def send_test(account_label: str = "test") -> None:
+    """Post a simple dashboard test message. Raises RuntimeError on failure."""
+    webhook_url = _load_webhook_url(account_label)
+    if not webhook_url:
+        raise RuntimeError(
+            "Slack webhook URL not configured (notification_secrets or SLACK_WEBHOOK_URL)"
+        )
+
+    text = (
+        f":bell: Test alert from Drift Reconciler dashboard — please ignore "
+        f"({account_label})"
+    )
+    payload = {
+        "text": text,
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+    }
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Slack request failed: {exc}") from exc
+    if resp.status_code != 200 or resp.text.strip() != "ok":
+        raise RuntimeError(f"Slack HTTP {resp.status_code}: {resp.text[:300]}")
+
+
 def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
     """Post all *findings* to Slack, batched into messages of at most
     ``_MAX_FINDINGS_PER_CARD`` findings each.
@@ -66,22 +108,16 @@ def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
             {"type": "section", "fields": fields},
         ]
 
-        webhook_url = ""
-        try:
-            try:
-                from .notification_config import get_notification_secrets
-            except ImportError:
-                from notification_config import get_notification_secrets
-            secrets = get_notification_secrets()
-            webhook_url = (secrets.get("slack_webhook_url") or "").strip()
-        except Exception as exc:
-            print(f"[slack] failed to load webhook url: {exc!r}")
+        webhook_url = _load_webhook_url(account_label)
         if not webhook_url:
-            print(f"[slack] No Slack webhook configured for account '{account_label}' — skipping batch")
             return sent
 
         try:
-            resp = requests.post(webhook_url, json={"blocks": blocks}, timeout=10)
+            resp = requests.post(
+                webhook_url,
+                json={"text": header_text, "blocks": blocks},
+                timeout=10,
+            )
             if resp.status_code == 200 and resp.text.strip() == "ok":
                 sent += 1
                 print(f"[slack] Sent message {sent} ({len(batch)} findings)")

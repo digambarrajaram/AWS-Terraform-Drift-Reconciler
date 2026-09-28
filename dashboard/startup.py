@@ -31,8 +31,8 @@ def _load_env() -> None:
 
 
 def main() -> int:
-    from dashboard.serve import _Handler  # composed handler facade
     _load_env()
+    from dashboard.serve import _Handler  # composed handler facade
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     from drift_reconciler.environment_credentials import (

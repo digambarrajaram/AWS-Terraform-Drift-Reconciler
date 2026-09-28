@@ -129,7 +129,16 @@ class NotificationsMixin:
 
         if channel == "pagerduty":
             try:
+                from drift_reconciler.notification_config import get_notification_secrets
                 from drift_reconciler.pagerduty_alert import trigger_pagerduty_alert
+
+                if not (get_notification_secrets().get("pagerduty_routing_key") or "").strip():
+                    _fail(
+                        "PagerDuty routing key is not configured. "
+                        "Save a key above or set PAGERDUTY_ROUTING_KEY, then retry."
+                    )
+                    return
+
                 kwargs = {
                     "summary": "Test alert from Drift Reconciler dashboard — please ignore",
                     "severity": "error",
@@ -137,26 +146,23 @@ class NotificationsMixin:
                 }
                 if scope:
                     kwargs["account_label"] = scope
-                result = trigger_pagerduty_alert(**kwargs)
+                pd_errors: list[str] = []
+                result = trigger_pagerduty_alert(**kwargs, error_detail=pd_errors)
                 if not result:
-                    _fail("PagerDuty returned empty response — check routing key.")
+                    _fail(
+                        pd_errors[0]
+                        if pd_errors
+                        else "PagerDuty did not accept the event — verify the Events API v2 routing key."
+                    )
                     return
             except Exception as e:
                 _fail(f"PagerDuty send failed: {e}")
                 return
         else:
             try:
-                from drift_reconciler.slack_notify import notify_all
-                dummy = [{
-                    "resource_id": "test.dashboard",
-                    "risk_level": "LOW",
-                    "drift_summary": "Test alert from Drift Reconciler dashboard — please ignore",
-                }]
-                acct = scope or "test"
-                sent = notify_all(dummy, acct)
-                if sent == 0:
-                    _fail("Slack returned 0 sent — check webhook URL.")
-                    return
+                from drift_reconciler.slack_notify import send_test
+
+                send_test(scope or "test")
             except Exception as e:
                 _fail(f"Slack send failed: {e}")
                 return
@@ -223,8 +229,8 @@ class NotificationsMixin:
         except Exception:
             secrets = {}
 
-        pd_key = secrets.get("pagerduty_routing_key")
-        slack_url = secrets.get("slack_webhook_url")
+        pd_key = (secrets.get("pagerduty_routing_key") or "").strip() or None
+        slack_url = (secrets.get("slack_webhook_url") or "").strip() or None
 
         payload = {
             "pagerduty_configured": bool(pd_key),

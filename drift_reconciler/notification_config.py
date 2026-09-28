@@ -16,42 +16,62 @@ except ImportError:
     from env_loader import load_env
 load_env()
 
-_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 _TABLE = "notification_secrets"
-_HEADERS = {
-    "apikey": _KEY,
-    "Authorization": f"Bearer {_KEY}",
-}
+
+
+def _supabase_url() -> str:
+    load_env()
+    return os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+
+
+def _supabase_key() -> str:
+    load_env()
+    return os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+
+def _service_headers() -> dict[str, str]:
+    key = _supabase_key()
+    return {"apikey": key, "Authorization": f"Bearer {key}"}
+
+
+def _with_env_fallbacks(row: dict[str, Any]) -> dict[str, str | None]:
+    """Merge Supabase row with legacy env vars (documented in BACKEND_REFERENCE)."""
+    load_env()
+    pd = (row.get("pagerduty_routing_key") or "").strip() or None
+    slack = (row.get("slack_webhook_url") or "").strip() or None
+    if not pd:
+        pd = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip() or None
+    if not slack:
+        slack = os.environ.get("SLACK_WEBHOOK_URL", "").strip() or None
+    return {"pagerduty_routing_key": pd, "slack_webhook_url": slack}
 
 
 def get_notification_secrets(strict: bool = False) -> dict[str, str | None]:
     """Return ``{pagerduty_routing_key, slack_webhook_url}`` from the
     singleton row, or ``{}`` on failure."""
-    if not _URL or not _KEY:
+    url = _supabase_url()
+    key = _supabase_key()
+    if not url or not key:
         if strict:
             raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
-        return {}
+        return _with_env_fallbacks({})
     try:
         resp = requests.get(
-            f"{_URL}/rest/v1/{_TABLE}?select=pagerduty_routing_key,slack_webhook_url&id=eq.1",
-            headers=_HEADERS,
+            f"{url}/rest/v1/{_TABLE}?select=pagerduty_routing_key,slack_webhook_url&id=eq.1",
+            headers=_service_headers(),
             timeout=10,
         )
         if resp.status_code == 200:
             rows = resp.json() if resp.text else []
             if rows:
-                return {
-                    "pagerduty_routing_key": rows[0].get("pagerduty_routing_key"),
-                    "slack_webhook_url": rows[0].get("slack_webhook_url"),
-                }
+                return _with_env_fallbacks(rows[0])
         if strict:
             raise RuntimeError(f"notification settings query failed ({resp.status_code})")
-        return {}
+        return _with_env_fallbacks({})
     except requests.RequestException:
         if strict:
             raise
-        return {}
+        return _with_env_fallbacks({})
 
 
 def update_notification_secret(field: str, value: str | None) -> bool:
@@ -60,7 +80,8 @@ def update_notification_secret(field: str, value: str | None) -> bool:
     if field not in ("pagerduty_routing_key", "slack_webhook_url"):
         print(f"  [notif-config] Invalid field: {field}")
         return False
-    if not _URL or not _KEY:
+    url = _supabase_url()
+    if not url or not _supabase_key():
         return False
     payload = {
         "id": 1,
@@ -69,9 +90,9 @@ def update_notification_secret(field: str, value: str | None) -> bool:
     }
     try:
         resp = requests.post(
-            f"{_URL}/rest/v1/{_TABLE}",
+            f"{url}/rest/v1/{_TABLE}",
             headers={
-                **_HEADERS,
+                **_service_headers(),
                 "Content-Type": "application/json",
                 "Prefer": "resolution=merge-duplicates,return=minimal",
             },

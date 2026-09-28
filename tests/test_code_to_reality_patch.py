@@ -43,6 +43,35 @@ class CodeToRealityPatchTests(unittest.TestCase):
         )
         self.assertEqual(list(filtered), ["tags"])
 
+    def test_apply_changes_never_writes_tags_all(self):
+        with tempfile.TemporaryDirectory() as td:
+            tf = os.path.join(td, "main.tf")
+            with open(tf, "w", encoding="utf-8") as fh:
+                fh.write(
+                    'resource "aws_instance" "web" {\n'
+                    '  tags = { Name = "WebServer" }\n'
+                    "}\n"
+                )
+            changes = {
+                "tags": {
+                    "before": {"Name": "WebServer", "Environment": "prod"},
+                    "after": {"Name": "WebServer"},
+                },
+                "tags_all": {
+                    "before": {"Name": "WebServer", "Environment": "prod"},
+                    "after": {"Name": "WebServer"},
+                },
+            }
+            orig_hcledit = gi.is_hcledit_available
+            gi.is_hcledit_available = lambda: False
+            try:
+                out = gi.apply_changes_to_file(
+                    tf, "aws_instance.web", changes, value_key="before",
+                )
+            finally:
+                gi.is_hcledit_available = orig_hcledit
+            self.assertNotIn("tags_all", out)
+
 
 if __name__ == "__main__":
     unittest.main()

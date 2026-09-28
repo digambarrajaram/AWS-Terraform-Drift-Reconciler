@@ -874,6 +874,10 @@ def _regex_patch_tf_file(
 
 
 def apply_changes_to_file(file_path, resource_id, changes, deleted=False, value_key: str = "after"):
+    changes = filter_patchable_changes(changes or {})
+    if not changes and not deleted:
+        with open(file_path, encoding="utf-8") as f:
+            return f.read()
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tf")
     os.close(tmp_fd)
     shutil.copy(file_path, tmp_path)

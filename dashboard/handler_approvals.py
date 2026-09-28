@@ -9,7 +9,7 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 
-from dashboard.env import _configure_aws_env, _tf_dir_for
+from dashboard.env import _configure_aws_env, _env_for_scope, _tf_dir_for
 from dashboard.exceptions_policy import auto_add_exceptions_on_merge
 from dashboard.paths import _REPO_ROOT
 from dashboard.process_runner import _spawn_with_capture
@@ -86,6 +86,60 @@ class ApprovalsMixin:
         except requests.RequestException as exc:
             self._json_error(502, f"Supabase unreachable: {exc}")
             return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_apply_plan_preview(self):
+        """GET /api/pending-applies/{id}/apply-preview?scope=...
+
+        Runs terraform plan with the PR branch checked out (when creds allow)
+        and returns destroy/replace risk for the Approvals reviewer."""
+        pending_id = self.path.split("/")[3]
+        requested_scope = parse_qs(urlparse(self.path).query).get("scope", [""])[0]
+        if not self._require_owned_scope(requested_scope):
+            return
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/pending_applies"
+                f"?select=pr_number,scope,pr_type&id=eq.{pending_id}"
+                f"&scope=eq.{requested_scope}&limit=1",
+                headers=headers, timeout=10,
+            )
+            rows = resp.json() if resp.text and resp.status_code == 200 else []
+            if not rows:
+                self._json_error(404, "Pending apply row not found.")
+                return
+            row = rows[0]
+            pr_number = row.get("pr_number")
+            scope = row.get("scope")
+            pr_type = row.get("pr_type")
+        except requests.RequestException as exc:
+            self._json_error(502, f"Supabase unreachable: {exc}")
+            return
+
+        env_dict = _env_for_scope(scope, getattr(self, "auth_user_id", None))
+        if not env_dict:
+            self._json_error(502, f"No environment row for scope '{scope}'.")
+            return
+
+        try:
+            from drift_reconciler.apply_plan_preview import preview_apply_plan
+            payload = preview_apply_plan(scope, pr_number, pr_type, env_dict)
+        except Exception as exc:
+            self._json_error(502, f"Apply preview failed: {exc}")
+            return
+
+        data = json.dumps(payload, default=str).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

@@ -211,6 +211,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
         reversed_changes: dict[str, dict] = {}
         for field, vals in original_changes.items():
             reversed_changes[field] = {"before": vals["after"], "after": vals["before"]}
+        reversed_changes = gi.filter_patchable_changes(reversed_changes)
 
         print(f"  ↻ {resource_id}: reversing {len(reversed_changes)} field(s) …")
 

@@ -269,6 +269,42 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         except json.JSONDecodeError:
             raise RuntimeError("terraform show -json produced unparseable output")
 
+        from drift_reconciler.plan_analysis import log_plan_risks, plan_risk_summary
+        for line in (plan.stdout or "").splitlines():
+            if "forces replacement" in line or "must be replaced" in line:
+                print(f"[apply] {line}")
+        plan_risks = log_plan_risks(plan_json)
+        if plan_risks:
+            print(f"[apply] plan summary: {json.dumps(plan_risk_summary(plan_json), default=str)}")
+
+        # Gate C: block apply when the saved plan would destroy/replace
+        # resources (e.g. AMI refresh on a tag-only PR).  Do not auto-revert
+        # the merge — leave main as-is and surface manual_revert_required.
+        if not is_revert and plan_risks:
+            bad = [r.get("address") for r in plan_risks if r.get("address")]
+            gate_failure = f"plan destroys/replaces: {bad}"
+            print(f"[apply] ⛔ Gate failed: {gate_failure}")
+            _finish("manual_revert_required", {
+                "reason": gate_failure,
+                "plan_risk": plan_risks,
+                "reverted": False,
+                "message": (
+                    "Apply blocked — terraform plan would destroy or replace "
+                    "resources. Revert the merge or fix IaC (e.g. pin AMI / "
+                    "ignore_changes on ami), then approve again."
+                ),
+            })
+            import drift_history as _dh
+            _dh.mark_reverted(
+                pr_number, scope,
+                status="manual_revert_required",
+                resolution=(
+                    f"Apply blocked ({gate_failure}) — AWS unchanged; "
+                    "manual merge revert or stack fix required"
+                ),
+            )
+            return
+
         # Gate A: pre-apply drift gate.  Only meaningful for normal applies
         # — a revert's whole purpose is fixing existing drift, so open rows
         # are expected and must not block it (Gate B below is the

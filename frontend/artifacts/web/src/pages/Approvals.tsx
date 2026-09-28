@@ -34,6 +34,15 @@ interface PendingApply {
   created_at: string;
 }
 
+interface ApplyPlanPreview {
+  skipped?: boolean;
+  reason?: string;
+  error?: string;
+  has_destroy_or_replace?: boolean;
+  resources?: { address?: string; actions?: string[]; replace_paths?: unknown[] }[];
+  pr_head_sha?: string;
+}
+
 interface PrDetails {
   number: number;
   title: string;
@@ -143,6 +152,20 @@ function DetailDrawer({
     enabled: !!row,
     queryFn: () => apiFetch<PrDetails>(
       `/pending-applies/${row!.id}/pr-details?scope=${encodeURIComponent(row!.scope)}`,
+    ),
+  });
+
+  const needsApplyPreview = !!row
+    && row.status === 'awaiting_approval'
+    && row.pr_type !== 'unmanaged'
+    && row.pr_type !== 'security_only';
+
+  const { data: applyPreview, isLoading: previewLoading, isError: previewError } = useQuery<ApplyPlanPreview>({
+    queryKey: ['applyPreview', row?.id, row?.scope],
+    enabled: needsApplyPreview,
+    staleTime: 60_000,
+    queryFn: () => apiFetch<ApplyPlanPreview>(
+      `/pending-applies/${row!.id}/apply-preview?scope=${encodeURIComponent(row!.scope)}`,
     ),
   });
 
@@ -264,6 +287,42 @@ function DetailDrawer({
                     <ExternalLink size={11} /> View on GitHub
                   </a>
                 </div>
+
+                {/* Post-merge terraform apply risk (plan on PR head) */}
+                {needsApplyPreview && (
+                  <div className="rounded-lg border px-3 py-2 text-xs space-y-1">
+                    <p className="text-[11px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+                      <AlertTriangle size={11} /> Apply plan (if merged)
+                    </p>
+                    {previewLoading && <p className="text-muted-foreground">Running terraform plan…</p>}
+                    {previewError && (
+                      <p className="text-muted-foreground">Could not load apply plan preview.</p>
+                    )}
+                    {applyPreview?.error && (
+                      <p className="text-amber-800 dark:text-amber-300">{applyPreview.error}</p>
+                    )}
+                    {applyPreview?.skipped && (
+                      <p className="text-muted-foreground">{applyPreview.reason ?? 'No terraform apply'}</p>
+                    )}
+                    {applyPreview && !applyPreview.skipped && !applyPreview.error && (
+                      applyPreview.has_destroy_or_replace ? (
+                        <div className="text-destructive space-y-1">
+                          <p className="font-medium">Destroy / replace — apply will be blocked</p>
+                          <ul className="list-disc pl-4 font-mono text-[11px]">
+                            {(applyPreview.resources ?? []).map((r) => (
+                              <li key={r.address}>
+                                {r.address}
+                                {r.replace_paths?.length ? ` (replace: ${JSON.stringify(r.replace_paths)})` : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : (
+                        <p className="text-emerald-700 dark:text-emerald-400">No destroy/replace in plan — in-place apply only.</p>
+                      )
+                    )}
+                  </div>
+                )}
 
                 {/* Mergeability / conflicts */}
                 <div className="flex flex-wrap gap-2">

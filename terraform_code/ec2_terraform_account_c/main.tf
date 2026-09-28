@@ -129,6 +129,10 @@ resource "aws_instance" "drift_web_server_b" {
   }
 
   tags = { "Name" : "WebServer_b" }
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 # ─────────────────────────────────────────────

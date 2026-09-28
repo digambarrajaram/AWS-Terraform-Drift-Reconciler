@@ -436,6 +436,8 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             self._serve_trends()
         elif path == "/api/pending-applies":
             self._serve_pending_applies()
+        elif path.startswith("/api/pending-applies/") and path.endswith("/apply-preview"):
+            self._serve_apply_plan_preview()
         elif path.startswith("/api/pending-applies/") and path.endswith("/pr-details"):
             self._serve_pr_details()
         elif path.startswith("/api/pending-applies/") and path.endswith("/logs"):

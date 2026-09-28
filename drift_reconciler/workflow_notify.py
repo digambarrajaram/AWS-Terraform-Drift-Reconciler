@@ -42,11 +42,14 @@ def main() -> int:
 
     webhook_url = ""
     try:
-        from notification_config import get_notification_secrets
+        try:
+            from .notification_config import get_notification_secrets
+        except ImportError:
+            from notification_config import get_notification_secrets
         secrets = get_notification_secrets()
         webhook_url = (secrets.get("slack_webhook_url") or "").strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[workflow-notify] failed to load notification secrets: {exc!r}")
     if not webhook_url:
         print("[workflow-notify] No Slack webhook configured in notification_secrets — skipping")
         return 0

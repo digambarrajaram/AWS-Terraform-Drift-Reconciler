@@ -68,11 +68,14 @@ def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
 
         webhook_url = ""
         try:
-            from notification_config import get_notification_secrets
+            try:
+                from .notification_config import get_notification_secrets
+            except ImportError:
+                from notification_config import get_notification_secrets
             secrets = get_notification_secrets()
             webhook_url = (secrets.get("slack_webhook_url") or "").strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[slack] failed to load webhook url: {exc!r}")
         if not webhook_url:
             print(f"[slack] No Slack webhook configured for account '{account_label}' — skipping batch")
             return sent

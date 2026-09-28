@@ -18,10 +18,9 @@ from drift_reconciler.environment_credentials import (
     _resolve_env_credentials,
 )
 from trivy_agent import graph as trivy_graph, State as TrivyState
-from trivy_agent import _run_trivy, _extract_issues
+from trivy_agent import _run_trivy, _extract_issues, copy_tf_tree
 from scan_runs import report_stage
 from drift_findings import State
-from hcl_patch import _apply_changes_to_file
 from terraform_ops import _ensure_terraform_init
 
 def trivy_gate(state: State):
@@ -46,28 +45,39 @@ def trivy_gate(state: State):
     # drift fixes so the Trivy loop can distinguish pre-existing
     # issues from regressions introduced by the LLM's patch.
     src_dir = os.path.dirname(os.path.abspath(actionable[0]["file_path"]))
-    baseline_raw = _run_trivy(src_dir)
+    scan_root = os.path.abspath(_ag._tf_dir) if _ag._tf_dir else src_dir
+    baseline_raw = _run_trivy(scan_root)
     baseline_issues: list[dict] = []
     if "error" not in baseline_raw:
-        baseline_issues = _extract_issues(baseline_raw, src_dir)
+        baseline_issues = _extract_issues(baseline_raw, scan_root)
     print(f"  [trivy-gate] Baseline scan: {len(baseline_issues)} pre-existing issue(s)")
 
     print(f"  [trivy-gate] Running security scan on proposed drift fixes …")
 
     try:
-        # Copy the terraform directory into the temp workspace so Trivy
-        # scans the proposed fix, not the current (pre-drift) code.
-        for item in os.listdir(src_dir):
-            s = os.path.join(src_dir, item)
-            d = os.path.join(tmpdir, item)
-            if os.path.isfile(s) and item.endswith(".tf"):
-                shutil.copy2(s, d)
+        # Copy the full terraform tree so Trivy sees the same scope as the
+        # baseline scan (nested modules, not only top-level .tf files).
+        copy_tf_tree(scan_root, tmpdir)
 
-        # Apply the proposed after-values to the temp copies.
+        # Apply code_to_reality patches (HCL → live/state values) on temp copies.
         for f in actionable:
-            tf_file = os.path.join(tmpdir, os.path.basename(f["file_path"]))
+            try:
+                rel = os.path.relpath(os.path.abspath(f["file_path"]), scan_root)
+            except ValueError:
+                rel = os.path.basename(f["file_path"])
+            tf_file = os.path.join(tmpdir, rel)
+            if not os.path.isfile(tf_file):
+                tf_file = os.path.join(tmpdir, os.path.basename(f["file_path"]))
             if os.path.isfile(tf_file):
-                _ag._apply_changes_to_file(tf_file, f["resource_id"], f["changes"])
+                patch_changes = _ag.gi.filter_patchable_changes(f.get("changes") or {})
+                if not patch_changes:
+                    continue
+                patched = _ag.gi.apply_changes_to_file(
+                    tf_file, f["resource_id"], patch_changes,
+                    value_key="before",
+                )
+                with open(tf_file, "w", encoding="utf-8") as fh:
+                    fh.write(patched)
 
         # Invoke the self-contained trivy scan→fix→scan loop.
         trivy_initial: TrivyState = {

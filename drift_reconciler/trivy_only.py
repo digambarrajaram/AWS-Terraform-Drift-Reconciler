@@ -9,7 +9,7 @@ import tempfile
 import github_integration as gi
 import drift_reconciler.drift_history as drift_history
 import unmanaged_scanner
-from trivy_agent import _run_trivy, _extract_issues, fix_issues, State as TrivyState
+from trivy_agent import _run_trivy, _extract_issues, fix_issues, copy_tf_tree, State as TrivyState
 from scan_runs import report_stage
 
 def _create_manual_review_prs(needs_review: list[dict], account_label: str,
@@ -152,12 +152,8 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
     tmpdir = tempfile.mkdtemp(prefix="trivy_only_")
 
     try:
-        # ── Copy .tf files into the temp workspace ────────────────────
-        for item in os.listdir(tf_dir):
-            s = os.path.join(tf_dir, item)
-            d = os.path.join(tmpdir, item)
-            if os.path.isfile(s) and item.endswith(".tf"):
-                shutil.copy2(s, d)
+        # ── Copy .tf tree into the temp workspace (same scope as in-place scan) ─
+        copy_tf_tree(tf_dir, tmpdir)
 
         # ── Scan ──────────────────────────────────────────────────────
         raw = _ag._run_trivy(tmpdir)

@@ -223,6 +223,25 @@ def _parse_resource_blocks(content: str) -> list[tuple[str, str, int, int]]:
     return blocks
 
 
+def copy_tf_tree(src_root: str, dst_root: str) -> None:
+    """Copy every ``.tf`` file under *src_root* into *dst_root*, preserving paths.
+
+    Used by trivy-only and trivy-gate so scans see the same file tree Trivy
+    would walk when invoked on a full clone (not only top-level ``.tf`` files).
+    """
+    src_root = os.path.abspath(src_root)
+    dst_root = os.path.abspath(dst_root)
+    for dirpath, _dirnames, filenames in os.walk(src_root):
+        for name in filenames:
+            if not name.endswith(".tf"):
+                continue
+            src = os.path.join(dirpath, name)
+            rel = os.path.relpath(src, src_root)
+            dest = os.path.join(dst_root, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(src, dest)
+
+
 def _run_trivy(tf_dir: str) -> dict:
     """Run `trivy config --format json` and return parsed output."""
     cmd = ["trivy", "config", "--format", "json", tf_dir]

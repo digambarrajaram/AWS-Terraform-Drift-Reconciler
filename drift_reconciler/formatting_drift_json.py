@@ -22,6 +22,10 @@ from datetime import date
 import requests
 
 
+# Provider-computed attributes that appear in plan JSON but must not be
+# written into HCL (terraform validate rejects them).
+_READ_ONLY_DRIFT_ATTRS = frozenset({"tags_all"})
+
 SECURITY_RESOURCE_TYPES = (
     "aws_security_group",
     "aws_vpc_security_group_ingress_rule",
@@ -308,6 +312,12 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
             continue
 
         changes_dict = {field: {"before": b, "after": a} for field, b, a in diffs}
+        changes_dict = {
+            field: vals for field, vals in changes_dict.items()
+            if field not in _READ_ONLY_DRIFT_ATTRS
+        }
+        if not changes_dict:
+            continue
         fpath = file_index.get(address)
 
         # If every drifted field is covered by lifecycle.ignore_changes,

@@ -36,6 +36,15 @@ def humanize_terraform_error(raw_error: str) -> dict:
             "summary": "The configured AWS credentials don't have permission to read this scope's infrastructure.",
             "suggestion": "Check IAM permissions for the scan role.",
         }),
+        (("unauthorizedoperation", "not authorized to perform", "encoded authorization failure"), {
+            "summary": "Terraform apply was denied by IAM — the apply role is missing a required action.",
+            "suggestion": (
+                "Update the environment's apply role (aws_role_arn, e.g. drift-reconciler-apply-<label>) "
+                "to match terraform_code/*/apply-role.tf — including ec2:TerminateInstances and other "
+                "write actions your modules use. After fixing IAM, run terraform apply manually or "
+                "re-trigger the revert from Approvals."
+            ),
+        }),
         (("connection refused", "timeout", "could not connect", "i/o timeout", "context deadline"), {
             "summary": "Couldn't reach AWS or the Terraform backend — possible network issue.",
             "suggestion": "Check network connectivity and try again.",

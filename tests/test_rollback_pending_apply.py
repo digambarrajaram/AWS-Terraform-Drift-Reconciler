@@ -52,7 +52,7 @@ class RollbackPendingApplyTests(unittest.TestCase):
             "present", {"bucket": "fixed"},
         )
         rollback_flow._report_rollback_stage = lambda *a, **k: None
-        rollback_flow._prepare_terraform_workspace = lambda tf_dir, scope: {}
+        rollback_flow._prepare_terraform_workspace = lambda tf_dir, scope: ({}, {})
         gi.apply_changes_to_file = lambda *a, **k: (
             'resource "aws_s3_bucket" "b" {\n  bucket = "orig"\n}\n'
         )

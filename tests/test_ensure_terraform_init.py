@@ -60,6 +60,22 @@ class EnsureTerraformInitTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0][0], ["terraform", "init", "-no-color", "-input=false"])
 
+    def test_backend_dynamodb_mismatch_forces_reconfigure(self):
+        os.makedirs(os.path.join(self.tf_dir, ".terraform"))
+        with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:
+            f.write(_tfstate("same-bucket"))
+        os.makedirs(os.path.join(self.tf_dir, ".terraform", "providers"))
+        open(os.path.join(self.tf_dir, ".terraform", "providers", "cached-provider"), "w").close()
+        self.assertEqual(
+            agent._ensure_terraform_init(
+                self.tf_dir,
+                backend_config={"bucket": "same-bucket", "dynamodb_table": "new-lock"},
+            ),
+            "",
+        )
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("-reconfigure", self.calls[0][0][0])
+
     def test_backend_bucket_mismatch_forces_reconfigure(self):
         os.makedirs(os.path.join(self.tf_dir, ".terraform"))
         with open(os.path.join(self.tf_dir, ".terraform", "terraform.tfstate"), "w") as f:

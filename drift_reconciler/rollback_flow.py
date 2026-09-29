@@ -17,11 +17,12 @@ from terraform_errors import humanize_rollback_error, _strip_ansi
 from terraform_ops import (
     _ensure_terraform_init,
     _strip_hardcoded_aws_profile,
+    _terraform_plan_needs_reinit,
     _terraform_sub_env_for_scope,
 )
 
 
-def _prepare_terraform_workspace(tf_dir: str, scope: str) -> dict:
+def _prepare_terraform_workspace(tf_dir: str, scope: str) -> tuple[dict, dict]:
     """Resolve scope credentials and ensure terraform init (incl. backend)."""
     from drift_reconciler.scope_resolution import (
         backend_config_from_environment,
@@ -35,7 +36,7 @@ def _prepare_terraform_workspace(tf_dir: str, scope: str) -> dict:
     init_error = _ensure_terraform_init(tf_dir, env=sub_env, backend_config=backend_config)
     if init_error:
         raise RuntimeError(init_error.strip())
-    return sub_env
+    return sub_env, backend_config
 
 
 def _report_rollback_stage(run_id: str | None, stage_name: str) -> None:
@@ -77,23 +78,48 @@ def _restore_tf_file_from_git(tf_dir: str, rel_path: str, ref: str = "HEAD") -> 
     return True
 
 
-def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str], env: dict | None = None) -> tuple[str, dict[str, str]]:
+def _fetch_live_state(
+    tf_dir: str,
+    resource_id: str,
+    fields: list[str],
+    env: dict | None = None,
+    backend_config: dict | None = None,
+) -> tuple[str, dict[str, str]]:
     """Run terraform plan in *tf_dir* and extract live field values for
     *resource_id* from the plan JSON.  Returns (outcome, live_values)
     where outcome is ``"present"``, ``"no_diff"``, or ``"not_found"``."""
+    plan_cmd = [
+        "terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s",
+    ]
+    forced_reinit = False
     try:
-        plan_result = subprocess.run(
-            ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
-            cwd=tf_dir,
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120,
-        )
-        if plan_result.returncode != 0:
-            raise RuntimeError(f"terraform plan failed: {_strip_ansi(plan_result.stderr)[:300]}")
+        while True:
+            plan_result = subprocess.run(
+                plan_cmd,
+                cwd=tf_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            if plan_result.returncode == 0:
+                break
+            stderr = _strip_ansi(plan_result.stderr)
+            if (
+                backend_config
+                and not forced_reinit
+                and _terraform_plan_needs_reinit(stderr)
+            ):
+                forced_reinit = True
+                init_error = _ensure_terraform_init(
+                    tf_dir, env=env, backend_config=backend_config, force=True,
+                )
+                if init_error:
+                    raise RuntimeError(init_error.strip())
+                continue
+            raise RuntimeError(f"terraform plan failed: {stderr[:300]}")
     except subprocess.TimeoutExpired:
         raise RuntimeError("terraform plan timed out after 120s — check AWS credentials and state lock")
 
@@ -128,7 +154,7 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
             raise RuntimeError(f"No baselines found for PR #{pr_number} ({scope})")
 
         # Resolve credentials and init backend once for all baselines in this run.
-        sub_env = _prepare_terraform_workspace(tf_dir, scope)
+        sub_env, backend_config = _prepare_terraform_workspace(tf_dir, scope)
 
         diff: list[dict] = []
 
@@ -209,7 +235,7 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
             try:
                 _report_rollback_stage(run_id, "fetching_live_state")
                 outcome, live_values = _fetch_live_state(
-                    tf_dir, resource_id, fields, env=sub_env,
+                    tf_dir, resource_id, fields, env=sub_env, backend_config=backend_config,
                 )
                 print(f"  [rollback-preview] RESULT {resource_id}: outcome={outcome}")
             except Exception as exc:
@@ -288,7 +314,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
     if not baselines:
         raise RuntimeError(f"No baselines found in Supabase for PR #{pr_number} ({account_label})")
 
-    sub_env = _prepare_terraform_workspace(tf_dir, account_label)
+    sub_env, backend_config = _prepare_terraform_workspace(tf_dir, account_label)
 
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 
@@ -377,7 +403,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
             fields = list(original_changes.keys())
             try:
                 outcome, live_values = _fetch_live_state(
-                    tf_dir, resource_id, fields, env=sub_env,
+                    tf_dir, resource_id, fields, env=sub_env, backend_config=backend_config,
                 )
             except RuntimeError as exc:
                 print(f"  ✗ {resource_id}: {exc}")

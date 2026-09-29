@@ -46,7 +46,40 @@ def _terraform_sub_env_for_scope(scope: str, tf_dir: str | None = None) -> dict:
     return _resolve_env_credentials(env_dict, tf_dir=tf_dir)
 
 
-def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config: dict | None = None) -> str:
+def _read_cached_backend_config(tfstate_file: str) -> dict:
+    try:
+        with open(tfstate_file, "r", encoding="utf-8") as f:
+            tfstate = json.load(f)
+        cached = tfstate.get("backend", {}).get("config", {})
+        return cached if isinstance(cached, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _backend_config_differs(cached: dict, backend_config: dict) -> bool:
+    """True when any non-empty *backend_config* value differs from *cached*."""
+    for key, value in backend_config.items():
+        if not value:
+            continue
+        if str(cached.get(key, "")) != str(value):
+            return True
+    return False
+
+
+def _terraform_plan_needs_reinit(stderr: str) -> bool:
+    s = stderr.lower()
+    return (
+        "backend initialization required" in s
+        or "backend configuration block has changed" in s
+    )
+
+
+def _ensure_terraform_init(
+    tf_dir: str,
+    env: dict | None = None,
+    backend_config: dict | None = None,
+    force: bool = False,
+) -> str:
     """Run ``terraform init`` in *tf_dir* only when it isn't already
     initialized — detected via ``.terraform/terraform.tfstate``, the backend
     cache ``terraform init`` writes for EVERY config, module-less included
@@ -84,19 +117,16 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
         except OSError:
             providers_ready = False
 
-    if os.path.isfile(tfstate_file):
-        # Backend mismatch detection: compare cached bucket against new backend_config
-        if backend_config and backend_config.get("bucket"):
-            new_bucket = backend_config["bucket"]
-            try:
-                with open(tfstate_file, "r", encoding="utf-8") as f:
-                    tfstate = json.load(f)
-                    cached_bucket = tfstate.get("backend", {}).get("config", {}).get("bucket")
-                    if cached_bucket and cached_bucket != new_bucket:
-                        force_reconfigure = True
-                        print(f"Backend bucket mismatch: cached={cached_bucket} new={new_bucket} — forcing -reconfigure")
-            except (json.JSONDecodeError, IOError):
-                pass  # If we can't read tfstate, proceed without forcing reconfigure
+    if not force and os.path.isfile(tfstate_file):
+        # Backend mismatch: compare all -backend-config keys against init cache.
+        if backend_config and any(backend_config.values()):
+            cached = _read_cached_backend_config(tfstate_file)
+            if _backend_config_differs(cached, backend_config):
+                force_reconfigure = True
+                print(
+                    "Backend config mismatch between cache and environment row "
+                    f"(cached={cached!r} new={backend_config!r}) — forcing -reconfigure"
+                )
 
         if not force_reconfigure and providers_ready:
             return ""  # already initialized with matching backend — skip re-init cost
@@ -107,7 +137,7 @@ def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config:
         
         # Add -reconfigure if backend mismatch detected OR if backend_config is being passed
         # (backend_config overrides require -reconfigure to accept the new backend config)
-        if force_reconfigure or (backend_config and any(backend_config.values())):
+        if force or force_reconfigure or (backend_config and any(backend_config.values())):
             cmd.append("-reconfigure")
         
         # Append -backend-config flags for each non-empty field in backend_config

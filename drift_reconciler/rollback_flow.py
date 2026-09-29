@@ -8,7 +8,29 @@ import sys
 
 import github_integration as gi
 from terraform_errors import humanize_rollback_error, _strip_ansi
-from terraform_ops import _terraform_sub_env_for_scope
+from terraform_ops import (
+    _ensure_terraform_init,
+    _strip_hardcoded_aws_profile,
+    _terraform_sub_env_for_scope,
+)
+
+
+def _prepare_terraform_workspace(tf_dir: str, scope: str) -> dict:
+    """Resolve scope credentials and ensure terraform init (incl. backend)."""
+    from drift_reconciler.scope_resolution import (
+        backend_config_from_environment,
+        fetch_environment_row,
+    )
+
+    sub_env = _terraform_sub_env_for_scope(scope, tf_dir=tf_dir)
+    _strip_hardcoded_aws_profile(tf_dir)
+    env_dict = fetch_environment_row(scope)
+    backend_config = backend_config_from_environment(env_dict)
+    init_error = _ensure_terraform_init(tf_dir, env=sub_env, backend_config=backend_config)
+    if init_error:
+        raise RuntimeError(init_error.strip())
+    return sub_env
+
 
 def _report_rollback_stage(run_id: str | None, stage_name: str) -> None:
     """Update rollback_runs.current_stage.  No-ops when run_id is None."""
@@ -74,9 +96,8 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
         if not baselines:
             raise RuntimeError(f"No baselines found for PR #{pr_number} ({scope})")
 
-        # Resolve the AWS subprocess env once — every baseline in this run
-        # targets the same scope.
-        sub_env = _terraform_sub_env_for_scope(scope, tf_dir=tf_dir)
+        # Resolve credentials and init backend once for all baselines in this run.
+        sub_env = _prepare_terraform_workspace(tf_dir, scope)
 
         diff: list[dict] = []
 
@@ -191,9 +212,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
     if not baselines:
         raise RuntimeError(f"No baselines found in Supabase for PR #{pr_number} ({account_label})")
 
-    # Resolve the AWS subprocess env once — every baseline in this run
-    # targets the same scope.
-    sub_env = _terraform_sub_env_for_scope(account_label, tf_dir=tf_dir)
+    sub_env = _prepare_terraform_workspace(tf_dir, account_label)
 
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 

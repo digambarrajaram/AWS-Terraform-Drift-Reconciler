@@ -37,7 +37,7 @@ class RollbackPendingApplyTests(unittest.TestCase):
             "baselines": rollback_flow._load_rollback_baselines,
             "fetch": rollback_flow._fetch_live_state,
             "stage": rollback_flow._report_rollback_stage,
-            "sub_env": rollback_flow._terraform_sub_env_for_scope,
+            "workspace": rollback_flow._prepare_terraform_workspace,
             "apply": gi.apply_changes_to_file,
             "pr": gi.create_drift_pr,
             "rel": gi.to_repo_relative_path,
@@ -52,7 +52,7 @@ class RollbackPendingApplyTests(unittest.TestCase):
             "present", {"bucket": "fixed"},
         )
         rollback_flow._report_rollback_stage = lambda *a, **k: None
-        rollback_flow._terraform_sub_env_for_scope = lambda scope: {}
+        rollback_flow._prepare_terraform_workspace = lambda tf_dir, scope: {}
         gi.apply_changes_to_file = lambda *a, **k: (
             'resource "aws_s3_bucket" "b" {\n  bucket = "orig"\n}\n'
         )
@@ -69,7 +69,7 @@ class RollbackPendingApplyTests(unittest.TestCase):
         rollback_flow._load_rollback_baselines = self._orig["baselines"]
         rollback_flow._fetch_live_state = self._orig["fetch"]
         rollback_flow._report_rollback_stage = self._orig["stage"]
-        rollback_flow._terraform_sub_env_for_scope = self._orig["sub_env"]
+        rollback_flow._prepare_terraform_workspace = self._orig["workspace"]
         gi.apply_changes_to_file = self._orig["apply"]
         gi.create_drift_pr = self._orig["pr"]
         gi.to_repo_relative_path = self._orig["rel"]

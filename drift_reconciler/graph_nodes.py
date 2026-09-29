@@ -350,7 +350,7 @@ def unmanaged_scan_node(state: State):
     # initialization required" and load_managed_resources fail-softs to
     # [] — every live resource flagged unmanaged.  On init failure we
     # report nothing rather than invent findings.
-    sub_env = _resolve_env_credentials(env_dict)
+    sub_env = _resolve_env_credentials(env_dict, tf_dir=_ag._tf_dir)
     backend_config = {}
     if env_dict.get("tf_state_bucket"):
         backend_config["bucket"] = env_dict["tf_state_bucket"]

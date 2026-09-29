@@ -583,6 +583,7 @@ class ApprovalsMixin:
                 str(_REPO_ROOT / "drift_reconciler" / "agent.py"),
                 "--tf-dir", tf_dir,
                 "--account-label", scope,
+                "--run-id", str(apply_run_id),
                 mode_flag, str(pr_number),
             ]
             env = os.environ.copy()

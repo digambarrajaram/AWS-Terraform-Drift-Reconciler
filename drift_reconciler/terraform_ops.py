@@ -38,12 +38,12 @@ def _strip_hardcoded_aws_profile(tf_dir: str) -> None:
             print(f"Failed to strip hardcoded AWS profile from {filepath}: {e}")
 
 
-def _terraform_sub_env_for_scope(scope: str) -> dict:
+def _terraform_sub_env_for_scope(scope: str, tf_dir: str | None = None) -> dict:
     """Return a subprocess env with *scope*'s AssumeRole credentials injected."""
     from drift_reconciler.scope_resolution import fetch_environment_row
 
     env_dict = fetch_environment_row(scope)
-    return _resolve_env_credentials(env_dict)
+    return _resolve_env_credentials(env_dict, tf_dir=tf_dir)
 
 
 def _ensure_terraform_init(tf_dir: str, env: dict | None = None, backend_config: dict | None = None) -> str:
@@ -151,7 +151,7 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     if not os.path.exists(tf_dir):
         return f"Error: The Terraform directory '{tf_dir}' does not exist."
 
-    sub_env = _terraform_sub_env_for_scope(_account_label)
+    sub_env = _terraform_sub_env_for_scope(_account_label, tf_dir=tf_dir)
 
     from drift_reconciler.scope_resolution import (
         backend_config_from_environment,

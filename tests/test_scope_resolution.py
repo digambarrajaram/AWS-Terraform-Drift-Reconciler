@@ -14,7 +14,9 @@ from drift_reconciler.scope_resolution import (
     ScopeConfigError,
     detect_workload,
     fetch_environment_row,
+    infer_workload,
     preflight_scope_configurations,
+    resolve_apply_role_arn,
     resolve_scope_binding,
     validate_environment_scope_config,
     validate_role_arn_for_scope,
@@ -47,6 +49,28 @@ class RoleValidationTests(unittest.TestCase):
         validate_role_arn_for_scope(
             "arn:aws:iam::123456789012:role/drift-reconciler-apply-lambda",
             "lambda",
+            "lambda",
+        )
+
+    def test_resolve_apply_role_arn_rewrites_ec2_suffix_for_lambda(self):
+        corrected = resolve_apply_role_arn(
+            "arn:aws:iam::285629514281:role/drift-reconciler-apply-EC2",
+            "lambda",
+            "lambda",
+        )
+        self.assertEqual(
+            corrected,
+            "arn:aws:iam::285629514281:role/drift-reconciler-apply-LAMBDA",
+        )
+
+
+class InferWorkloadTests(unittest.TestCase):
+    def test_lambda_from_tf_dir_when_slug_is_neutral(self):
+        tmp = tempfile.mkdtemp(prefix="scope_lambda_tf_")
+        with open(os.path.join(tmp, "lambda.tf"), "w", encoding="utf-8") as fh:
+            fh.write('resource "aws_lambda_function" "hello" {}\n')
+        self.assertEqual(
+            infer_workload("account-a", "terraform/account-a", tmp),
             "lambda",
         )
 

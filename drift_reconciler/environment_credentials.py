@@ -58,7 +58,10 @@ _HEADERS = {
 }
 
 
-def _resolve_env_credentials(environment: dict) -> dict:
+def _resolve_env_credentials(
+    environment: dict,
+    tf_dir: str | None = None,
+) -> dict:
     """Return a subprocess env dict with *environment*'s AssumeRole
     credentials injected for terraform-CLI subprocess calls.
 
@@ -70,7 +73,7 @@ def _resolve_env_credentials(environment: dict) -> dict:
     Raises RuntimeError when AssumeRole or account verification fails.
     """
     env = os.environ.copy()
-    session = get_aws_session(environment)
+    session = get_aws_session(environment, tf_dir=tf_dir)
     creds = session.get_credentials()
     if creds is None:
         raise RuntimeError(
@@ -109,7 +112,11 @@ def _fetch_environment_secrets(environment_id: str) -> dict[str, Any]:
         return {}
 
 
-def get_aws_session(environment: dict, use_scan_role: bool = False) -> boto3.Session:
+def get_aws_session(
+    environment: dict,
+    use_scan_role: bool = False,
+    tf_dir: str | None = None,
+) -> boto3.Session:
     """Return a boto3 Session for *environment* via STS AssumeRole.
 
     *environment* must be a dict with the shape of a row from the
@@ -131,6 +138,12 @@ def get_aws_session(environment: dict, use_scan_role: bool = False) -> boto3.Ses
         scan_role_arn = (environment.get("scan_role_arn") or "").strip()
         if scan_role_arn:
             role_arn = scan_role_arn
+    elif tf_dir:
+        from drift_reconciler.scope_resolution import infer_workload, resolve_apply_role_arn
+
+        tf_path = (environment.get("tf_directory_path") or "").strip()
+        workload = infer_workload(slug, tf_path, tf_dir)
+        role_arn = resolve_apply_role_arn(role_arn, slug, workload)
     external_id = (environment.get("aws_external_id") or "").strip()
 
     if not role_arn:

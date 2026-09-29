@@ -34,6 +34,12 @@ _RESOURCE_BLOCK_RE = re.compile(
     re.MULTILINE,
 )
 
+# drift-reconciler-apply-EC2 / apply-LAMBDA / apply-vpc (case varies by bootstrap).
+_APPLY_ROLE_WORKLOAD_SUFFIX_RE = re.compile(
+    r"^(?P<prefix>drift-reconciler-apply-)(?P<token>ec2|lambda|vpc)(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+
 
 class ScopeConfigError(RuntimeError):
     """Scope wiring is missing, ambiguous, or inconsistent with terraform / IAM."""
@@ -180,6 +186,90 @@ def detect_workload(slug: str, tf_directory_path: str) -> str | None:
     return found[0] if found else None
 
 
+def infer_workload(
+    slug: str,
+    tf_directory_path: str,
+    tf_dir: str | None = None,
+) -> str | None:
+    """Workload from slug/path, else from declared resources under *tf_dir*."""
+    from_slug_path = detect_workload(slug, tf_directory_path)
+    if from_slug_path:
+        return from_slug_path
+    if not tf_dir:
+        return None
+    found = scan_tf_resource_types(tf_dir)
+    matches = [
+        token
+        for token, resources in _WORKLOAD_REQUIRED_RESOURCES.items()
+        if any(r in found for r in resources)
+    ]
+    if len(matches) > 1:
+        raise ScopeConfigError(
+            f"Scope '{slug}' terraform under {tf_dir} declares multiple workloads "
+            f"({matches}) — split stacks or fix tf_directory_path."
+        )
+    return matches[0] if matches else None
+
+
+def _workload_token_for_role_name(workload: str, template_token: str) -> str:
+    """Match bootstrap casing (EC2, LAMBDA, vpc, …) when rewriting role names."""
+    if template_token.isupper():
+        return workload.upper()
+    if template_token.islower():
+        return workload.lower()
+    if template_token[:1].isupper() and template_token[1:].islower():
+        return workload.capitalize()
+    return workload.lower()
+
+
+def resolve_apply_role_arn(
+    role_arn: str,
+    slug: str,
+    workload: str | None,
+) -> str:
+    """Return the apply role ARN to assume for *workload*.
+
+    When ``aws_role_arn`` uses the standard ``drift-reconciler-apply-<token>``
+    pattern but *token* disagrees with the inferred workload (e.g. EC2 role
+    configured for a lambda stack), rewrite the suffix to match *workload*
+    so AssumeRole targets the IAM role that was bootstrapped for that stack.
+    """
+    arn = (role_arn or "").strip()
+    if not arn:
+        raise ScopeConfigError(
+            f"Scope '{slug}' has no aws_role_arn — AssumeRole is required."
+        )
+    if not workload:
+        return arn
+
+    role_name = arn.split("/")[-1]
+    match = _APPLY_ROLE_WORKLOAD_SUFFIX_RE.match(role_name)
+    if not match:
+        validate_role_arn_for_scope(arn, slug, workload)
+        return arn
+
+    current = match.group("token").lower()
+    if current == workload:
+        validate_role_arn_for_scope(arn, slug, workload)
+        return arn
+
+    token = _workload_token_for_role_name(workload, match.group("token"))
+    corrected_name = (
+        f"{match.group('prefix')}{token}{match.group('rest')}"
+    )
+    corrected = f"{arn.rsplit('/', 1)[0]}/{corrected_name}"
+    logger.warning(
+        "Scope '%s' workload '%s': aws_role_arn pointed at apply-%s; "
+        "assuming %s instead (update environments.aws_role_arn to avoid this warning).",
+        slug,
+        workload,
+        current,
+        corrected_name,
+    )
+    validate_role_arn_for_scope(corrected, slug, workload)
+    return corrected
+
+
 def scan_tf_resource_types(tf_dir: str) -> set[str]:
     """Return Terraform resource type strings declared under *tf_dir*."""
     types: set[str] = set()
@@ -269,10 +359,10 @@ def validate_environment_scope_config(
     """Validate resolved *tf_dir* and IAM role for *env*. Returns detected workload."""
     slug = (env.get("slug") or "unknown").strip()
     tf_path = (env.get("tf_directory_path") or "").strip()
-    workload = detect_workload(slug, tf_path)
+    workload = infer_workload(slug, tf_path, tf_dir)
     validate_tf_dir_for_scope(tf_dir, slug, workload)
     if check_role:
-        validate_role_arn_for_scope(
+        resolve_apply_role_arn(
             (env.get("aws_role_arn") or "").strip(),
             slug,
             workload,
@@ -301,13 +391,15 @@ def _clone_dir_for_environment(env: dict[str, Any]) -> str:
 def resolve_scope_binding(env: dict[str, Any], tf_dir: str) -> ScopeBinding:
     slug = (env.get("slug") or "unknown").strip()
     workload = validate_environment_scope_config(env, tf_dir)
+    configured_role = (env.get("aws_role_arn") or "").strip()
+    role_arn = resolve_apply_role_arn(configured_role, slug, workload)
     repo_url = (env.get("repo_url") or "").strip()
     clone_dir = _clone_dir_for_environment(env) if repo_url else tf_dir
     return ScopeBinding(
         slug=slug,
         tf_dir=os.path.abspath(tf_dir),
         tf_directory_path=(env.get("tf_directory_path") or "").strip(),
-        role_arn=(env.get("aws_role_arn") or "").strip(),
+        role_arn=role_arn,
         scan_role_arn=(env.get("scan_role_arn") or "").strip(),
         backend_bucket=(env.get("tf_state_bucket") or "").strip(),
         backend_lock_table=(env.get("tf_lock_table") or "").strip(),

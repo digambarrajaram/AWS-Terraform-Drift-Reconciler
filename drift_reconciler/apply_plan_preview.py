@@ -95,7 +95,7 @@ def preview_apply_plan(
 
     tf_dir = resolve_and_validate_tf_dir(env_dict)
     git_root = _git_root(tf_dir)
-    sub_env = _resolve_env_credentials(env_dict)
+    sub_env = _resolve_env_credentials(env_dict, tf_dir=tf_dir)
     backend_config = backend_config_from_environment(env_dict)
 
     saved = subprocess.run(

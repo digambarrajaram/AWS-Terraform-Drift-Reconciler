@@ -76,7 +76,7 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
 
         # Resolve the AWS subprocess env once — every baseline in this run
         # targets the same scope.
-        sub_env = _terraform_sub_env_for_scope(scope)
+        sub_env = _terraform_sub_env_for_scope(scope, tf_dir=tf_dir)
 
         diff: list[dict] = []
 
@@ -193,7 +193,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
 
     # Resolve the AWS subprocess env once — every baseline in this run
     # targets the same scope.
-    sub_env = _terraform_sub_env_for_scope(account_label)
+    sub_env = _terraform_sub_env_for_scope(account_label, tf_dir=tf_dir)
 
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 

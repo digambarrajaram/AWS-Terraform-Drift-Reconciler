@@ -183,11 +183,17 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
 
         # Fetch the environment row for the AWS session (same pattern as
         # unmanaged_scan_node).
-        from drift_reconciler.scope_resolution import fetch_environment_row
+        from drift_reconciler.scope_resolution import (
+            fetch_environment_row,
+            user_id_for_scope_context,
+            validate_environment_scope_config,
+        )
 
-        env_dict = fetch_environment_row(scope)
+        uid = user_id_for_scope_context(scope, run_id)
+        env_dict = fetch_environment_row(scope, user_id=uid)
+        validate_environment_scope_config(env_dict, tf_dir)
 
-        sub_env = _resolve_env_credentials(env_dict)
+        sub_env = _resolve_env_credentials(env_dict, tf_dir=tf_dir)
 
         mode_label = "reverting drift" if is_revert else "applying accepted drift"
         print(f"\n--- {mode_label} for PR #{pr_number} ({scope}) ---")

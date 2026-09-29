@@ -311,6 +311,7 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # the live plan: a resource fixed in AWS since the scan no longer
         # appears in the plan and must not block this apply.
         from drift_reconciler.drift_history import get_open_resources, load_baselines
+        from drift_baseline import is_deleted_externally_baseline, verify_deleted_externally_plan
         from rollback_check import _extract_field_values, live_drift_rows
         if not is_revert:
             open_rows = get_open_resources(scope, except_pr_number=pr_number)
@@ -343,6 +344,14 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                 for baseline in baselines:
                     resource_id = baseline["resource_id"]
                     changes = baseline.get("changes") or {}
+                    if is_deleted_externally_baseline(changes):
+                        err = verify_deleted_externally_plan(
+                            plan_json, resource_id, is_revert=is_revert,
+                        )
+                        if err:
+                            gate_failure = err
+                            break
+                        continue
                     fields = list(changes.keys())
                     if not fields:
                         # Fail closed too: a baseline with no recorded field

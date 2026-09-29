@@ -7,6 +7,12 @@ import subprocess
 import sys
 
 import github_integration as gi
+from drift_baseline import (
+    DELETED_EXTERNALLY_FIELD,
+    deleted_externally_baseline,
+    is_deleted_externally_baseline,
+    verify_deleted_externally_plan,
+)
 from terraform_errors import humanize_rollback_error, _strip_ansi
 from terraform_ops import (
     _ensure_terraform_init,
@@ -44,6 +50,31 @@ def _load_rollback_baselines(pr_number: int, scope: str) -> list[dict]:
     """Return rollback baselines for *pr_number* from Supabase."""
     import drift_history
     return drift_history.load_baselines(pr_number, scope)
+
+
+def _restore_tf_file_from_git(tf_dir: str, rel_path: str, ref: str = "HEAD") -> bool:
+    """Overwrite *rel_path* in the clone with the version at *ref* (rollback of
+    deleted_externally fixes that removed the resource block)."""
+    if not rel_path:
+        return False
+    show = subprocess.run(
+        ["git", "show", f"{ref}:{rel_path}"],
+        cwd=tf_dir,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    if show.returncode != 0:
+        return False
+    abs_path = gi.resolve_repo_relative_path(tf_dir, rel_path)
+    if not abs_path:
+        return False
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    with open(abs_path, "w", encoding="utf-8") as fh:
+        fh.write(show.stdout)
+    return True
 
 
 def _fetch_live_state(tf_dir: str, resource_id: str, fields: list[str], env: dict | None = None) -> tuple[str, dict[str, str]]:
@@ -115,6 +146,51 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
                     "fixed": "(baseline loaded)",
                     "current_live": "SKIPPED: source .tf file not found on disk",
                 })
+                continue
+
+            if is_deleted_externally_baseline(original_changes):
+                print(f"  [rollback-preview] CHECK {resource_id}: deleted_externally baseline")
+                try:
+                    plan_result = subprocess.run(
+                        ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
+                        cwd=tf_dir,
+                        env=sub_env,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=120,
+                    )
+                    if plan_result.returncode != 0:
+                        raise RuntimeError(plan_result.stderr[:300])
+                    show_result = subprocess.run(
+                        ["terraform", "show", "-no-color", "-json", "tfplan"],
+                        cwd=tf_dir,
+                        env=sub_env,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    plan_json = json.loads(show_result.stdout)
+                    err = verify_deleted_externally_plan(
+                        plan_json, resource_id, is_revert=True,
+                    )
+                    diff.append({
+                        "resource_id": resource_id,
+                        "field": DELETED_EXTERNALLY_FIELD,
+                        "original": "present_in_aws",
+                        "fixed": "missing_in_aws",
+                        "current_live": err or "create planned — OK",
+                    })
+                except Exception as exc:
+                    diff.append({
+                        "resource_id": resource_id,
+                        "field": "*",
+                        "original": "(deleted_externally)",
+                        "fixed": "(deleted_externally)",
+                        "current_live": f"ERROR: {exc}",
+                    })
                 continue
 
             fields = list(original_changes.keys())
@@ -226,63 +302,110 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
             print(f"  ⚠ {resource_id}: source file not found — {file_path}")
             continue
 
-        # Swap before↔after to produce the reverse patch.
-        reversed_changes: dict[str, dict] = {}
-        for field, vals in original_changes.items():
-            reversed_changes[field] = {"before": vals["after"], "after": vals["before"]}
-        reversed_changes = gi.filter_patchable_changes(reversed_changes)
-
-        print(f"  ↻ {resource_id}: reversing {len(reversed_changes)} field(s) …")
-
-        _report_rollback_stage(run_id, "patching_file")
-        # Apply the reverse patch to a temp copy.
-        patched = gi.apply_changes_to_file(file_path, resource_id, reversed_changes)
-        if patched is None:
-            print(f"  ✗ {resource_id}: reverse-patch produced no changes — skipping")
-            continue
-
-        # Write the patched content back so terraform plan sees it.
-        try:
-            with open(file_path, "w", encoding="utf-8") as fh:
-                fh.write(patched)
-        except OSError as exc:
-            print(f"  ✗ {resource_id}: failed to write patched file — {exc}")
-            continue
-
-        # Freshness check — run terraform plan and extract live values.
-        _report_rollback_stage(run_id, "fetching_live_state")
-        fields = list(original_changes.keys())
-        try:
-            outcome, live_values = _fetch_live_state(
-                tf_dir, resource_id, fields, env=sub_env,
-            )
-        except RuntimeError as exc:
-            print(f"  ✗ {resource_id}: {exc}")
-            continue
-
-        if outcome == "not_found":
-            print(f"  ⏭  {resource_id}: not found in plan — may have been deleted externally")
-            continue
-
-        if outcome == "no_diff":
-            print(f"  ✓ {resource_id}: already matches rollback target — nothing to do")
-            continue
-
-        # outcome == "present" — check staleness.
-        stale_fields = []
-        for field in fields:
-            expected = reversed_changes[field]["after"]  # the original "before" value
-            actual = live_values.get(field, "<missing>")
-            if actual != expected:
-                stale_fields.append((field, expected, actual))
-
-        if stale_fields:
-            print(f"  ⚠ {resource_id}: intervening changes detected since original fix:")
-            for field, expected, actual in stale_fields:
-                print(f"      {field}: expected={expected}  actual={actual}")
-            print(f"      (checkpoint 2 at apply time will still validate freshness)")
+        if is_deleted_externally_baseline(original_changes):
+            print(f"  ↻ {resource_id}: restoring .tf from git (deleted_externally rollback) …")
+            rel = gi.to_repo_relative_path(file_path)
+            if not _restore_tf_file_from_git(tf_dir, rel):
+                print(f"  ✗ {resource_id}: could not restore {rel} from git — skipping")
+                continue
+            patched = None
+            with open(file_path, encoding="utf-8") as fh:
+                patched = fh.read()
         else:
-            print(f"  ✓ {resource_id}: freshness confirmed")
+            # Swap before↔after to produce the reverse patch.
+            reversed_changes: dict[str, dict] = {}
+            for field, vals in original_changes.items():
+                reversed_changes[field] = {"before": vals["after"], "after": vals["before"]}
+            reversed_changes = gi.filter_patchable_changes(reversed_changes)
+
+            print(f"  ↻ {resource_id}: reversing {len(reversed_changes)} field(s) …")
+
+            _report_rollback_stage(run_id, "patching_file")
+            # Apply the reverse patch to a temp copy.
+            patched = gi.apply_changes_to_file(file_path, resource_id, reversed_changes)
+            if patched is None:
+                print(f"  ✗ {resource_id}: reverse-patch produced no changes — skipping")
+                continue
+
+            # Write the patched content back so terraform plan sees it.
+            try:
+                with open(file_path, "w", encoding="utf-8") as fh:
+                    fh.write(patched)
+            except OSError as exc:
+                print(f"  ✗ {resource_id}: failed to write patched file — {exc}")
+                continue
+
+        if is_deleted_externally_baseline(original_changes):
+            reversed_changes = deleted_externally_baseline()
+            _report_rollback_stage(run_id, "fetching_live_state")
+            try:
+                plan_result = subprocess.run(
+                    ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
+                    cwd=tf_dir,
+                    env=sub_env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+                if plan_result.returncode != 0:
+                    raise RuntimeError(plan_result.stderr[:300])
+                show_result = subprocess.run(
+                    ["terraform", "show", "-no-color", "-json", "tfplan"],
+                    cwd=tf_dir,
+                    env=sub_env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                plan_json = json.loads(show_result.stdout)
+                err = verify_deleted_externally_plan(
+                    plan_json, resource_id, is_revert=True,
+                )
+                if err:
+                    print(f"  ✗ {resource_id}: {err}")
+                    continue
+            except (RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+                print(f"  ✗ {resource_id}: {exc}")
+                continue
+            print(f"  ✓ {resource_id}: freshness confirmed (create planned)")
+        else:
+            # Freshness check — run terraform plan and extract live values.
+            _report_rollback_stage(run_id, "fetching_live_state")
+            fields = list(original_changes.keys())
+            try:
+                outcome, live_values = _fetch_live_state(
+                    tf_dir, resource_id, fields, env=sub_env,
+                )
+            except RuntimeError as exc:
+                print(f"  ✗ {resource_id}: {exc}")
+                continue
+
+            if outcome == "not_found":
+                print(f"  ⏭  {resource_id}: not found in plan — may have been deleted externally")
+                continue
+
+            if outcome == "no_diff":
+                print(f"  ✓ {resource_id}: already matches rollback target — nothing to do")
+                continue
+
+            # outcome == "present" — check staleness.
+            stale_fields = []
+            for field in fields:
+                expected = reversed_changes[field]["after"]  # the original "before" value
+                actual = live_values.get(field, "<missing>")
+                if actual != expected:
+                    stale_fields.append((field, expected, actual))
+
+            if stale_fields:
+                print(f"  ⚠ {resource_id}: intervening changes detected since original fix:")
+                for field, expected, actual in stale_fields:
+                    print(f"      {field}: expected={expected}  actual={actual}")
+                print(f"      (checkpoint 2 at apply time will still validate freshness)")
+            else:
+                print(f"  ✓ {resource_id}: freshness confirmed")
 
         rollback_ready.append(
             {

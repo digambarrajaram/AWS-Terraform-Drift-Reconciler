@@ -35,6 +35,14 @@ SECURITY_RESOURCE_TYPES = (
     "aws_iam_role_policy",
 )
 
+# External deletion of these types is treated as high security impact.
+HIGH_IMPACT_DELETION_TYPES = (
+    "aws_lambda_function",
+    "aws_instance",
+    "aws_rds_cluster",
+    "aws_db_instance",
+)
+
 
 def classify_security_impact(address: str, changes_dict: dict) -> str | None:
     resource_type = address.split(".")[0]
@@ -301,7 +309,12 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
                 "status": "deleted_externally",
                 "changes": {},
                 "sensitive": False,
-                "security_impact": "high" if address.split(".")[0] in SECURITY_RESOURCE_TYPES else "medium",
+                "security_impact": (
+                    "high"
+                    if address.split(".")[0] in SECURITY_RESOURCE_TYPES
+                    or address.split(".")[0] in HIGH_IMPACT_DELETION_TYPES
+                    else "medium"
+                ),
                 "file_path": file_index.get(address),
             })
             continue

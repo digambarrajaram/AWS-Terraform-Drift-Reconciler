@@ -232,19 +232,21 @@ def load_baselines(pr_number: int, account: str) -> list[dict[str, Any]]:
             timeout=10,
         )
         if resp.status_code == 200:
+            from drift_baseline import infer_baseline_from_row
+
             rows = resp.json() if resp.text else []
-            return [
-                {
+            baselines: list[dict[str, Any]] = []
+            for r in rows:
+                changes = infer_baseline_from_row(r)
+                if not changes:
+                    continue
+                baselines.append({
                     "resource_id": r["resource_id"],
-                    "changes": json.loads(r["changes_jsonb"])
-                    if isinstance(r.get("changes_jsonb"), str)
-                    else r.get("changes_jsonb", {}),
+                    "changes": changes,
                     "drift_summary": r.get("drift_summary", ""),
                     "file_path": r.get("file_path", ""),
-                }
-                for r in rows
-                if r.get("changes_jsonb")
-            ]
+                })
+            return baselines
         print(f"  [history] load_baselines failed ({resp.status_code}): {resp.text[:200]}")
         return []
     except (requests.RequestException, json.JSONDecodeError) as exc:

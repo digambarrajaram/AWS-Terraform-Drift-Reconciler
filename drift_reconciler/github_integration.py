@@ -51,13 +51,17 @@ UNPATCHABLE_BLOCK_FIELDS = {
 }
 
 from formatting_drift_json import _READ_ONLY_DRIFT_ATTRS as COMPUTED_DRIFT_FIELDS  # noqa: E402
+from drift_baseline import DELETED_EXTERNALLY_FIELD, changes_for_history  # noqa: E402
+
+_NON_PATCHABLE_BASELINE_FIELDS = frozenset({DELETED_EXTERNALLY_FIELD})
 
 
 def filter_patchable_changes(changes: dict | None) -> dict:
     """Drop computed/read-only plan fields that must not be written to HCL."""
     if not changes:
         return {}
-    return {field: vals for field, vals in changes.items() if field not in COMPUTED_DRIFT_FIELDS}
+    skip = COMPUTED_DRIFT_FIELDS | _NON_PATCHABLE_BASELINE_FIELDS
+    return {field: vals for field, vals in changes.items() if field not in skip}
 
 
 def _summarize_changes_for_log(changes: dict, limit: int = 120) -> dict:
@@ -525,7 +529,7 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
         file_content=content,
         risk_level=risk_level,
         account_label=account_label,
-        changes=finding.get("changes") if finding.get("file_path") else None,
+        changes=changes_for_history(finding) if finding.get("file_path") else None,
         cost_impact=finding.get("cost_impact"),
         trivy_passed=finding.get("trivy_passed"),
         trivy_summary=_build_trivy_summary(finding),
@@ -684,7 +688,7 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
                 severity=f.get("risk_level", "LOW"),
                 fields_changed=list(f.get("changes", {}).keys()),
                 drift_summary=f.get("drift_summary", ""),
-                changes_jsonb=f.get("changes"),
+                changes_jsonb=changes_for_history(f),
                 file_path=to_repo_relative_path(file_path),
                 cost_impact=f.get("cost_impact"),
                 trivy_passed=f.get("trivy_passed"),

@@ -8,6 +8,8 @@ from typing_extensions import TypedDict
 from langchain_core.messages import AIMessage
 from drift_reconciler.llm_client import _get_llm
 from scan_runs import report_stage
+from drift_baseline import changes_for_history, deleted_externally_baseline
+from formatting_drift_json import HIGH_IMPACT_DELETION_TYPES
 
 class State(TypedDict):
     messages: Annotated[list, lambda x, y: x + y]
@@ -77,6 +79,10 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
         if not resource.get("changes") and status not in ("deleted_externally", "externally_managed"):
             continue
         risk = map_risk(resource.get("security_impact"))
+        if status == "deleted_externally":
+            rtype = resource["address"].split(".")[0] if "." in resource["address"] else resource["address"]
+            if rtype in HIGH_IMPACT_DELETION_TYPES and risk != "HIGH":
+                risk = "HIGH"
         # Network-reachability changes are never "low" — upgrade the LLM's
         # freeform classification when the resource type + changed fields
         # match a known network-risk pattern.
@@ -95,7 +101,10 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
             "drift_summary": dr_summary,
             "plan_output": json.dumps(resource.get("changes") or {"status": status}, indent=2),
             "file_path": resource.get("file_path"),
-            "changes": resource.get("changes", {}),
+            "changes": (
+                resource.get("changes")
+                or (deleted_externally_baseline() if status == "deleted_externally" else {})
+            ),
             "status": status,
         })
     return findings

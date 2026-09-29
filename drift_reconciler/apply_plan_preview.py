@@ -9,7 +9,10 @@ from typing import Any
 from drift_reconciler.environment_credentials import (
     _resolve_env_credentials,
     refresh_clone,
-    resolve_tf_dir,
+)
+from drift_reconciler.scope_resolution import (
+    backend_config_from_environment,
+    resolve_and_validate_tf_dir,
 )
 from drift_reconciler.github_client_utils import resolve_repo_target
 from drift_reconciler.plan_analysis import plan_risk_summary
@@ -90,16 +93,10 @@ def preview_apply_plan(
     pr = g.get_repo(repo_slug).get_pull(pr_number)
     head_sha = pr.head.sha
 
-    tf_dir = resolve_tf_dir(env_dict)
+    tf_dir = resolve_and_validate_tf_dir(env_dict)
     git_root = _git_root(tf_dir)
     sub_env = _resolve_env_credentials(env_dict)
-    backend_config = {}
-    if env_dict.get("tf_state_bucket"):
-        backend_config["bucket"] = env_dict["tf_state_bucket"]
-    if env_dict.get("tf_lock_table"):
-        backend_config["dynamodb_table"] = env_dict["tf_lock_table"]
-    if env_dict.get("region"):
-        backend_config["region"] = env_dict["region"]
+    backend_config = backend_config_from_environment(env_dict)
 
     saved = subprocess.run(
         ["git", "rev-parse", "HEAD"],

@@ -4,7 +4,11 @@ import time as _time
 
 import requests
 
-from drift_reconciler.environment_credentials import resolve_tf_dir
+from drift_reconciler.scope_resolution import (
+    ScopeConfigError,
+    fetch_environment_row,
+    resolve_and_validate_tf_dir,
+)
 
 # Per-user cache: bucket key -> list of environment row dicts
 _ENV_CACHE: dict[str, list[dict]] = {}
@@ -81,14 +85,12 @@ def _get_env_field(slug: str, field: str, default: str = "", user_id: str | None
 
 
 def _tf_dir_for(scope: str, user_id: str | None = None) -> str:
-    env = _env_for_scope(scope, user_id)
-    if env is None:
-        return f"terraform_code/ec2_terraform_{scope}"  # legacy fallback, unchanged
     try:
-        return resolve_tf_dir(env)
-    except RuntimeError as exc:
-        print(f"  ⚠ resolve_tf_dir failed for scope={scope}: {exc}")
-        raise
+        env = fetch_environment_row(scope, user_id=user_id)
+        return resolve_and_validate_tf_dir(env)
+    except ScopeConfigError as exc:
+        print(f"  ⚠ scope config failed for scope={scope}: {exc}")
+        raise RuntimeError(str(exc)) from exc
 
 
 def _configure_aws_env(env: dict, scope: str) -> None:

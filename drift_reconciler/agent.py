@@ -209,6 +209,30 @@ def _print_drift_exceptions(drift_report_str: str):
                 print()
 
 
+def _resolve_scope_tf_dir(args) -> str:
+    """Resolve and validate terraform directory for this run's scope."""
+    from drift_reconciler.scope_resolution import (
+        ScopeConfigError,
+        assert_explicit_tf_dir,
+        fetch_environment_row,
+        resolve_and_validate_tf_dir,
+        user_id_for_scope_context,
+        validate_environment_scope_config,
+    )
+
+    uid = user_id_for_scope_context(args.account_label, getattr(args, "run_id", None))
+    try:
+        env_dict = fetch_environment_row(args.account_label, user_id=uid)
+    except ScopeConfigError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if args.tf_dir is not None:
+        tf_dir = os.path.abspath(args.tf_dir)
+        assert_explicit_tf_dir(tf_dir, env_dict)
+        validate_environment_scope_config(env_dict, tf_dir)
+        return tf_dir
+    return resolve_and_validate_tf_dir(env_dict)
+
+
 def _current_git_branch(tf_dir: str) -> str:
     """Return the checked-out branch of the git repo at *tf_dir* ('' when
     not a repo / detached HEAD)."""
@@ -337,29 +361,7 @@ if __name__ == "__main__":
 
     # --trivy-only mode: security scan only, no drift detection or terraform plan.
     if args.trivy_only:
-        if args.tf_dir is not None:
-            tf_dir = os.path.abspath(args.tf_dir)
-        else:
-            import os as _os
-            import requests as _requests
-            url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-            key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-            env_dict = {}
-            if url and key:
-                resp = _requests.get(
-                    f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
-                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                    timeout=10,
-                )
-                if resp.status_code == 200 and resp.json():
-                    env_dict = resp.json()[0]
-            if not env_dict:
-                raise RuntimeError(
-                    f"No environment found for slug '{_account_label}' — "
-                    f"cannot resolve terraform directory."
-                )
-            from drift_reconciler.environment_credentials import resolve_tf_dir
-            tf_dir = resolve_tf_dir(env_dict)
+        tf_dir = _resolve_scope_tf_dir(args)
 
         if not os.path.isdir(tf_dir):
             raise RuntimeError(f"Terraform directory not found: {tf_dir}")
@@ -403,29 +405,7 @@ if __name__ == "__main__":
 
     # Resolve tf_dir once — used by rollback, rollback_preview, and the
     # main drift-reconciliation pipeline below.
-    if args.tf_dir is not None:
-        tf_dir = os.path.abspath(args.tf_dir)
-    else:
-        import os as _os
-        import requests as _requests
-        url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-        key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        env_dict = {}
-        if url and key:
-            resp = _requests.get(
-                f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                env_dict = resp.json()[0]
-        if not env_dict:
-            raise RuntimeError(
-                f"No environment found for slug '{_account_label}' — "
-                f"cannot resolve terraform directory."
-            )
-        from drift_reconciler.environment_credentials import resolve_tf_dir
-        tf_dir = resolve_tf_dir(env_dict)
+    tf_dir = _resolve_scope_tf_dir(args)
 
     if not os.path.isdir(tf_dir):
         raise RuntimeError(f"Terraform directory not found: {tf_dir}")

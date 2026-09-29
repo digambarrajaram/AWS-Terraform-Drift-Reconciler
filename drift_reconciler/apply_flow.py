@@ -183,19 +183,9 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
 
         # Fetch the environment row for the AWS session (same pattern as
         # unmanaged_scan_node).
-        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        env_dict = {}
-        if url and key:
-            resp = _requests.get(
-                f"{url}/rest/v1/environments?select=*&slug=eq.{scope}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                env_dict = resp.json()[0]
-        if not env_dict:
-            raise RuntimeError(f"No environment found for slug '{scope}' — check the environments table.")
+        from drift_reconciler.scope_resolution import fetch_environment_row
+
+        env_dict = fetch_environment_row(scope)
 
         sub_env = _resolve_env_credentials(env_dict)
 

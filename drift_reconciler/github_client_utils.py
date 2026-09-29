@@ -43,18 +43,12 @@ def resolve_repo_target(account_label: str | None) -> tuple[str, str, str]:
     .env variables is allowed.
     """
     env_dict: dict = {}
-    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    if account_label and url and key:
+    if account_label:
         try:
-            resp = requests.get(
-                f"{url}/rest/v1/environments?select=*&slug=eq.{account_label}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                env_dict = resp.json()[0]
-        except requests.RequestException:
+            from drift_reconciler.scope_resolution import fetch_environment_row
+
+            env_dict = fetch_environment_row(account_label)
+        except Exception:
             env_dict = {}
 
     repo_url = (env_dict.get("repo_url") or "").strip()

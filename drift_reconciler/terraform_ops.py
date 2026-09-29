@@ -39,28 +39,10 @@ def _strip_hardcoded_aws_profile(tf_dir: str) -> None:
 
 
 def _terraform_sub_env_for_scope(scope: str) -> dict:
-    """Return a subprocess env with *scope*'s AWS credentials injected
-    (role via ``_resolve_env_credentials`` / AssumeRole), or a plain os.environ
-    copy when the environment row can't be fetched — falling back to the
-    server's ambient credentials exactly like before."""
-    import requests as _requests
+    """Return a subprocess env with *scope*'s AssumeRole credentials injected."""
+    from drift_reconciler.scope_resolution import fetch_environment_row
 
-    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    env_dict = {}
-    if url and key:
-        try:
-            resp = _requests.get(
-                f"{url}/rest/v1/environments?select=*&slug=eq.{scope}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                env_dict = resp.json()[0]
-        except _requests.RequestException:
-            env_dict = {}
-    if not env_dict:
-        return os.environ.copy()
+    env_dict = fetch_environment_row(scope)
     return _resolve_env_credentials(env_dict)
 
 
@@ -166,41 +148,19 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     _account_label = _ag._account_label
     """Executes CLI commands using the supplied terraform directory and
     drift-formatting script path."""
-    import requests as _requests
-
     if not os.path.exists(tf_dir):
         return f"Error: The Terraform directory '{tf_dir}' does not exist."
 
     sub_env = _terraform_sub_env_for_scope(_account_label)
-    
-    # Fetch environment row to extract backend config (tf_state_bucket, tf_lock_table, region)
-    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    env_dict = {}
-    if url and key:
-        try:
-            resp = _requests.get(
-                f"{url}/rest/v1/environments?select=*&slug=eq.{_account_label}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                env_dict = resp.json()[0]
-        except _requests.RequestException:
-            pass  # Fall back to empty backend_config if fetch fails
-    
-    # Build backend_config dict from environment row
-    backend_config = {}
-    if env_dict:
-        if env_dict.get("tf_state_bucket"):
-            backend_config["bucket"] = env_dict["tf_state_bucket"]
-        if env_dict.get("tf_lock_table"):
-            backend_config["dynamodb_table"] = env_dict["tf_lock_table"]
-        if env_dict.get("region"):
-            backend_config["region"] = env_dict["region"]
-        print(f"Backend config loaded from environment row: {backend_config}")
-    else:
-        print(f"No environment row found for slug '{_account_label}' (SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY may be missing)")
+
+    from drift_reconciler.scope_resolution import (
+        backend_config_from_environment,
+        fetch_environment_row,
+    )
+
+    env_dict = fetch_environment_row(_account_label)
+    backend_config = backend_config_from_environment(env_dict)
+    print(f"Backend config loaded from environment row: {backend_config}")
 
     init_error = _ensure_terraform_init(tf_dir, env=sub_env, backend_config=backend_config)
     if init_error:

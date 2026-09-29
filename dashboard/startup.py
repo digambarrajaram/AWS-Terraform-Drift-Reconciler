@@ -48,6 +48,26 @@ def main() -> int:
         print(str(exc))
         return 1
 
+    skip_preflight = os.environ.get("DRIFT_SKIP_SCOPE_PREFLIGHT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not skip_preflight:
+        from drift_reconciler.scope_resolution import (
+            ScopeConfigError,
+            preflight_scope_configurations,
+        )
+
+        try:
+            bindings = preflight_scope_configurations()
+            logger.info(
+                "Scope preflight passed for %d environment(s).", len(bindings)
+            )
+        except ScopeConfigError as exc:
+            print(f"Scope configuration preflight failed: {exc}")
+            return 1
+
     # ── Auth gate ──────────────────────────────────────────────────
     _session_secret = os.environ.get("SESSION_SECRET", "").strip()
     if not _session_secret:

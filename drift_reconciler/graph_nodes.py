@@ -325,21 +325,14 @@ def unmanaged_scan_node(state: State):
     print("\n--- Unmanaged resource scan ---")
     try:
         # Resolve environment row and build AWS session.
-        import os as _os
-        import requests as _requests
-        env_dict = {}
-        url = _os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-        key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        if url and key:
-            resp = _requests.get(
-                f"{url}/rest/v1/environments?select=*&slug=eq.{_ag._account_label}",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                env_dict = resp.json()[0]
-        if not env_dict:
-            raise RuntimeError(f"No environment found for slug '{_ag._account_label}' — check the environments table.")
+        from drift_reconciler.scope_resolution import (
+            fetch_environment_row,
+            user_id_for_scope_context,
+        )
+
+        run_id = state.get("run_id")
+        uid = user_id_for_scope_context(_ag._account_label, run_id)
+        env_dict = fetch_environment_row(_ag._account_label, user_id=uid)
         session = _ag.get_aws_session(env_dict, use_scan_role=True)
         live = _ag.unmanaged_scanner.scan_unmanaged_resources(session, _ag._region)
     except Exception as e:

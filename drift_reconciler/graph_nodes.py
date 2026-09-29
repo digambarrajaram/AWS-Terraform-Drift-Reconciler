@@ -234,21 +234,49 @@ def drift_pr_from_finding(state: State):
         """Return the open drift_events row if one exists for this finding, else None."""
         return _ag.drift_history.get_open_event(finding["resource_id"], _ag._account_label, pr_type)
 
+    def _blocked_by_current_open_pr(finding: dict, pr_type: str) -> bool:
+        """True when an open PR already covers *this* drift payload.
+
+        If an open PR exists but its stored changes_jsonb is stale (AWS moved
+        again — the classic n-1 lag), supersede it so a fresh PR is created.
+        """
+        existing = _already_open(finding, pr_type)
+        if not existing:
+            return False
+        if _ag.drift_history.open_event_matches_finding(existing, finding):
+            print(
+                f"  ⏭  {finding['resource_id']}: open PR #{existing['pr_number']} "
+                f"already matches current drift — skipping"
+            )
+            return True
+        print(
+            f"  ↻  {finding['resource_id']}: open PR #{existing['pr_number']} is stale "
+            f"(stored drift ≠ live plan) — superseding and recreating"
+        )
+        _ag.drift_history.supersede_open_event(
+            existing,
+            resolution=(
+                f"Superseded by newer scan — drift changed since PR "
+                f"#{existing.get('pr_number')}"
+            ),
+        )
+        try:
+            from drift_reconciler.pending_applies import mark_superseded
+            if existing.get("pr_number"):
+                mark_superseded(existing["pr_number"], _ag._account_label)
+        except Exception as exc:
+            print(f"  ⚠ pending_applies supersede failed: {exc}")
+        return False
+
     pr_urls = []
     for file_path, group in by_file.items():
         if len(group) == 1:
-            existing = _already_open(group[0], "fix")
-            if existing:
-                print(f"  ⏭  {group[0]['resource_id']}: open PR #{existing['pr_number']} "
-                      f"already exists — skipping")
+            if _blocked_by_current_open_pr(group[0], "fix"):
                 continue
             pr = _ag.gi.create_drift_pr_for_mode(group[0], "code_to_reality", account_label=_ag._account_label)
         else:
-            # Filter findings that already have an open PR before batching.
-            actionable = [f for f in group if not _already_open(f, "batch")]
-            skipped = len(group) - len(actionable)
-            if skipped:
-                print(f"  ⏭  {file_path}: {skipped} finding(s) already have open PRs — skipped")
+            # Filter findings that already have a *current* open PR before batching.
+            actionable = [f for f in group if not _blocked_by_current_open_pr(f, "batch")]
             if not actionable:
                 continue
             pr = _ag.gi.create_drift_pr_for_file(actionable, "code_to_reality", account_label=_ag._account_label)
@@ -295,14 +323,12 @@ def drift_pr_from_finding(state: State):
             )
             continue
         print(f"  {finding['resource_id']}: no exception on file — creating PR")
-        existing = _already_open(finding, "unmanaged")
-        if existing:
-            print(f"  Skipping {finding['resource_id']}: open PR "
-                  f"#{existing['pr_number']} already exists")
+        is_unmanaged = finding.get("status") in _ag.unmanaged_scanner.UNMANAGED_STATUSES
+        dedup_type = "unmanaged" if is_unmanaged else "fix"
+        if _blocked_by_current_open_pr(finding, dedup_type):
             continue
         pr = _ag.gi.create_drift_pr_for_mode(finding, "code_to_reality", account_label=_ag._account_label)
         if pr is not None:
-            is_unmanaged = finding.get("status") in _ag.unmanaged_scanner.UNMANAGED_STATUSES
             pr_urls.append({"url": pr.html_url, "type": "unmanaged" if is_unmanaged else "drift"})
             from drift_reconciler.pending_applies import create_pending_apply
             create_pending_apply(pr.number, _ag._account_label,

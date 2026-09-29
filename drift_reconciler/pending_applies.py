@@ -197,6 +197,34 @@ def set_security_fixes(pr_number: int, scope: str, fixes: list[dict],
         return False
 
 
+def mark_superseded(pr_number: int, scope: str, user_id: str | None = None) -> bool:
+    """Move an awaiting_approval row to ``superseded`` when a newer PR replaces it."""
+    if not _URL or not _KEY:
+        return False
+    user_id = _resolve_user_id(scope, user_id)
+    try:
+        resp = requests.patch(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?{_identity_query(pr_number, scope, user_id)}&status=eq.awaiting_approval",
+            headers=_HEADERS,
+            json={
+                "status": "superseded",
+                "result": {
+                    "superseded": True,
+                    "message": "Replaced by a newer drift PR from a later scan",
+                },
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 204):
+            print(f"  [pending_applies] PR #{pr_number} marked superseded")
+            return True
+        return False
+    except requests.RequestException as exc:
+        print(f"  [pending_applies] supersede PATCH failed: {exc}")
+        return False
+
+
 def update_pending_apply(pr_number: int, scope: str, user_id: str | None = None, **fields) -> bool:
     """Update the decided (approved OR rejected) pending_applies row for
     *user_id* + *pr_number* + *scope*.

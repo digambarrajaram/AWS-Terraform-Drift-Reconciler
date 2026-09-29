@@ -282,7 +282,7 @@ def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -
     try:
         resp = requests.get(
             f"{_URL}/rest/v1/{_TABLE}"
-            f"?select=id,pr_number,pr_type,status"
+            f"?select=id,pr_number,pr_type,status,changes_jsonb,drift_summary"
             f"{filters}"
             f"&limit=1",
             headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
@@ -319,6 +319,63 @@ def get_open_event(resource_id: str, account: str, pr_type: str | None = None) -
          "resolution": "PR closed externally — sync'd by guard on next scan"},
     )
     return None
+
+
+def _canonical_changes(changes) -> str:
+    """Stable JSON for comparing stored vs live drift payloads."""
+    if not changes:
+        changes = {}
+    if isinstance(changes, str):
+        try:
+            changes = json.loads(changes)
+        except (json.JSONDecodeError, TypeError):
+            return changes
+    return json.dumps(changes, sort_keys=True, default=str)
+
+
+def open_event_matches_finding(event: dict | None, finding: dict) -> bool:
+    """True when the open event's stored baseline still matches *finding*.
+
+    When False, the live drift has moved on (n vs n-1) and the open PR must
+    be superseded so Approvals/Explorer show the current change set.
+    """
+    if not event:
+        return False
+    try:
+        from drift_reconciler.drift_baseline import changes_for_history
+    except ImportError:
+        from drift_baseline import changes_for_history  # type: ignore
+    current = changes_for_history(finding) or {}
+    stored = event.get("changes_jsonb")
+    # Legacy rows with no baseline cannot be trusted as current — recreate.
+    if stored in (None, "", {}, []):
+        return False
+    return _canonical_changes(stored) == _canonical_changes(current)
+
+
+def supersede_open_event(
+    event: dict,
+    *,
+    resolution: str = "Superseded by a newer scan with updated drift",
+) -> bool:
+    """Mark an open drift_events row resolved so a fresh PR can be created."""
+    event_id = event.get("id")
+    if not event_id:
+        return False
+    ok = _patch(
+        {"id": event_id},
+        {
+            "status": "resolved",
+            "resolution": resolution,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    if ok:
+        print(
+            f"  [history] Superseded open event id={event_id} "
+            f"PR #{event.get('pr_number')} — {resolution}"
+        )
+    return ok
 
 
 def _fetch_pr_state(pr_number: int, account_label: str | None = None) -> str | None:

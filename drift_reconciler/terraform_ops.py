@@ -196,6 +196,13 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
         return init_error
 
     print(f"Step 1: Running 'terraform plan' inside: {tf_dir}...")
+    # Drop leftover plan artifacts so we never format a previous scan's tfplan.
+    for stale_name in ("tfplan", "plan.json"):
+        stale_path = os.path.join(tf_dir, stale_name)
+        try:
+            os.remove(stale_path)
+        except OSError:
+            pass
     # Force refresh so live AWS drift is visible even if TF_CLI_ARGS sets
     # -refresh=false. -input=false avoids interactive prompts in containers.
     try:

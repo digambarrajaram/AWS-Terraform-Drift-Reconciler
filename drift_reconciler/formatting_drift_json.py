@@ -21,6 +21,13 @@ from datetime import date
 
 import requests
 
+# Invoked as ``python drift_reconciler/formatting_drift_json.py`` from terraform_ops;
+# only the script directory is on sys.path unless the repo root is added.
+if __package__ in (None, ""):
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+
 from drift_reconciler.drift_baseline import plan_field_values_equal
 
 
@@ -271,7 +278,9 @@ def apply_drift_exceptions(
 def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
     prior_addresses = get_prior_state_addresses(plan)
     drift_entries = plan.get("resource_drift")
-    used_fallback = drift_entries is None
+    # Some Terraform builds emit resource_drift: [] while drift still appears in
+    # resource_changes — treat empty/missing the same as absent.
+    used_fallback = not drift_entries
     deleted_addresses = set()
 
     file_index = build_resource_file_index(tf_dir) if tf_dir else {}

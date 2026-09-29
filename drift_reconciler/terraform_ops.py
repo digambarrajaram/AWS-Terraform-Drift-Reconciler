@@ -235,8 +235,12 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     print("Step 3: Processing drift format script...")
     target_plan_json = os.path.join(tf_dir, "plan.json")
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(drift_script_path)))
+    format_env = dict(sub_env)
+    format_env["PYTHONPATH"] = repo_root + os.pathsep + format_env.get("PYTHONPATH", "")
+
     format_script_cmd = [
-        "python",
+        sys.executable,
         drift_script_path,
         target_plan_json,
         "--account", _account_label,
@@ -244,6 +248,7 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     try:
         result = subprocess.run(
             format_script_cmd,
+            env=format_env,
             check=True,
             capture_output=True,
             text=True,

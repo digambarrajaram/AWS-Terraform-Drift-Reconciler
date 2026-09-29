@@ -68,6 +68,15 @@ def main() -> int:
             print(f"Scope configuration preflight failed: {exc}")
             return 1
 
+    from dashboard.import_preflight import verify_package_imports
+
+    try:
+        verify_package_imports()
+        logger.info("Package import preflight passed (drift_reconciler + dashboard).")
+    except SystemExit as exc:
+        print(str(exc))
+        return 1
+
     # ── Auth gate ──────────────────────────────────────────────────
     _session_secret = os.environ.get("SESSION_SECRET", "").strip()
     if not _session_secret:

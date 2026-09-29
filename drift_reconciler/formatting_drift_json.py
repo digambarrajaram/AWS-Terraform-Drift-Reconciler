@@ -21,7 +21,7 @@ from datetime import date
 
 import requests
 
-from drift_baseline import plan_field_values_equal
+from drift_reconciler.drift_baseline import plan_field_values_equal
 
 
 # Provider-computed attributes that appear in plan JSON but must not be

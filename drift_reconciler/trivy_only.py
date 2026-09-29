@@ -145,7 +145,7 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
     ``needs_review`` lists the findings that could not be auto-fixed (now
     mirrored by the review-only PRs).
     """
-    from formatting_drift_json import check_security_suppression
+    from drift_reconciler.formatting_drift_json import check_security_suppression
 
     _ag.report_stage(run_id, "trivy_only_scan")
 

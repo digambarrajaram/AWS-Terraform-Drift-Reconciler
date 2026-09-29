@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -10,9 +11,13 @@ from urllib.parse import urlparse, parse_qs
 import requests
 
 from dashboard.env import _configure_aws_env, _env_for_scope, _tf_dir_for
+from dashboard.handler_imports import import_attr_or_json_error, import_module_or_json_error
 from dashboard.exceptions_policy import auto_add_exceptions_on_merge
 from dashboard.paths import _REPO_ROOT
 from dashboard.process_runner import _spawn_with_capture
+
+logger = logging.getLogger(__name__)
+
 
 class ApprovalsMixin:
     def _serve_pending_applies(self):
@@ -132,10 +137,15 @@ class ApprovalsMixin:
             self._json_error(502, f"No environment row for scope '{scope}'.")
             return
 
+        preview_apply_plan = import_attr_or_json_error(
+            self, "drift_reconciler.apply_plan_preview", "preview_apply_plan",
+        )
+        if preview_apply_plan is None:
+            return
         try:
-            from drift_reconciler.apply_plan_preview import preview_apply_plan
             payload = preview_apply_plan(scope, pr_number, pr_type, env_dict)
         except Exception as exc:
+            logger.exception("Apply preview failed for pending %s", pending_id)
             self._json_error(502, f"Apply preview failed: {exc}")
             return
 
@@ -181,8 +191,12 @@ class ApprovalsMixin:
             self._json_error(502, f"Supabase unreachable: {exc}")
             return
 
+        resolve_repo_target = import_attr_or_json_error(
+            self, "drift_reconciler.github_client_utils", "resolve_repo_target",
+        )
+        if resolve_repo_target is None:
+            return
         try:
-            from drift_reconciler.github_client_utils import resolve_repo_target
             from github import Github, Auth
             repo_slug, token, _branch = resolve_repo_target(scope)
             if not repo_slug or not token:
@@ -293,7 +307,11 @@ class ApprovalsMixin:
         # decided: a concurrent decision on the same row loses here and
         # 409s with a clear "Already handled" message, so the GitHub
         # merge/close below can only ever run once.
-        from drift_reconciler.pending_applies import claim_decision
+        claim_decision = import_attr_or_json_error(
+            self, "drift_reconciler.pending_applies", "claim_decision",
+        )
+        if claim_decision is None:
+            return
         claim = claim_decision(pending_id, decision, approved_by)
         if not claim.get("ok"):
             extra = {k: v for k, v in claim.items()
@@ -365,8 +383,13 @@ class ApprovalsMixin:
                     "to suppress the finding, or Reject to resurface next scan.",
                 )
                 return
+            merge_pr = import_attr_or_json_error(
+                self, "drift_reconciler.github_integration", "merge_pr",
+            )
+            if merge_pr is None:
+                _rollback("github_integration import failed")
+                return
             try:
-                from drift_reconciler.github_integration import merge_pr
                 merge_result = merge_pr(scope, pr_number, commit_message=f"Merge drift fix PR #{pr_number}")
             except RuntimeError as exc:
                 # Merge refused (conflict, branch protection, bad token, ...)
@@ -433,8 +456,13 @@ class ApprovalsMixin:
         # spawn the revert against a PR GitHub still tracks as open.  The
         # claim is rolled back so the row is retryable.
         elif decision == "rejected":
+            close_pr = import_attr_or_json_error(
+                self, "drift_reconciler.github_integration", "close_pr",
+            )
+            if close_pr is None:
+                _rollback("github_integration import failed")
+                return
             try:
-                from drift_reconciler.github_integration import close_pr
                 close_pr(scope, pr_number)
             except RuntimeError as exc:
                 _rollback(f"close failed: {exc}")
@@ -473,8 +501,13 @@ class ApprovalsMixin:
                     "recreate the PR, then try Except again.",
                 )
                 return
+            close_pr = import_attr_or_json_error(
+                self, "drift_reconciler.github_integration", "close_pr",
+            )
+            if close_pr is None:
+                _rollback("github_integration import failed")
+                return
             try:
-                from drift_reconciler.github_integration import close_pr
                 close_pr(scope, pr_number)
             except RuntimeError as exc:
                 _rollback(f"close failed: {exc}")
@@ -506,8 +539,10 @@ class ApprovalsMixin:
                     print(f"  [except] failed status update failed: {patch_exc}", file=sys.stderr)
                 self._json_error(502, f"Exception could not be recorded: {exc}")
                 return
+            _dh = import_module_or_json_error(self, "drift_reconciler.drift_history")
+            if _dh is None:
+                return
             try:
-                from drift_reconciler import drift_history as _dh
                 _dh.resolve_entry(
                     pr_number, scope,
                     f"Excepted via dashboard — security finding suppressed "

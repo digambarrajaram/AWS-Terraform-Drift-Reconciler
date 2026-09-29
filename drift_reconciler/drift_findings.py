@@ -7,9 +7,9 @@ from typing import Annotated
 from typing_extensions import TypedDict
 from langchain_core.messages import AIMessage
 from drift_reconciler.llm_client import _get_llm
-from scan_runs import report_stage
-from drift_baseline import changes_for_history, deleted_externally_baseline
-from formatting_drift_json import HIGH_IMPACT_DELETION_TYPES
+from drift_reconciler.scan_runs import report_stage
+from drift_reconciler.drift_baseline import changes_for_history, deleted_externally_baseline
+from drift_reconciler.formatting_drift_json import HIGH_IMPACT_DELETION_TYPES
 
 class State(TypedDict):
     messages: Annotated[list, lambda x, y: x + y]

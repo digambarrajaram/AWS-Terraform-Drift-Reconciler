@@ -598,11 +598,23 @@ if __name__ == "__main__":
 
         user_query = f"Here is the processed drift report data:\n\n{drift_report}\n\nProvide a plan to resolve this drift."
 
+        try:
+            _parsed_drift_report = json.loads(drift_report)
+            if not isinstance(_parsed_drift_report, dict):
+                _parsed_drift_report = {"report_type": "unknown", "resources": []}
+        except (json.JSONDecodeError, TypeError):
+            _parsed_drift_report = {"report_type": "unknown", "resources": []}
+        print(
+            f"  [scan] Drift report ready: type={_parsed_drift_report.get('report_type')!r} "
+            f"resources={len(_parsed_drift_report.get('resources') or [])}"
+        )
+
         initial_state = {
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_query}
             ],
+            "drift_report": _parsed_drift_report,
             "trivy_scanned": False,
             "scan_unmanaged": scan_unmanaged,
             "scan_mode": args.scan_mode,

@@ -6,8 +6,12 @@ import sys
 import tempfile
 import unittest
 
-from drift_reconciler.formatting_drift_json import report_drift
+from drift_reconciler.formatting_drift_json import (
+    _lookup_file_path,
+    report_drift,
+)
 from drift_reconciler.agent import _drift_pipeline_failed
+from drift_reconciler.drift_findings import agent_node, build_drift_findings
 
 
 class FormattingDriftScriptTests(unittest.TestCase):
@@ -122,6 +126,93 @@ class FormattingDriftScriptTests(unittest.TestCase):
         self.assertEqual(report["report_type"], "drift")
         self.assertNotEqual(report["resources"][0].get("status"), "deleted_externally")
         self.assertIn("ami", report["resources"][0]["changes"])
+
+    def test_update_with_empty_visible_diff_still_reported(self):
+        plan = {
+            "resource_drift": [],
+            "prior_state": {
+                "values": {
+                    "root_module": {
+                        "resources": [{"address": "aws_instance.foo"}],
+                    },
+                },
+            },
+            "resource_changes": [
+                {
+                    "address": "aws_instance.foo",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {"tags_all": {"a": "1"}},
+                        "after": {"tags_all": {"a": "2"}},
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report = report_drift(plan, tf_dir=tmp, scope=None)
+        # tags_all is read-only and filtered; update must still surface.
+        self.assertEqual(report["report_type"], "drift")
+        self.assertIn("_plan_change", report["resources"][0]["changes"])
+
+
+class FilePathLookupTests(unittest.TestCase):
+    def test_module_and_index_addresses_resolve(self):
+        index = {"aws_instance.foo": "/tmp/main.tf"}
+        self.assertEqual(
+            _lookup_file_path(index, "module.vpc.aws_instance.foo[0]"),
+            "/tmp/main.tf",
+        )
+
+
+class AgentNodeStateReportTests(unittest.TestCase):
+    def test_agent_node_uses_state_drift_report_not_messages(self):
+        report = {
+            "report_type": "drift",
+            "resources": [{
+                "address": "aws_instance.foo",
+                "changes": {"instance_type": {"before": "t3.micro", "after": "t3.small"}},
+                "security_impact": "low",
+            }],
+        }
+
+        class _BoomLLM:
+            def invoke(self, _messages):
+                raise RuntimeError("llm down")
+
+        import drift_reconciler.drift_findings as df
+        orig = df._get_llm
+        df._get_llm = lambda: _BoomLLM()
+        try:
+            out = agent_node({
+                "messages": [{"role": "user", "content": "no json here"}],
+                "drift_report": report,
+                "drift_findings": [],
+                "run_id": None,
+            })
+        finally:
+            df._get_llm = orig
+
+        self.assertTrue(out["drift_detected"])
+        self.assertEqual(len(out["drift_findings"]), 1)
+        self.assertEqual(out["drift_findings"][0]["resource_id"], "aws_instance.foo")
+
+    def test_build_findings_from_opaque_plan_change(self):
+        report = {
+            "report_type": "drift",
+            "resources": [{
+                "address": "aws_instance.foo",
+                "changes": {
+                    "_plan_change": {
+                        "before": ["update"],
+                        "after": "sensitive_or_unknown_attribute_change",
+                    }
+                },
+                "security_impact": "low",
+            }],
+        }
+        findings = build_drift_findings(report)
+        self.assertEqual(len(findings), 1)
 
 
 class DriftPipelineFailedTests(unittest.TestCase):

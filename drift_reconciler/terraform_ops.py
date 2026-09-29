@@ -196,9 +196,17 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
         return init_error
 
     print(f"Step 1: Running 'terraform plan' inside: {tf_dir}...")
+    # Force refresh so live AWS drift is visible even if TF_CLI_ARGS sets
+    # -refresh=false. -input=false avoids interactive prompts in containers.
     try:
-        subprocess.run(
-            ["terraform", "plan", "-no-color", "-out=tfplan"],
+        plan_proc = subprocess.run(
+            [
+                "terraform", "plan",
+                "-no-color",
+                "-input=false",
+                "-refresh=true",
+                "-out=tfplan",
+            ],
             cwd=tf_dir,
             env=sub_env,
             check=True,
@@ -207,6 +215,9 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
             encoding="utf-8",
             errors="replace",
         )
+        plan_stdout = (plan_proc.stdout or "")[-1500:]
+        if plan_stdout.strip():
+            print(f"  terraform plan (tail):\n{plan_stdout}")
     except subprocess.CalledProcessError as e:
         return f"Terraform Plan Failed:\n{e.stderr}"
 
@@ -215,6 +226,7 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
         show_result = subprocess.run(
             ["terraform", "show", "-no-color", "-json", "tfplan"],
             cwd=tf_dir,
+            env=sub_env,
             check=True,
             capture_output=True,
             text=True,
@@ -239,7 +251,34 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
         from drift_reconciler.formatting_drift_json import load_plan, report_drift
 
         plan_data = load_plan(target_plan_json)
+        rd = plan_data.get("resource_drift") or []
+        rc = plan_data.get("resource_changes") or []
+        non_noop = [
+            c for c in rc
+            if (c.get("change") or {}).get("actions") not in (None, [], ["no-op"], ["read"])
+        ]
+        print(
+            f"  Plan JSON stats: resource_drift={len(rd)} "
+            f"resource_changes={len(rc)} non_noop_changes={len(non_noop)} "
+            f"prior_state_addrs="
+            f"{len(((plan_data.get('prior_state') or {}).get('values') or {}).get('root_module') or {})}"
+        )
+        for c in non_noop[:20]:
+            print(
+                f"    change: {c.get('address')} "
+                f"actions={(c.get('change') or {}).get('actions')}"
+            )
         report = report_drift(plan_data, tf_dir=tf_dir, scope=_account_label)
+        actionable = [
+            r for r in (report.get("resources") or [])
+            if r.get("changes") or r.get("status") == "deleted_externally"
+        ]
+        print(
+            f"  Formatted drift report: type={report.get('report_type')!r} "
+            f"resources={len(report.get('resources') or [])} "
+            f"actionable={len(actionable)} "
+            f"suppressed={len(report.get('suppressed_resources') or [])}"
+        )
         return json.dumps(report)
     except Exception as e:
         return f"Formatting Drift JSON Failed:\n{e}"

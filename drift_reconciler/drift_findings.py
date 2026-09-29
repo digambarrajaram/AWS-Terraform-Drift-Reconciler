@@ -11,10 +11,11 @@ from drift_reconciler.scan_runs import report_stage
 from drift_reconciler.drift_baseline import changes_for_history, deleted_externally_baseline
 from drift_reconciler.formatting_drift_json import HIGH_IMPACT_DELETION_TYPES
 
-class State(TypedDict):
+class State(TypedDict, total=False):
     messages: Annotated[list, lambda x, y: x + y]
     drift_detected: bool
     drift_findings: list[dict]   # one entry per drifted resource
+    drift_report: dict           # structured report from terraform plan (authoritative)
     trivy_scanned: bool
     scan_unmanaged: bool
     scan_mode: str
@@ -111,23 +112,37 @@ def build_drift_findings(drift_report_json: dict) -> list[dict]:
 
 
 
+def _extract_drift_report_from_messages(messages) -> dict:
+    """Fallback parser when structured state.drift_report is absent."""
+    raw_report_str = ""
+    for msg in messages or []:
+        content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+        if not isinstance(content, str):
+            continue
+        if "processed drift report" in content:
+            raw_report_str = content
+            break
+    if not raw_report_str:
+        return {"report_type": "unknown", "resources": []}
+    try:
+        json_start = raw_report_str.index("{")
+        json_end = raw_report_str.rindex("}") + 1
+        return json.loads(raw_report_str[json_start:json_end])
+    except (ValueError, json.JSONDecodeError):
+        return {"report_type": "unknown", "resources": []}
+
+
 def agent_node(state: State):
     import agent as _ag
     report_stage = _ag.report_stage
     report_stage(state.get("run_id"), "reconcile_agent")
-    raw_report_str = ""
-    for msg in state["messages"]:
-        content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-        if "processed drift report" in content:
-            raw_report_str = content
-            break
 
-    try:
-        json_start = raw_report_str.index("{")
-        json_end = raw_report_str.rindex("}") + 1
-        drift_report_json = json.loads(raw_report_str[json_start:json_end])
-    except (ValueError, json.JSONDecodeError):
-        drift_report_json = {"report_type": "unknown", "resources": []}
+    # Prefer the structured report placed on state by agent.py — message
+    # brace-slicing used to mis-parse when values contained `{`/`}` or when
+    # content was non-string, silently becoming report_type=unknown.
+    drift_report_json = state.get("drift_report")
+    if not isinstance(drift_report_json, dict) or "report_type" not in drift_report_json:
+        drift_report_json = _extract_drift_report_from_messages(state.get("messages"))
 
     drift_detected = drift_report_json.get("report_type") == "drift"
 
@@ -135,11 +150,21 @@ def agent_node(state: State):
         # Preserve any unmanaged findings that were already attached
         # by the optional unmanaged-scan node.
         existing = state.get("drift_findings") or []
+        print(
+            f"  [reconcile_agent] No actionable drift "
+            f"(report_type={drift_report_json.get('report_type')!r}, "
+            f"resources={len(drift_report_json.get('resources') or [])})"
+        )
         return {
             "messages": [AIMessage(content="STATUS: NO_DRIFT\nNo configuration drift detected.")],
             "drift_detected": state.get("drift_detected", False),
             "drift_findings": existing,
         }
+
+    # Build findings BEFORE the LLM call so a Bedrock/LLM failure cannot
+    # erase already-detected drift.
+    drift_only = build_drift_findings(drift_report_json)
+    print(f"  [reconcile_agent] Built {len(drift_only)} drift finding(s)")
 
     # Strip externally_managed resources from the LLM prompt — the LLM
     # should only see actionable drift it can propose fixes for.
@@ -149,18 +174,35 @@ def agent_node(state: State):
     ]
     clean_report = dict(drift_report_json, resources=actionable_resources)
     llm_messages = []
-    for msg in state["messages"]:
+    for msg in state.get("messages") or []:
         content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-        if "processed drift report" in content:
-            llm_messages.append({"role": msg.get("role", "user"),
-                                 "content": content.replace(
-                                     raw_report_str[json_start:json_end],
-                                     json.dumps(clean_report))})
+        if isinstance(content, str) and "processed drift report" in content:
+            # Replace whatever JSON blob is in the user message with the
+            # cleaned report (avoid brittle index/rindex slicing).
+            try:
+                j0 = content.index("{")
+                j1 = content.rindex("}") + 1
+                new_content = content[:j0] + json.dumps(clean_report) + content[j1:]
+            except ValueError:
+                new_content = (
+                    "Here is the processed drift report data:\n\n"
+                    f"{json.dumps(clean_report)}\n\nProvide a plan to resolve this drift."
+                )
+            llm_messages.append({"role": msg.get("role", "user"), "content": new_content})
         else:
             llm_messages.append(msg)
 
-    response = _get_llm().invoke(llm_messages)
-    drift_only = build_drift_findings(drift_report_json)
+    try:
+        response = _get_llm().invoke(llm_messages)
+    except Exception as exc:
+        print(f"  [reconcile_agent] LLM analysis failed — findings still recorded: {exc}")
+        response = AIMessage(
+            content=(
+                f"STATUS: DRIFT\nLLM analysis unavailable: {exc}\n"
+                f"Detected {len(drift_only)} drifted resource(s)."
+            )
+        )
+
     # Merge any unmanaged findings that were already attached by the
     # optional unmanaged-scan node so they survive the state update.
     existing = state.get("drift_findings") or []

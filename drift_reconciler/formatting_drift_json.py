@@ -53,8 +53,19 @@ HIGH_IMPACT_DELETION_TYPES = (
 )
 
 
+def _resource_type_from_address(address: str) -> str:
+    """Return the Terraform resource type from an address (module-safe)."""
+    if not address:
+        return ""
+    bare = re.sub(r"\[.*?\]$", "", address)
+    parts = bare.split(".")
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[0]
+
+
 def classify_security_impact(address: str, changes_dict: dict) -> str | None:
-    resource_type = address.split(".")[0]
+    resource_type = _resource_type_from_address(address)
     if resource_type in SECURITY_RESOURCE_TYPES:
         return "high"
     if any(k in changes_dict for k in ("ingress", "egress")):
@@ -84,11 +95,20 @@ def load_plan(path):
     return json.loads(text)
 
 def flatten_diff(before, after, prefix=""):
+    # Terraform resource before/after are objects; tolerate null / odd shapes
+    # so a single bad entry cannot abort the whole report.
+    if before is None and after is None:
+        return []
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        if before != after and normalize_tags(before) != normalize_tags(after):
+            label = prefix.rstrip(".") if prefix else "value"
+            return [(label or "value", before, after)]
+        return []
     changes = []
-    keys = set((before or {}).keys()) | set((after or {}).keys())
+    keys = set(before.keys()) | set(after.keys())
     for key in sorted(keys):
-        b_val = (before or {}).get(key)
-        a_val = (after or {}).get(key)
+        b_val = before.get(key)
+        a_val = after.get(key)
         if not plan_field_values_equal(f"{prefix}{key}", b_val, a_val):
             if normalize_tags(b_val) == normalize_tags(a_val):
                 continue
@@ -285,6 +305,8 @@ def _entries_from_resource_changes(plan, prior_addresses: set) -> tuple[list, se
     entries = []
     deleted_addresses = set()
     for rc in plan.get("resource_changes", []) or []:
+        if rc.get("mode") == "data":
+            continue
         actions = rc.get("change", {}).get("actions") or []
         address = rc.get("address")
         if not address or not actions or actions == ["no-op"] or actions == ["read"]:
@@ -301,6 +323,25 @@ def _entries_from_resource_changes(plan, prior_addresses: set) -> tuple[list, se
             deleted_addresses.add(address)
         entries.append(rc)
     return entries, deleted_addresses
+
+
+def _lookup_file_path(file_index: dict, address: str | None) -> str | None:
+    """Resolve a Terraform address to a .tf file path.
+
+    Handles module prefixes (``module.vpc.aws_instance.foo``) and count /
+    for_each indexes (``aws_instance.foo[0]``).
+    """
+    if not address or not file_index:
+        return None
+    bare = re.sub(r"\[.*?\]$", "", address)
+    if bare in file_index:
+        return file_index[bare]
+    parts = bare.split(".")
+    if len(parts) >= 2:
+        candidate = f"{parts[-2]}.{parts[-1]}"
+        if candidate in file_index:
+            return file_index[candidate]
+    return None
 
 
 def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
@@ -332,12 +373,15 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
 
     resources = []
     for entry in drift_entries:
+        if entry.get("mode") == "data":
+            continue
         address = entry.get("address")
         change = entry.get("change", {})
         actions = change.get("actions", [])
         after = change.get("after") or {}
         action_set = set(actions)
         is_replace = action_set == {"create", "delete"}
+        fpath = _lookup_file_path(file_index, address)
 
         # External deletion: create-from-state, or refresh showing all-null after.
         # Do NOT treat replace (delete+create) as deleted_externally.
@@ -346,7 +390,9 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
             and (
                 address in deleted_addresses
                 or (
-                    change.get("before")
+                    isinstance(change.get("before"), dict)
+                    and isinstance(after, dict)
+                    and change.get("before")
                     and after
                     and all(v is None for v in after.values())
                 )
@@ -354,6 +400,7 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
         )
 
         if is_deleted:
+            type_token = _resource_type_from_address(address or "")
             resources.append({
                 "address": address,
                 "status": "deleted_externally",
@@ -361,34 +408,42 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
                 "sensitive": False,
                 "security_impact": (
                     "high"
-                    if address.split(".")[0] in SECURITY_RESOURCE_TYPES
-                    or address.split(".")[0] in HIGH_IMPACT_DELETION_TYPES
+                    if type_token in SECURITY_RESOURCE_TYPES
+                    or type_token in HIGH_IMPACT_DELETION_TYPES
                     else "medium"
                 ),
-                "file_path": file_index.get(address),
+                "file_path": fpath,
             })
             continue
 
-        before = change.get("before", {})
-        diffs = flatten_diff(before, after)
-        if not diffs:
-            continue
-
+        before = change.get("before") if isinstance(change.get("before"), dict) else {}
+        after_obj = after if isinstance(after, dict) else {}
+        diffs = flatten_diff(before, after_obj)
         changes_dict = {field: {"before": b, "after": a} for field, b, a in diffs}
         changes_dict = {
             field: vals for field, vals in changes_dict.items()
             if field not in _READ_ONLY_DRIFT_ATTRS
         }
+        # Update/replace with no visible attribute delta (sensitive-only,
+        # after_unknown, provider quirks) is still real drift — don't drop it.
+        if not changes_dict and (is_replace or "update" in action_set):
+            changes_dict = {
+                "_plan_change": {
+                    "before": sorted(action_set),
+                    "after": "sensitive_or_unknown_attribute_change",
+                }
+            }
         if not changes_dict:
             continue
-        fpath = file_index.get(address)
 
         # If every drifted field is covered by lifecycle.ignore_changes,
         # this resource's rules are managed outside Terraform — don't
         # flag it as actionable drift.  Mark it externally_managed so
         # the reconciler routes it to needs-review instead of the LLM.
         if fpath:
-            ignored = _get_ignored_fields(fpath, address)
+            # ignore_changes is keyed by local resource name in the .tf file
+            local_addr = ".".join(address.split(".")[-2:]).split("[", 1)[0] if address else address
+            ignored = _get_ignored_fields(fpath, local_addr)
             if ignored and set(changes_dict.keys()).issubset(ignored):
                 resources.append({
                     "address": address,
@@ -402,7 +457,7 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
                 continue
 
         # ── Auto-suppress check ──
-        resource_type = address.split(".")[0]
+        resource_type = _resource_type_from_address(address or "")
         auto_fields = set()
         auto_reasons: list[str] = []
         for field in list(changes_dict.keys()):

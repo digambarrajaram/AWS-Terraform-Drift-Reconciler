@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from drift_baseline import plan_field_baseline_token, plan_field_values_equal
+
 # ── Supabase write helper (service role — same pattern as drift_history) ──
 
 def _patch_drift_events(pr_number: str, fields: dict) -> bool:
@@ -74,9 +76,10 @@ def _extract_field_values(
         for field in fields:
             b_val = before.get(field)
             a_val = after.get(field)
-            if b_val is not None:
-                values[field] = str(b_val)
-            if b_val != a_val:
+            token = plan_field_baseline_token(field, b_val)
+            if token or b_val is not None:
+                values[field] = token if token else str(b_val)
+            if not plan_field_values_equal(field, b_val, a_val):
                 all_same = False
         if all_same and values:
             return ("no_diff", values)
@@ -170,7 +173,7 @@ def main() -> int:
 
         stale_fields = []
         for field in fields:
-            expected = str(changes[field].get("before", ""))
+            expected = plan_field_baseline_token(field, changes[field].get("before"))
             actual = live_values.get(field, "<missing>")
             if actual != expected:
                 stale_fields.append((field, expected, actual))

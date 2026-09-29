@@ -312,6 +312,7 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # appears in the plan and must not block this apply.
         from drift_reconciler.drift_history import get_open_resources, load_baselines
         from drift_baseline import is_deleted_externally_baseline, verify_deleted_externally_plan
+        from drift_baseline import plan_field_baseline_token
         from rollback_check import _extract_field_values, live_drift_rows
         if not is_revert:
             open_rows = get_open_resources(scope, except_pr_number=pr_number)
@@ -389,9 +390,13 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                         # the plan's from-state is stale, fail closed.
                         # Accept direction: the plan's from-state is the
                         # baseline "before" — unchanged.
-                        expected = {str(changes[field].get("before", ""))}
+                        expected = {
+                            plan_field_baseline_token(field, changes[field].get("before")),
+                        }
                         if is_revert:
-                            expected.add(str(changes[field].get("after", "")))
+                            expected.add(
+                                plan_field_baseline_token(field, changes[field].get("after")),
+                            )
                         actual = live_values.get(field, "<missing>")
                         if actual not in expected:
                             gate_failure = (

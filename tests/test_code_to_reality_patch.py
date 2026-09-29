@@ -39,7 +39,10 @@ class CodeToRealityPatchTests(unittest.TestCase):
 
     def test_filter_drops_tags_all(self):
         filtered = gi.filter_patchable_changes(
-            {"tags": {"before": {}, "after": {}}, "tags_all": {"before": {}, "after": {}}},
+            {
+                "tags": {"before": {"Name": "a"}, "after": {"Name": "b"}},
+                "tags_all": {"before": {}, "after": {}},
+            },
         )
         self.assertEqual(list(filtered), ["tags"])
 

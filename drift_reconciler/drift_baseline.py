@@ -6,6 +6,28 @@ import json
 # Synthetic plan field — never written to HCL (filtered from patches).
 DELETED_EXTERNALLY_FIELD = "__deleted_externally__"
 
+# Plan JSON represents “no tags” as null or {}; treat as equivalent for drift/gates.
+_EMPTY_MAP_FIELDS = frozenset({"tags", "tags_all"})
+
+
+def normalize_plan_field_for_compare(field: str, val):
+    if field in _EMPTY_MAP_FIELDS and (val is None or val == {}):
+        return {}
+    return val
+
+
+def plan_field_values_equal(field: str, a, b) -> bool:
+    return normalize_plan_field_for_compare(field, a) == normalize_plan_field_for_compare(field, b)
+
+
+def plan_field_baseline_token(field: str, val) -> str:
+    """Stable string for comparing stored baselines to live plan ``before`` values."""
+    norm = normalize_plan_field_for_compare(field, val)
+    if norm is None:
+        return ""
+    return str(norm)
+
+
 _DELETED_SUMMARY_MARKERS = (
     "deleted outside of terraform",
     "missing from aws",

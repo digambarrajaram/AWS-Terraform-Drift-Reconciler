@@ -21,6 +21,8 @@ from datetime import date
 
 import requests
 
+from drift_baseline import plan_field_values_equal
+
 
 # Provider-computed attributes that appear in plan JSON but must not be
 # written into HCL (terraform validate rejects them).
@@ -80,7 +82,9 @@ def flatten_diff(before, after, prefix=""):
     for key in sorted(keys):
         b_val = (before or {}).get(key)
         a_val = (after or {}).get(key)
-        if normalize_tags(b_val) != normalize_tags(a_val):
+        if not plan_field_values_equal(f"{prefix}{key}", b_val, a_val):
+            if normalize_tags(b_val) == normalize_tags(a_val):
+                continue
             changes.append((f"{prefix}{key}", b_val, a_val))
     return changes
 

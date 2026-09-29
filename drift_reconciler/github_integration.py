@@ -51,7 +51,11 @@ UNPATCHABLE_BLOCK_FIELDS = {
 }
 
 from formatting_drift_json import _READ_ONLY_DRIFT_ATTRS as COMPUTED_DRIFT_FIELDS  # noqa: E402
-from drift_baseline import DELETED_EXTERNALLY_FIELD, changes_for_history  # noqa: E402
+from drift_baseline import (  # noqa: E402
+    DELETED_EXTERNALLY_FIELD,
+    changes_for_history,
+    plan_field_values_equal,
+)
 
 _NON_PATCHABLE_BASELINE_FIELDS = frozenset({DELETED_EXTERNALLY_FIELD})
 
@@ -61,7 +65,12 @@ def filter_patchable_changes(changes: dict | None) -> dict:
     if not changes:
         return {}
     skip = COMPUTED_DRIFT_FIELDS | _NON_PATCHABLE_BASELINE_FIELDS
-    return {field: vals for field, vals in changes.items() if field not in skip}
+    return {
+        field: vals
+        for field, vals in changes.items()
+        if field not in skip
+        and not plan_field_values_equal(field, vals.get("before"), vals.get("after"))
+    }
 
 
 def _summarize_changes_for_log(changes: dict, limit: int = 120) -> dict:

@@ -232,6 +232,125 @@ resource "aws_iam_role_policy" "apply_dynamodb" {
   policy = data.aws_iam_policy_document.apply_dynamodb.json
 }
 
+# ---- Lambda + CloudWatch Logs write permissions ----
+# Log groups for Lambda live under /aws/lambda/<function-name>. IAM read
+# actions (DescribeLogGroups, etc.) require Resource = "*" — same pattern as
+# ec2:Describe* above.
+data "aws_iam_policy_document" "apply_lambda" {
+  statement {
+    sid    = "LambdaFunctionWrite"
+    effect = "Allow"
+    actions = [
+      "lambda:CreateFunction",
+      "lambda:DeleteFunction",
+      "lambda:UpdateFunctionCode",
+      "lambda:UpdateFunctionConfiguration",
+      "lambda:PublishVersion",
+      "lambda:AddPermission",
+      "lambda:RemovePermission",
+      "lambda:TagResource",
+      "lambda:UntagResource",
+    ]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:*:function:${var.managed_resource_prefix}*",
+    ]
+  }
+
+  statement {
+    sid    = "LambdaLogGroupWrite"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:DeleteLogGroup",
+      "logs:PutRetentionPolicy",
+      "logs:DeleteRetentionPolicy",
+      "logs:TagResource",
+      "logs:UntagResource",
+    ]
+    resources = [
+      "arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${var.managed_resource_prefix}*",
+      "arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${var.managed_resource_prefix}*:*",
+    ]
+  }
+
+  statement {
+    sid    = "LambdaExecutionRoleWrite"
+    effect = "Allow"
+    actions = [
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+    resources = [
+      "arn:aws:iam::*:role/${var.managed_resource_prefix}*",
+    ]
+  }
+
+  statement {
+    sid    = "LambdaExecutionRolePass"
+    effect = "Allow"
+    actions = [
+      "iam:PassRole",
+    ]
+    resources = [
+      "arn:aws:iam::*:role/${var.managed_resource_prefix}*",
+    ]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["lambda.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid    = "LambdaRead"
+    effect = "Allow"
+    actions = [
+      "lambda:Get*",
+      "lambda:List*",
+    ]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:*:function:${var.managed_resource_prefix}*",
+    ]
+  }
+
+  statement {
+    sid    = "LambdaLogsRead"
+    effect = "Allow"
+    actions = [
+      "logs:Describe*",
+      "logs:List*",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "LambdaExecutionRoleRead"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+    ]
+    resources = [
+      "arn:aws:iam::*:role/${var.managed_resource_prefix}*",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "apply_lambda" {
+  name   = "lambda-write"
+  role   = aws_iam_role.apply.id
+  policy = data.aws_iam_policy_document.apply_lambda.json
+}
+
 # ---- Terraform state access (write -- apply modifies remote state) ----
 data "aws_iam_policy_document" "apply_state_access" {
   statement {

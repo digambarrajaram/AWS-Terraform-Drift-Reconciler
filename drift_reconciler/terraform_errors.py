@@ -40,7 +40,8 @@ def humanize_terraform_error(raw_error: str) -> dict:
             "summary": "Terraform apply was denied by IAM — the apply role is missing a required action.",
             "suggestion": (
                 "Update the environment's apply role (aws_role_arn, e.g. drift-reconciler-apply-<label>) "
-                "to match terraform_code/*/apply-role.tf — including ec2:TerminateInstances and other "
+                "to match terraform_code/*/apply-role.tf — including ec2:TerminateInstances, "
+                "logs:DescribeLogGroups / Lambda actions for lambda modules, and other "
                 "write actions your modules use. After fixing IAM, run terraform apply manually or "
                 "re-trigger the revert from Approvals."
             ),

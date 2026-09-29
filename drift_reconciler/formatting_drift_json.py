@@ -275,28 +275,57 @@ def apply_drift_exceptions(
     return suppressed, remaining
 
 
+def _entries_from_resource_changes(plan, prior_addresses: set) -> tuple[list, set]:
+    """Build drift-candidate entries from resource_changes + deleted-externally set.
+
+    Includes updates, replaces, and creates that re-create a still-tracked
+    address (resource deleted outside Terraform). Skips pure pending creates
+    (address never in state) and no-ops.
+    """
+    entries = []
+    deleted_addresses = set()
+    for rc in plan.get("resource_changes", []) or []:
+        actions = rc.get("change", {}).get("actions") or []
+        address = rc.get("address")
+        if not address or not actions or actions == ["no-op"] or actions == ["read"]:
+            continue
+        action_set = set(actions)
+        # Pending create (never existed in state) — not drift.
+        if action_set == {"create"} and address not in prior_addresses:
+            continue
+        # Planned destroy because the resource was removed from code — not
+        # external drift. External deletion shows up as create-from-state.
+        if action_set == {"delete"}:
+            continue
+        if action_set == {"create"} and address in prior_addresses:
+            deleted_addresses.add(address)
+        entries.append(rc)
+    return entries, deleted_addresses
+
+
 def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
     prior_addresses = get_prior_state_addresses(plan)
-    drift_entries = plan.get("resource_drift")
-    # Some Terraform builds emit resource_drift: [] while drift still appears in
-    # resource_changes — treat empty/missing the same as absent.
-    used_fallback = not drift_entries
-    deleted_addresses = set()
+    native_drift = list(plan.get("resource_drift") or [])
+    change_entries, deleted_addresses = _entries_from_resource_changes(
+        plan, prior_addresses
+    )
+
+    # Union both sources. When the same address appears in both, prefer
+    # resource_changes — Terraform often puts only computed noise (tags_all)
+    # in resource_drift while the actionable update is under resource_changes.
+    # Keep native-only addresses (refresh drift with no matching plan change).
+    by_address: dict = {}
+    for entry in native_drift:
+        addr = entry.get("address")
+        if addr:
+            by_address[addr] = entry
+    for entry in change_entries:
+        addr = entry.get("address")
+        if addr:
+            by_address[addr] = entry
+    drift_entries = list(by_address.values())
 
     file_index = build_resource_file_index(tf_dir) if tf_dir else {}
-
-    if used_fallback:
-        drift_entries = [
-            rc for rc in plan.get("resource_changes", [])
-            if rc.get("change", {}).get("actions") == ["update"]
-        ]
-        deleted_externally = [
-            rc for rc in plan.get("resource_changes", [])
-            if rc.get("change", {}).get("actions") == ["create"]
-            and rc.get("address") in prior_addresses
-        ]
-        deleted_addresses = {rc.get("address") for rc in deleted_externally}
-        drift_entries.extend(deleted_externally)
 
     if not drift_entries:
         return {"report_type": "no_drift", "resources": []}
@@ -307,13 +336,21 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
         change = entry.get("change", {})
         actions = change.get("actions", [])
         after = change.get("after") or {}
+        action_set = set(actions)
+        is_replace = action_set == {"create", "delete"}
 
-        # Detect deletion regardless of source: explicit "delete" action,
-        # OR fallback-classified, OR native resource_drift showing all-null after.
+        # External deletion: create-from-state, or refresh showing all-null after.
+        # Do NOT treat replace (delete+create) as deleted_externally.
         is_deleted = (
-            "delete" in actions
-            or address in deleted_addresses
-            or (change.get("before") and after and all(v is None for v in after.values()))
+            not is_replace
+            and (
+                address in deleted_addresses
+                or (
+                    change.get("before")
+                    and after
+                    and all(v is None for v in after.values())
+                )
+            )
         )
 
         if is_deleted:

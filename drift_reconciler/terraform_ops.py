@@ -5,7 +5,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 
 from drift_reconciler.environment_credentials import _resolve_env_credentials
 
@@ -232,32 +231,18 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     except Exception as e:
         return f"Writing plan.json file failed:\n{str(e)}"
 
-    print("Step 3: Processing drift format script...")
+    print("Step 3: Formatting drift report (in-process)...")
     target_plan_json = os.path.join(tf_dir, "plan.json")
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(drift_script_path)))
-    format_env = dict(sub_env)
-    format_env["PYTHONPATH"] = repo_root + os.pathsep + format_env.get("PYTHONPATH", "")
-
-    format_script_cmd = [
-        sys.executable,
-        drift_script_path,
-        target_plan_json,
-        "--account", _account_label,
-    ]
+    # Call report_drift in-process — subprocess + PYTHONPATH was a recurring
+    # source of silent ModuleNotFoundError → "no_drift" in unmanaged modes.
     try:
-        result = subprocess.run(
-            format_script_cmd,
-            env=format_env,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        return f"Formatting Drift JSON Script Failed:\n{e.stderr}"
+        from drift_reconciler.formatting_drift_json import load_plan, report_drift
+
+        plan_data = load_plan(target_plan_json)
+        report = report_drift(plan_data, tf_dir=tf_dir, scope=_account_label)
+        return json.dumps(report)
+    except Exception as e:
+        return f"Formatting Drift JSON Failed:\n{e}"
 
 # ==========================================
 # 2. LANGGRAPH STRUCTURE

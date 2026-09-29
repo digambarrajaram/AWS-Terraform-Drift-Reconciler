@@ -103,6 +103,20 @@ from apply_flow import (  # noqa: E402
 )
 from graph_wiring import graph, workflow  # noqa: E402
 
+def _drift_pipeline_failed(drift_report_str: str) -> bool:
+    """True when get_terraform_drift_data returned an error string, not a report.
+
+    Must NOT substring-match ``Failed``/``Error`` inside valid JSON — real drift
+    payloads often contain those words in AWS attribute values and were being
+    wiped to ``no_drift`` in unmanaged scan modes.
+    """
+    try:
+        parsed = json.loads(drift_report_str)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return True
+    return not (isinstance(parsed, dict) and "report_type" in parsed)
+
+
 def _print_drift_exceptions(drift_report_str: str):
     """Display suppressed drift, expired exceptions, and a copy-paste JSON
     snippet for adding new entries to the drift-exceptions registry."""
@@ -519,7 +533,7 @@ if __name__ == "__main__":
         _terraform_failed = False
 
 
-        if "Failed" in drift_report or "Error" in drift_report:
+        if _drift_pipeline_failed(drift_report):
             if scan_unmanaged:
                 print(f"\n⚠  Terraform plan failed — proceeding with unmanaged scan only.")
                 print(_strip_ansi(drift_report))

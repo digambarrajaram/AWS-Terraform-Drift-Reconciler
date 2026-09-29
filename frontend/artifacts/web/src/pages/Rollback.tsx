@@ -84,6 +84,12 @@ function jsonEq(a: unknown, b: unknown) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function isErrorLive(v: unknown): boolean {
+  return typeof v === 'string' && (
+    v.startsWith('ERROR:') || v.startsWith('SKIPPED:')
+  );
+}
+
 function renderVal(v: unknown): string {
   if (v === null || v === undefined) return '—';
   if (typeof v === 'object') return JSON.stringify(v);
@@ -268,10 +274,20 @@ function DiffTable({ diff }: { diff: PreviewDiffRow[] }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {diff.map((row, i) => {
-            const stale = !jsonEq(row.current_live, row.fixed);
+          {diff.map((row) => {
+            const errored = isErrorLive(row.current_live);
+            const stale = !errored && !jsonEq(row.current_live, row.fixed);
             return (
-              <tr key={`${row.resource_id}-${row.field}`} className={stale ? 'bg-amber-50/40 dark:bg-amber-900/10' : ''}>
+              <tr
+                key={`${row.resource_id}-${row.field}`}
+                className={
+                  errored
+                    ? 'bg-destructive/5'
+                    : stale
+                      ? 'bg-amber-50/40 dark:bg-amber-900/10'
+                      : ''
+                }
+              >
                 <td className="px-4 py-2.5 font-mono max-w-[160px]">
                   <span className="block truncate" title={row.resource_id}>{row.resource_id}</span>
                 </td>
@@ -284,12 +300,20 @@ function DiffTable({ diff }: { diff: PreviewDiffRow[] }) {
                 </td>
                 <td className={[
                   'px-4 py-2.5 font-mono max-w-[140px]',
-                  stale ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground',
+                  errored
+                    ? 'text-destructive'
+                    : stale
+                      ? 'text-amber-700 dark:text-amber-400'
+                      : 'text-muted-foreground',
                 ].join(' ')}>
                   <span className="block truncate" title={renderVal(row.current_live)}>{renderVal(row.current_live)}</span>
                 </td>
                 <td className="px-4 py-2.5 whitespace-nowrap">
-                  {stale ? (
+                  {errored ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-medium text-destructive">
+                      <XCircle size={9} /> error
+                    </span>
+                  ) : stale ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
                       <AlertTriangle size={9} /> stale
                     </span>
@@ -588,7 +612,11 @@ export default function Rollback() {
                          (phase === 'preview_done' && !!ctx?.previewRunId) ||
                          (phase === 'execute_done' && !!ctx?.executeRunId);
 
-  const staleCount = ctx?.diff?.filter((r) => !jsonEq(r.current_live, r.fixed)).length ?? 0;
+  const errorCount = ctx?.diff?.filter((r) => isErrorLive(r.current_live)).length ?? 0;
+  const staleCount = ctx?.diff?.filter(
+    (r) => !isErrorLive(r.current_live) && !jsonEq(r.current_live, r.fixed),
+  ).length ?? 0;
+  const canExecute = errorCount === 0 && (ctx?.diff?.length ?? 0) > 0;
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
@@ -675,18 +703,25 @@ export default function Rollback() {
                 <button
                   type="button"
                   onClick={() => setConfirmOpen(true)}
-                  disabled={submitting}
+                  disabled={submitting || !canExecute}
                   className="flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   <RotateCcw size={12} /> Execute Rollback
                 </button>
               </div>
               <DiffTable diff={ctx.diff} />
+              {errorCount > 0 && (
+                <p className="text-xs text-destructive">
+                  <XCircle size={11} className="inline mr-1" />
+                  Preview could not read live AWS state for {errorCount} row{errorCount !== 1 ? 's' : ''}.
+                  Fix the Terraform/backend error in the log, then retry Preview — do not Execute.
+                </p>
+              )}
               {staleCount > 0 && (
                 <p className="text-xs text-amber-700 dark:text-amber-400">
                   <AlertTriangle size={11} className="inline mr-1" />
                   {staleCount} field{staleCount !== 1 ? 's have' : ' has'} drifted further since this PR was raised.
-                  Executing will apply the <em>fixed</em> value regardless.
+                  Executing will apply the <em>original</em> (pre-fix) value regardless.
                 </p>
               )}
             </div>
@@ -801,7 +836,7 @@ export default function Rollback() {
               {staleCount > 0 && (
                 <span className="mt-2 block text-amber-700 dark:text-amber-400">
                   ⚠ {staleCount} field{staleCount !== 1 ? 's have' : ' has'} drifted further —
-                  the rollback will apply the <em>fixed</em> snapshot regardless of current live state.
+                  the rollback will apply the <em>original</em> (pre-fix) values regardless of current live state.
                 </span>
               )}
             </AlertDialogDescription>

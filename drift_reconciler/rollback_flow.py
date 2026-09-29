@@ -107,14 +107,13 @@ def _fetch_live_state(
             if plan_result.returncode == 0:
                 break
             stderr = _strip_ansi(plan_result.stderr)
-            if (
-                backend_config
-                and not forced_reinit
-                and _terraform_plan_needs_reinit(stderr)
-            ):
+            # Backend HCL can change even when env row bucket/region match the
+            # init cache — force re-init once, then retry plan.
+            if not forced_reinit and _terraform_plan_needs_reinit(stderr):
                 forced_reinit = True
+                print("  [rollback] plan needs backend re-init — running terraform init -reconfigure")
                 init_error = _ensure_terraform_init(
-                    tf_dir, env=env, backend_config=backend_config, force=True,
+                    tf_dir, env=env, backend_config=backend_config or {}, force=True,
                 )
                 if init_error:
                     raise RuntimeError(init_error.strip())
@@ -176,47 +175,30 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
 
             if is_deleted_externally_baseline(original_changes):
                 print(f"  [rollback-preview] CHECK {resource_id}: deleted_externally baseline")
-                try:
-                    plan_result = subprocess.run(
-                        ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
-                        cwd=tf_dir,
-                        env=sub_env,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=120,
-                    )
-                    if plan_result.returncode != 0:
-                        raise RuntimeError(plan_result.stderr[:300])
-                    show_result = subprocess.run(
-                        ["terraform", "show", "-no-color", "-json", "tfplan"],
-                        cwd=tf_dir,
-                        env=sub_env,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                    plan_json = json.loads(show_result.stdout)
-                    err = verify_deleted_externally_plan(
-                        plan_json, resource_id, is_revert=True,
-                    )
-                    diff.append({
-                        "resource_id": resource_id,
-                        "field": DELETED_EXTERNALLY_FIELD,
-                        "original": "present_in_aws",
-                        "fixed": "missing_in_aws",
-                        "current_live": err or "create planned — OK",
-                    })
-                except Exception as exc:
-                    diff.append({
-                        "resource_id": resource_id,
-                        "field": "*",
-                        "original": "(deleted_externally)",
-                        "fixed": "(deleted_externally)",
-                        "current_live": f"ERROR: {exc}",
-                    })
+                # Drive plan through _fetch_live_state so backend re-init retry applies.
+                _fetch_live_state(
+                    tf_dir, resource_id, [], env=sub_env, backend_config=backend_config,
+                )
+                show_result = subprocess.run(
+                    ["terraform", "show", "-no-color", "-json", "tfplan"],
+                    cwd=tf_dir,
+                    env=sub_env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                plan_json = json.loads(show_result.stdout)
+                err = verify_deleted_externally_plan(
+                    plan_json, resource_id, is_revert=True,
+                )
+                diff.append({
+                    "resource_id": resource_id,
+                    "field": DELETED_EXTERNALLY_FIELD,
+                    "original": "present_in_aws",
+                    "fixed": "missing_in_aws",
+                    "current_live": err or "create planned — OK",
+                })
                 continue
 
             fields = list(original_changes.keys())
@@ -232,24 +214,13 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
                 continue
 
             print(f"  [rollback-preview] CHECK {resource_id}: {len(fields)} field(s) — {list(fields)[:5]}...")
-            try:
-                _report_rollback_stage(run_id, "fetching_live_state")
-                outcome, live_values = _fetch_live_state(
-                    tf_dir, resource_id, fields, env=sub_env, backend_config=backend_config,
-                )
-                print(f"  [rollback-preview] RESULT {resource_id}: outcome={outcome}")
-            except Exception as exc:
-                import traceback
-                print(f"  [rollback-preview] UNEXPECTED EXCEPTION for {resource_id}: {exc}")
-                traceback.print_exc()
-                diff.append({
-                    "resource_id": resource_id,
-                    "field": "*",
-                    "original": "(baseline loaded)",
-                    "fixed": "(baseline loaded)",
-                    "current_live": f"ERROR: {exc}",
-                })
-                continue
+            _report_rollback_stage(run_id, "fetching_live_state")
+            # Plan failures must fail the run — do not mark preview complete
+            # with ERROR rows (UI used to treat those as "stale" and allow Execute).
+            outcome, live_values = _fetch_live_state(
+                tf_dir, resource_id, fields, env=sub_env, backend_config=backend_config,
+            )
+            print(f"  [rollback-preview] RESULT {resource_id}: outcome={outcome}")
 
             if outcome == "not_found":
                 continue
@@ -319,6 +290,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
     print(f"\n--- Rollback checkpoint 1: {len(baselines)} resource(s) in PR #{pr_number} ---\n")
 
     rollback_ready: list[dict] = []
+    plan_errors: list[str] = []
     for baseline in baselines:
         resource_id = baseline["resource_id"]
         original_changes = baseline["changes"]
@@ -365,18 +337,9 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
             reversed_changes = deleted_externally_baseline()
             _report_rollback_stage(run_id, "fetching_live_state")
             try:
-                plan_result = subprocess.run(
-                    ["terraform", "plan", "-no-color", "-out=tfplan", "-input=false", "-lock-timeout=30s"],
-                    cwd=tf_dir,
-                    env=sub_env,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=120,
+                _fetch_live_state(
+                    tf_dir, resource_id, [], env=sub_env, backend_config=backend_config,
                 )
-                if plan_result.returncode != 0:
-                    raise RuntimeError(plan_result.stderr[:300])
                 show_result = subprocess.run(
                     ["terraform", "show", "-no-color", "-json", "tfplan"],
                     cwd=tf_dir,
@@ -395,6 +358,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
                     continue
             except (RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
                 print(f"  ✗ {resource_id}: {exc}")
+                plan_errors.append(str(exc))
                 continue
             print(f"  ✓ {resource_id}: freshness confirmed (create planned)")
         else:
@@ -407,6 +371,7 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
                 )
             except RuntimeError as exc:
                 print(f"  ✗ {resource_id}: {exc}")
+                plan_errors.append(str(exc))
                 continue
 
             if outcome == "not_found":
@@ -449,6 +414,9 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
         )
 
     if not rollback_ready:
+        if plan_errors:
+            # Do not mis-report plan/backend failures as "already matches target".
+            raise RuntimeError(plan_errors[0])
         print("\nNo resources passed freshness check — rollback aborted.")
         raise RuntimeError(
             "No resources passed freshness check — live state already "

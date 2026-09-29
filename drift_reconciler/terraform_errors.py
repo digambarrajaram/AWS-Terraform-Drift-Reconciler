@@ -90,6 +90,18 @@ def humanize_rollback_error(raw_error: str) -> dict:
                 "manual rollback with terraform apply may be needed."
             ),
         }),
+        (("backend initialization required", "backend configuration block has changed"), {
+            "summary": (
+                "Terraform could not read live AWS state because the state "
+                "backend needs re-initialization (backend config changed)."
+            ),
+            "suggestion": (
+                "Retry the rollback — the agent will re-run "
+                "terraform init -reconfigure. If it keeps failing, check "
+                "this environment's tf_state_bucket / lock table / region "
+                "on the Environments page, then rebuild/redeploy the agent."
+            ),
+        }),
         (("no resources passed freshness check",), {
             "summary": (
                 "None of the resources in this PR still show the drift "
@@ -116,19 +128,19 @@ def humanize_rollback_error(raw_error: str) -> dict:
         }),
         (("terraform plan failed", "terraform plan timed out"), {
             "summary": (
-                "Could not connect to AWS to verify current resource "
-                "state — the Terraform plan step failed."
+                "Could not verify current resource state — the Terraform "
+                "plan step failed before rollback could compare live AWS."
             ),
             "suggestion": (
-                "Check AWS credentials and network connectivity for this "
-                "scope, then retry. If the issue persists, the state "
-                "backend (S3/DynamoDB) may be temporarily unavailable."
+                "Check AWS credentials, network connectivity, and the "
+                "state backend (S3/DynamoDB) for this scope, then retry."
             ),
         }),
     ]
 
+    # Match any keyword in a group (same contract as humanize_terraform_error).
     for keywords, info in patterns:
-        if all(kw in text for kw in keywords):
+        if any(kw in text for kw in keywords):
             return {"summary": info["summary"], "detail": raw_error, "suggestion": info["suggestion"]}
 
     return {

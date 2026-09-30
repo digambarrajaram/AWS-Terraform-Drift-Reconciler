@@ -5,6 +5,8 @@ import { apiFetch, ApiError } from '@/api/apiFetch';
 
 export type Severity = 'HIGH' | 'MEDIUM' | 'LOW';
 export type Channel  = 'pagerduty' | 'slack' | 'none';
+/** UI-only value for scope rows: no override row → use global default. */
+export type ScopeChannel = Channel | 'inherit';
 
 export interface NotificationSettings {
   pagerduty_configured: boolean;
@@ -98,6 +100,19 @@ export function useSaveRoutingRule(scope: string | null) {
         method: 'POST',
         body:   JSON.stringify(rule),
       }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['routingRules', scope] }),
+  });
+}
+
+/** Clear a scope-specific override so the global default applies again. */
+export function useClearRoutingOverride(scope: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ severity, scope: ruleScope }: { severity: Severity; scope: string }) =>
+      apiFetch<{ success: boolean }>(
+        `/routing-rules?severity=${encodeURIComponent(severity)}&scope=${encodeURIComponent(ruleScope)}`,
+        { method: 'DELETE' },
+      ),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['routingRules', scope] }),
   });
 }

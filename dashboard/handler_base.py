@@ -838,6 +838,8 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         if path.startswith("/api/environments/"):
             env_id = path.split("/")[-1]
             self._handle_environments_delete(env_id)
+        elif path == "/api/routing-rules":
+            self._handle_routing_rules_delete()
         else:
             self.send_error(404)
 

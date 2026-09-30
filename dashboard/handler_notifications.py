@@ -101,6 +101,52 @@ class NotificationsMixin:
         self.end_headers()
         self.wfile.write(data)
 
+    def _handle_routing_rules_delete(self):
+        """Delete a scope-specific override so the global default applies again.
+
+        Global rows (scope null) cannot be deleted via this endpoint.
+        Query: ?severity=HIGH&scope=my-scope
+        """
+        qs = parse_qs(urlparse(self.path).query)
+        severity = (qs.get("severity", [""])[0] or "").upper()
+        scope = (qs.get("scope", [""])[0] or "").strip() or None
+
+        if severity not in ("HIGH", "MEDIUM", "LOW"):
+            self._json_error(400, "severity must be HIGH, MEDIUM, or LOW.")
+            return
+        if not scope:
+            self._json_error(400, "scope is required to clear an override (global defaults cannot be deleted).")
+            return
+        if not self._require_owned_scope(scope):
+            return
+
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not url or not key:
+            self._json_error(502, "Supabase not configured")
+            return
+
+        try:
+            resp = requests.delete(
+                f"{url}/rest/v1/severity_routing_rules"
+                f"?severity=eq.{severity}&scope=eq.{scope}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code not in (200, 204):
+                self._json_error(502, f"Supabase delete failed ({resp.status_code}): {resp.text[:200]}")
+                return
+        except requests.RequestException as e:
+            self._json_error(502, f"Supabase unreachable: {e}")
+            return
+
+        data = json.dumps({"success": True}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _handle_notification_test(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length > 0 else b""

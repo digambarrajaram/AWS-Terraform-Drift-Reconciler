@@ -180,9 +180,16 @@ def drift_alert(state: State):
         return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
 
     rules = _load_routing_rules()
+    print(f"  [alert_agent] routing rules for {_ag._account_label}: {rules}")
 
     pd_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "pagerduty"]
     slack_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "slack"]
+    silenced = len(active) - len(pd_findings) - len(slack_findings)
+    print(
+        f"  [alert_agent] {len(active)} finding(s): "
+        f"{len(pd_findings)} → pagerduty, {len(slack_findings)} → slack, "
+        f"{silenced} silenced (channel=none or unmatched severity)"
+    )
 
     # PagerDuty → one page per finding.
     pd_sent = 0

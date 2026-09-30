@@ -9,8 +9,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useScope } from '@/hooks/useScope';
 import {
   useNotificationSettings, useSaveCredential, useSendTest,
-  useRoutingRules, useSaveRoutingRule,
-  type Severity, type Channel, type RoutingRule,
+  useRoutingRules, useSaveRoutingRule, useClearRoutingOverride,
+  type Severity, type Channel, type ScopeChannel, type RoutingRule,
 } from '@/hooks/useAlerts';
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -19,7 +19,11 @@ const SEVERITIES: Severity[] = ['HIGH', 'MEDIUM', 'LOW'];
 const CHANNELS: { value: Channel; label: string }[] = [
   { value: 'pagerduty', label: 'PagerDuty' },
   { value: 'slack',     label: 'Slack'     },
-  { value: 'none',      label: 'None'      },
+  { value: 'none',      label: 'None (no alert)' },
+];
+const SCOPE_CHANNELS: { value: ScopeChannel; label: string }[] = [
+  { value: 'inherit',   label: 'Inherit global' },
+  ...CHANNELS,
 ];
 
 // Channel severity tier for escalation detection — higher = more disruptive.
@@ -174,11 +178,15 @@ function RoutingRuleRow({
   scopeValue:    string | null; // null = global
   existingRule:  RoutingRule | undefined;
   globalChannel: Channel;
-  onSave:        (severity: Severity, channel: Channel, scope: string | null) => void;
+  onSave:        (severity: Severity, channel: ScopeChannel, scope: string | null) => void;
   saving:        boolean;
 }) {
-  const current = existingRule?.channel ?? 'none';
-  const [channel, setChannel] = useState<Channel>(current);
+  const isScopeRow = scopeValue !== null;
+  // Missing scope override means inherit — NOT "none" (which silences alerts).
+  const current: ScopeChannel = isScopeRow
+    ? (existingRule?.channel ?? 'inherit')
+    : (existingRule?.channel ?? 'none');
+  const [channel, setChannel] = useState<ScopeChannel>(current);
   // Sync local state when the rule changes underneath us
   // (e.g. after a save refetches, or after navigation remounts).
   useEffect(() => { setChannel(current); }, [current]);
@@ -187,17 +195,24 @@ function RoutingRuleRow({
   // Detect escalation: scope override routes to a more disruptive channel
   // than the global default (e.g. LOW → Slack globally but LOW → PagerDuty
   // for this scope).
-  const escalated = scopeValue !== null
+  const escalated = isScopeRow
+    && channel !== 'inherit'
     && CHANNEL_TIER[channel] > CHANNEL_TIER[globalChannel];
 
+  const silenced = isScopeRow && channel === 'none';
+
   return (
-    <tr className={['border-b border-border last:border-0', escalated ? 'bg-amber-50/30 dark:bg-amber-950/10' : ''].join(' ')}>
+    <tr className={[
+      'border-b border-border last:border-0',
+      escalated ? 'bg-amber-50/30 dark:bg-amber-950/10' : '',
+      silenced ? 'bg-red-50/40 dark:bg-red-950/10' : '',
+    ].filter(Boolean).join(' ')}>
       <td className="px-4 py-3">
         <SevBadge sev={severity} />
       </td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          {scopeValue === null
+          {!isScopeRow
             ? <><Globe size={12} className="shrink-0" /> Global default</>
             : <><SlidersHorizontal size={12} className="shrink-0" /> {scopeLabel}</>}
         </div>
@@ -205,16 +220,26 @@ function RoutingRuleRow({
       <td className="px-4 py-3">
         <select
           value={channel}
-          onChange={(e) => setChannel(e.target.value as Channel)}
+          onChange={(e) => setChannel(e.target.value as ScopeChannel)}
           className="rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
         >
-          {CHANNELS.map((c) => (
+          {(isScopeRow ? SCOPE_CHANNELS : CHANNELS).map((c) => (
             <option key={c.value} value={c.value}>{c.label}</option>
           ))}
         </select>
+        {isScopeRow && channel === 'inherit' && (
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Effective: {globalChannel === 'none' ? 'No alert' : globalChannel}
+          </p>
+        )}
         {escalated && (
           <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400 flex items-center gap-1">
             <AlertTriangle size={10} /> Escalated above global default ({globalChannel})
+          </p>
+        )}
+        {silenced && (
+          <p className="mt-1 text-[10px] text-red-600 dark:text-red-400 flex items-center gap-1">
+            <AlertTriangle size={10} /> Overrides global — no alert for this scope
           </p>
         )}
       </td>
@@ -248,7 +273,8 @@ function RoutingRulesSection({
   loading:    boolean;
   error:      Error | null;
 }) {
-  const saveRule   = useSaveRoutingRule(scope);
+  const saveRule    = useSaveRoutingRule(scope);
+  const clearOverride = useClearRoutingOverride(scope);
   const [savingKey, setSavingKey] = useState<string | null>(null);
 
   // Helper: find an existing rule for severity + scope
@@ -258,10 +284,27 @@ function RoutingRulesSection({
     );
   }
 
-  async function handleSave(severity: Severity, channel: Channel, scopeVal: string | null) {
+  async function handleSave(severity: Severity, channel: ScopeChannel, scopeVal: string | null) {
     const key = `${severity}-${scopeVal ?? 'global'}`;
     setSavingKey(key);
     try {
+      // Inherit = delete scope override (or no-op if none exists).
+      if (channel === 'inherit') {
+        if (!scopeVal) {
+          toast.error('Inherit is only valid for scope overrides');
+          return;
+        }
+        if (findRule(severity, scopeVal)) {
+          await clearOverride.mutateAsync({ severity, scope: scopeVal });
+          toast.success(`${severity} override cleared`, {
+            description: `Scope ${scopeVal} now inherits the global default`,
+          });
+        } else {
+          toast.success(`${severity} already inherits global default`);
+        }
+        return;
+      }
+
       await saveRule.mutateAsync({ severity, channel, scope: scopeVal });
       toast.success(
         `${severity} → ${channel === 'none' ? 'No alert' : channel} rule saved`,
@@ -385,8 +428,8 @@ export default function Alerts() {
                 <AlertTriangle size={13} className="shrink-0" />
                 <span>
                   <strong>Backend not connected</strong> — the notification-settings endpoint returned 404.
-                  Wire up <code className="font-mono">serve.py</code> to enable saving credentials and sending tests.
-                  The routing rules table (Supabase) still works independently.
+                  Wire up <code className="font-mono">serve.py</code> to enable saving credentials,
+                  sending tests, and updating routing rules.
                 </span>
               </div>
             )}
@@ -428,8 +471,11 @@ export default function Alerts() {
 
         <p className="text-xs text-muted-foreground">
           Each severity has a global default channel and, if a scope is selected, an
-          optional scope-specific override. The override takes precedence when the
-          selected scope matches.
+          optional scope-specific override. Use <strong className="text-foreground">Inherit global</strong> on
+          a scope row unless you intentionally want a different channel.
+          <strong className="text-foreground"> None</strong> means no alert is sent — a scope
+          override of None will silence that severity even if the global default is PagerDuty.
+          Click Save on each row you change.
         </p>
 
         <RoutingRulesSection

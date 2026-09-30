@@ -57,6 +57,11 @@ class FormattingDriftScriptTests(unittest.TestCase):
         self.assertEqual(report["report_type"], "drift")
         self.assertEqual(len(report["resources"]), 1)
         self.assertEqual(report["resources"][0]["address"], "aws_instance.foo")
+        # resource_changes before=live/after=config → drift before=IaC/after=live
+        self.assertEqual(
+            report["resources"][0]["changes"]["instance_type"],
+            {"before": "t3.small", "after": "t3.micro"},
+        )
 
     def test_noisy_resource_drift_still_uses_resource_changes_update(self):
         """Non-empty resource_drift with only tags_all must not hide real updates."""
@@ -98,7 +103,39 @@ class FormattingDriftScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report = report_drift(plan, tf_dir=tmp, scope=None)
         self.assertEqual(report["report_type"], "drift")
-        self.assertIn("instance_type", report["resources"][0]["changes"])
+        self.assertEqual(
+            report["resources"][0]["changes"]["instance_type"],
+            {"before": "t3.small", "after": "t3.micro"},
+        )
+
+    def test_resource_drift_keeps_prior_to_live_orientation(self):
+        """Native resource_drift is already drift convention — do not swap."""
+        plan = {
+            "resource_drift": [
+                {
+                    "address": "aws_instance.foo",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {"instance_type": "t3.small"},
+                        "after": {"instance_type": "t3.micro"},
+                    },
+                },
+            ],
+            "prior_state": {
+                "values": {
+                    "root_module": {
+                        "resources": [{"address": "aws_instance.foo"}],
+                    },
+                },
+            },
+            "resource_changes": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report = report_drift(plan, tf_dir=tmp, scope=None)
+        self.assertEqual(
+            report["resources"][0]["changes"]["instance_type"],
+            {"before": "t3.small", "after": "t3.micro"},
+        )
 
     def test_replace_is_not_classified_as_deleted_externally(self):
         plan = {
@@ -125,7 +162,11 @@ class FormattingDriftScriptTests(unittest.TestCase):
             report = report_drift(plan, tf_dir=tmp, scope=None)
         self.assertEqual(report["report_type"], "drift")
         self.assertNotEqual(report["resources"][0].get("status"), "deleted_externally")
-        self.assertIn("ami", report["resources"][0]["changes"])
+        # Swap: before=config(ami-new), after=live(ami-old)
+        self.assertEqual(
+            report["resources"][0]["changes"]["ami"],
+            {"before": "ami-new", "after": "ami-old"},
+        )
 
     def test_update_with_empty_visible_diff_still_reported(self):
         plan = {

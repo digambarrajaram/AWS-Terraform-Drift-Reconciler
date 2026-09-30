@@ -1,4 +1,4 @@
-"""code_to_reality patches HCL to plan ``before`` (live/state), not ``after`` (config)."""
+"""code_to_reality patches HCL to drift ``after`` (live), not ``before`` (IaC)."""
 import os
 import sys
 import tempfile
@@ -11,7 +11,7 @@ import github_integration as gi  # noqa: E402
 
 
 class CodeToRealityPatchTests(unittest.TestCase):
-    def test_apply_uses_before_for_tags(self):
+    def test_apply_uses_after_for_tags(self):
         with tempfile.TemporaryDirectory() as td:
             tf = os.path.join(td, "main.tf")
             with open(tf, "w", encoding="utf-8") as fh:
@@ -20,17 +20,18 @@ class CodeToRealityPatchTests(unittest.TestCase):
                     '  tags = { Name = "WebServer" }\n'
                     "}\n"
                 )
+            # Drift convention: before=IaC, after=live
             changes = {
                 "tags": {
-                    "before": {"Name": "WebServer", "Environment": "prod"},
-                    "after": {"Name": "WebServer"},
+                    "before": {"Name": "WebServer"},
+                    "after": {"Name": "WebServer", "Environment": "prod"},
                 },
             }
             orig_hcledit = gi.is_hcledit_available
             gi.is_hcledit_available = lambda: False
             try:
                 out = gi.apply_changes_to_file(
-                    tf, "aws_instance.web", changes, value_key="before",
+                    tf, "aws_instance.web", changes, value_key="after",
                 )
             finally:
                 gi.is_hcledit_available = orig_hcledit
@@ -57,19 +58,19 @@ class CodeToRealityPatchTests(unittest.TestCase):
                 )
             changes = {
                 "tags": {
-                    "before": {"Name": "WebServer", "Environment": "prod"},
-                    "after": {"Name": "WebServer"},
+                    "before": {"Name": "WebServer"},
+                    "after": {"Name": "WebServer", "Environment": "prod"},
                 },
                 "tags_all": {
-                    "before": {"Name": "WebServer", "Environment": "prod"},
-                    "after": {"Name": "WebServer"},
+                    "before": {"Name": "WebServer"},
+                    "after": {"Name": "WebServer", "Environment": "prod"},
                 },
             }
             orig_hcledit = gi.is_hcledit_available
             gi.is_hcledit_available = lambda: False
             try:
                 out = gi.apply_changes_to_file(
-                    tf, "aws_instance.web", changes, value_key="before",
+                    tf, "aws_instance.web", changes, value_key="after",
                 )
             finally:
                 gi.is_hcledit_available = orig_hcledit

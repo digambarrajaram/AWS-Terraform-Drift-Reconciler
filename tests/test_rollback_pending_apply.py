@@ -48,6 +48,7 @@ class RollbackPendingApplyTests(unittest.TestCase):
             "file_path": "main.tf",
             "changes": {"bucket": {"before": "orig", "after": "fixed"}},
         }]
+        # Live still at drifted value (baseline "after") — freshness OK.
         rollback_flow._fetch_live_state = lambda *a, **k: (
             "present", {"bucket": "fixed"},
         )

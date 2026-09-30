@@ -54,7 +54,7 @@ class GithubBatchTypeTests(unittest.TestCase):
         real_append = gi.drift_history.append_entry
         gi.create_drift_pr = fake_create_drift_pr
         gi.drift_history.append_entry = fake_append
-        gi._apply_changes_batch = lambda path, fs: "# patched"
+        gi._apply_changes_batch = lambda path, fs, value_key="after": "# patched"
         gi.to_repo_relative_path = lambda p: p
         try:
             pr = gi.create_drift_pr_for_file(findings, "code_to_reality", account_label="test")

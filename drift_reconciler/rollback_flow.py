@@ -383,9 +383,12 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
                 continue
 
             # outcome == "present" — check staleness.
+            # Live should still be the drifted value captured at fix time
+            # (original "after" / reversed "before"). A third value means
+            # intervening change since the original fix.
             stale_fields = []
             for field in fields:
-                expected = reversed_changes[field]["after"]  # the original "before" value
+                expected = reversed_changes[field]["before"]
                 actual = live_values.get(field, "<missing>")
                 if actual != expected:
                     stale_fields.append((field, expected, actual))

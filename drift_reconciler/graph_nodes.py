@@ -59,7 +59,7 @@ def trivy_gate(state: State):
         # baseline scan (nested modules, not only top-level .tf files).
         copy_tf_tree(scan_root, tmpdir)
 
-        # Apply code_to_reality patches (HCL → live/state values) on temp copies.
+        # Apply code_to_reality patches (HCL → drift after / live values).
         for f in actionable:
             try:
                 rel = os.path.relpath(os.path.abspath(f["file_path"]), scan_root)
@@ -74,7 +74,7 @@ def trivy_gate(state: State):
                     continue
                 patched = _ag.gi.apply_changes_to_file(
                     tf_file, f["resource_id"], patch_changes,
-                    value_key="before",
+                    value_key="after",
                 )
                 with open(tf_file, "w", encoding="utf-8") as fh:
                     fh.write(patched)

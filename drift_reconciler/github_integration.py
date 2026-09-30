@@ -488,9 +488,10 @@ def create_drift_pr_for_mode(finding: dict, mode: str, account_label: str = "def
             print(f"[SKIP] {resource_id}: only computed drift fields "
                   f"({', '.join(finding['changes'].keys())}) — no HCL patch")
             return None
+        # Drift convention: after = live AWS — patch HCL to match reality.
         patched_file_content = apply_changes_to_file(
             file_path, resource_id, patch_changes, deleted=is_deleted,
-            value_key="before",
+            value_key="after",
         )
         pr_title = f"Drift fix: {resource_id} [{risk_level}]"
         content = patched_file_content
@@ -648,7 +649,8 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
     if not actionable:
         return None
 
-    patch_key = "before" if mode == "code_to_reality" else "after"
+    # code_to_reality: after = live; other modes keep after as the desired value.
+    patch_key = "after"
     patched_content = _apply_changes_batch(file_path, actionable, value_key=patch_key)
 
     resource_ids = [f["resource_id"] for f in actionable]
@@ -859,8 +861,8 @@ def _regex_patch_tf_file(
                 print(f"  [regex] {resource_id}.{field}: block removal — pattern '{block_pat}' not found in lines {block_start+1}-{block_end+1}")
             continue
 
-        # Attribute value replacement — match current HCL (config/after) then
-        # set to the patch target (live/before for code_to_reality).
+        # Attribute value replacement — set field to the patch target
+        # (live/after for code_to_reality under drift convention).
         for i in range(block_start, block_end + 1):
             if re.match(rf"^\s*{re.escape(field)}\s*=", lines[i]):
                 lines[i] = re.sub(

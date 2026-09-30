@@ -4,9 +4,12 @@ Parse a `terraform show -json <planfile>` output and report drift.
 Usage:
     python formatting_drift_json.py plan.json
 
-Reads the ``resource_drift`` array (pure drift: live infra vs. state file),
-falling back to ``resource_changes`` (filtered to non no-op) if resource_drift
-isn't present in this Terraform version's output.
+Reads the ``resource_drift`` array (pure drift: prior state → refreshed live)
+and unions it with actionable ``resource_changes``. Findings always use
+**drift convention**: ``before`` = IaC/config value, ``after`` = live AWS.
+
+Terraform ``resource_changes`` is the opposite (before=live, after=config),
+so those entries are normalized (swapped) before building the report.
 
 Supports a **drift-exceptions registry** (``drift-exceptions.json`` in the
 terraform root directory) for suppressing known/accepted drift at scale
@@ -355,7 +358,10 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
     # resource_changes — Terraform often puts only computed noise (tags_all)
     # in resource_drift while the actionable update is under resource_changes.
     # Keep native-only addresses (refresh drift with no matching plan change).
+    # Track addresses taken from resource_changes so we can normalize their
+    # before/after (live→config) into drift convention (config→live).
     by_address: dict = {}
+    from_resource_changes: set[str] = set()
     for entry in native_drift:
         addr = entry.get("address")
         if addr:
@@ -364,6 +370,7 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
         addr = entry.get("address")
         if addr:
             by_address[addr] = entry
+            from_resource_changes.add(addr)
     drift_entries = list(by_address.values())
 
     file_index = build_resource_file_index(tf_dir) if tf_dir else {}
@@ -418,6 +425,11 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
 
         before = change.get("before") if isinstance(change.get("before"), dict) else {}
         after_obj = after if isinstance(after, dict) else {}
+        # resource_changes: before=live, after=config — invert to drift convention
+        # (before=IaC/config, after=live) used by findings, PRs, and rollback.
+        # resource_drift already uses prior-state→live (= drift convention).
+        if address in from_resource_changes:
+            before, after_obj = after_obj, before
         diffs = flatten_diff(before, after_obj)
         changes_dict = {field: {"before": b, "after": a} for field, b, a in diffs}
         changes_dict = {

@@ -381,22 +381,22 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                         # target — nothing to apply" no-op.
                         continue
                     for field in fields:
-                        # Revert direction: live may legitimately be either
-                        # baseline state — the fix-applied state (baseline
-                        # "after" for a fix PR; "before" for a rollback PR)
-                        # or the pre-fix state (a no-op revert plan, caught
-                        # above as no_diff, but harmless to allow).  Any
-                        # third value means live changed since capture —
-                        # the plan's from-state is stale, fail closed.
-                        # Accept direction: the plan's from-state is the
-                        # baseline "before" — unchanged.
-                        expected = {
-                            plan_field_baseline_token(field, changes[field].get("before")),
-                        }
+                        # Drift convention: before=IaC, after=live-at-capture.
+                        # Accept (fix PR): live must still be baseline "after".
+                        # Revert (rollback PR): live may be "after" (still
+                        # drifted) or "before" (already restored) — any third
+                        # value means intervening change, fail closed.
+                        # Rollback PRs store reversed_changes, so their
+                        # "before" is the drifted value and "after" the IaC.
                         if is_revert:
-                            expected.add(
+                            expected = {
+                                plan_field_baseline_token(field, changes[field].get("before")),
                                 plan_field_baseline_token(field, changes[field].get("after")),
-                            )
+                            }
+                        else:
+                            expected = {
+                                plan_field_baseline_token(field, changes[field].get("after")),
+                            }
                         actual = live_values.get(field, "<missing>")
                         if actual not in expected:
                             gate_failure = (

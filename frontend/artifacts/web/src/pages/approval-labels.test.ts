@@ -3,7 +3,8 @@
 // Run: node --import tsx --test src/pages/approval-labels.test.ts
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { runningLabel, decisionButtonLabel, decisionToast, isJobDone } from './approval-labels';
+import { runningLabel, decisionButtonLabel, decisionToast, isJobDone, statusLabel } from './approval-labels';
+import { findingStatusLabel } from '@/lib/statusLabels';
 
 describe('runningLabel', () => {
   it('keeps drift wording for fix/batch/manual/null', () => {
@@ -127,6 +128,32 @@ describe('decisionToast — security real-fix vs review_only', () => {
 describe('isJobDone — excepted is terminal', () => {
   it('excepted is done', () => {
     assert.equal(isJobDone('excepted'), true);
+  });
+});
+
+describe('statusLabel — unified Accepted / Reverted wording', () => {
+  it('flags applied rows that have no merged_at', () => {
+    assert.equal(statusLabel('applied', { mergedAt: null }), 'Accepted, not merged');
+    assert.equal(statusLabel('applied', { mergedAt: undefined }), 'Accepted, not merged');
+    assert.equal(statusLabel('applied', {}), 'Accepted, not merged');
+  });
+
+  it('maps applied → Accepted when merged_at is present', () => {
+    assert.equal(statusLabel('applied', { mergedAt: '2026-09-30T12:00:00Z' }), 'Accepted');
+  });
+
+  it('maps revert / manual outcomes to shared labels', () => {
+    assert.equal(statusLabel('reverted'), 'Reverted');
+    assert.equal(statusLabel('manual_revert_required'), 'Manual action needed');
+    assert.equal(statusLabel('excepted', { mergedAt: null }), 'Excepted');
+  });
+});
+
+describe('findingStatusLabel — matches Approvals Accept/Reject', () => {
+  it('maps resolved → Accepted and reverted → Reverted', () => {
+    assert.equal(findingStatusLabel('resolved'), 'Accepted');
+    assert.equal(findingStatusLabel('reverted'), 'Reverted');
+    assert.equal(findingStatusLabel('open'), 'Open');
   });
 });
 

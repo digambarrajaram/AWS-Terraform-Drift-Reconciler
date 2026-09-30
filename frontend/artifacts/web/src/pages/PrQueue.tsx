@@ -16,6 +16,7 @@ import {
   useDriftEvents, PAGE_SIZE, type SortColumn, type DriftFilters, type DriftSort,
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
+import { findingStatusLabel } from '@/lib/statusLabels';
 
 // ── Badges ─────────────────────────────────────────────────────────────────
 
@@ -35,13 +36,17 @@ const STATUS: Record<DriftEvent['status'], string> = {
   manual_revert_required: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400',
 };
 
-function Badge({ value, map }: { value: string; map: Record<string, string> }) {
+function Badge({ value, map, label }: { value: string; map: Record<string, string>; label?: string }) {
   const cls = map[value] ?? 'bg-muted text-muted-foreground';
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {value}
+      {label ?? value}
     </span>
   );
+}
+
+function StatusBadge({ status }: { status: DriftEvent['status'] | string }) {
+  return <Badge value={status} map={STATUS} label={findingStatusLabel(status)} />;
 }
 
 // ── Sort header ────────────────────────────────────────────────────────────
@@ -170,7 +175,7 @@ function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
                   General
                 </h3>
                 <div className="grid grid-cols-2 gap-3">
-                  {kv('Status',   <Badge value={e.status} map={STATUS} />)}
+                  {kv('Finding status', <StatusBadge status={e.status} />)}
                   {kv('Severity', <Badge value={e.severity} map={SEV} />)}
                   {kv('Type',     e.pr_type ?? '—')}
                   {kv('Region',   e.region)}
@@ -307,10 +312,10 @@ function FilterBar({
       >
         <option value="all">All statuses</option>
         <option value="open">Open</option>
-        <option value="resolved">Resolved</option>
+        <option value="resolved">Accepted</option>
         <option value="suppressed">Suppressed</option>
         <option value="reverted">Reverted</option>
-        <option value="manual_revert_required">Manual revert required</option>
+        <option value="manual_revert_required">Manual action needed</option>
       </select>
 
       {/* Severity */}
@@ -468,7 +473,7 @@ export default function PrQueue() {
                 <SortTh col="resource_id" label="Resource"   sort={sort} onSort={handleSort} />
                 <SortTh col="severity"    label="Severity"   sort={sort} onSort={handleSort} />
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Type</th>
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Status</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Finding status</th>
                 <SortTh col="created_at"  label="Created"    sort={sort} onSort={handleSort} />
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">PR</th>
               </tr>
@@ -519,9 +524,9 @@ export default function PrQueue() {
                       {ev.pr_type ?? '—'}
                     </td>
 
-                    {/* Status */}
+                    {/* Finding status — same labels as Approvals apply outcome */}
                     <td className="px-4 py-3">
-                      <Badge value={ev.status} map={STATUS} />
+                      <StatusBadge status={ev.status} />
                     </td>
 
                     {/* Created */}

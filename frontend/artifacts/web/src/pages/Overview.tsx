@@ -14,7 +14,8 @@ import { errorMessage, isRetryable } from '@/lib/errorUtils';
 
 function formatCost(usd: number): string {
   return new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: 'USD', maximumFractionDigits: 0,
+    style: 'currency', currency: 'USD',
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
   }).format(usd);
 }
 
@@ -116,11 +117,16 @@ function NoEventsState() {
 export default function Overview() {
   const { scope } = useScope();
   const { activeEnvironments, isLoading: envsLoading } = useEnvironments();
-  const { severitySummary, rollbackCount, lastScan, costImpact } = useOverviewData(scope);
+  const {
+    severitySummary, openCount, lastScanDrift, rollbackCount, lastScan,
+    costImpact, costResourceCount,
+  } = useOverviewData(scope);
 
   const isLoading =
     envsLoading ||
+    !scope ||
     severitySummary.isLoading ||
+    lastScanDrift.isLoading ||
     rollbackCount.isLoading ||
     lastScan.isLoading ||
     costImpact.isLoading;
@@ -128,6 +134,7 @@ export default function Overview() {
   // Any query error — show inline per-card, plus a top banner if 502/network
   const anyError =
     severitySummary.error ??
+    lastScanDrift.error   ??
     rollbackCount.error   ??
     lastScan.error        ??
     costImpact.error      ?? null;
@@ -135,11 +142,11 @@ export default function Overview() {
   const topBannerMsg =
     anyError && isRetryable(anyError) ? errorMessage(anyError) : null;
 
-  // Build a severity → count map
+  // Severity from last scan findings (current reality), not open tickets.
   const severityMap = useMemo(() => {
     const map: Record<string, number> = {};
-    for (const row of severitySummary.data ?? []) {
-      const severity = row.severity.toUpperCase();
+    for (const row of lastScanDrift.data?.severity ?? []) {
+      const severity = (row.severity ?? 'OTHER').toString().toUpperCase();
       const key = SEVERITY_STYLE[severity] ? severity : 'OTHER';
       const count = Number(row.count);
       if (Number.isFinite(count)) {
@@ -147,12 +154,14 @@ export default function Overview() {
       }
     }
     return map;
-  }, [severitySummary.data]);
+  }, [lastScanDrift.data?.severity]);
 
-  const totalDrift = useMemo(
-    () => Object.values(severityMap).reduce((a, b) => a + b, 0),
-    [severityMap],
-  );
+  const currentDrift = lastScanDrift.data?.count ?? 0;
+  const driftSkipped = !!lastScanDrift.data?.skipped;
+  const unresolvedOpen = openCount.data ?? 0;
+
+  const costTotal = costImpact.data ?? 0;
+  const costResources = costResourceCount.data ?? 0;
 
   // No environments at all
   if (!envsLoading && activeEnvironments.length === 0) {
@@ -171,7 +180,8 @@ export default function Overview() {
     severitySummary.isSuccess &&
     lastScan.isSuccess &&
     lastScan.data === null &&
-    totalDrift === 0;
+    currentDrift === 0 &&
+    unresolvedOpen === 0;
 
   return (
     <div className="p-6 space-y-6">
@@ -194,33 +204,57 @@ export default function Overview() {
         <NoEventsState />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {/* ── Severity breakdown ─────────────────────────────────────── */}
+          {/* ── Current drift from last scan (matches Scan History) ───── */}
           <StatCard
             icon={AlertTriangle}
-            label="Open Drift"
+            label="Current Drift"
             loading={isLoading}
-            error={severitySummary.error}
+            error={lastScanDrift.error}
           >
-            {!isLoading && !severitySummary.error && (
+            {!isLoading && !lastScanDrift.error && (
               <div className="space-y-2">
-                <p className="text-2xl font-semibold tabular-nums text-card-foreground">
-                  {totalDrift}
-                </p>
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {SEVERITY_ORDER.map((sev) => {
-                    const style = SEVERITY_STYLE[sev];
-                    const count = severityMap[sev] ?? 0;
-                    return (
-                      <span
-                        key={sev}
-                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${style.bg} ${style.text}`}
-                      >
-                        <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
-                        {style.label}: {count}
-                      </span>
-                    );
-                  })}
-                </div>
+                {driftSkipped ? (
+                  <>
+                    <p className="text-2xl font-semibold tabular-nums text-muted-foreground">—</p>
+                    <p className="text-xs text-muted-foreground leading-snug">
+                      {lastScanDrift.data?.reason ?? 'Last scan did not check configuration drift'}
+                    </p>
+                  </>
+                ) : lastScan.data === null ? (
+                  <>
+                    <p className="text-2xl font-semibold tabular-nums text-muted-foreground">—</p>
+                    <p className="text-xs text-muted-foreground">No completed scan yet</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-2xl font-semibold tabular-nums text-card-foreground">
+                      {currentDrift}
+                    </p>
+                    {currentDrift > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {SEVERITY_ORDER.map((sev) => {
+                          const style = SEVERITY_STYLE[sev];
+                          const count = severityMap[sev] ?? 0;
+                          if (count === 0) return null;
+                          return (
+                            <span
+                              key={sev}
+                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${style.bg} ${style.text}`}
+                            >
+                              <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+                              {style.label}: {count}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      {unresolvedOpen === 0 && currentDrift > 0
+                        ? 'Detected in last scan — no open tickets'
+                        : `${unresolvedOpen} unresolved ticket${unresolvedOpen === 1 ? '' : 's'}`}
+                    </p>
+                  </>
+                )}
               </div>
             )}
           </StatCard>
@@ -238,10 +272,24 @@ export default function Overview() {
           <StatCard
             icon={DollarSign}
             label="Est. Monthly Cost"
-            value={isLoading ? undefined : formatCost(costImpact.data ?? 0)}
             loading={isLoading}
             error={costImpact.error}
-          />
+          >
+            {!isLoading && !costImpact.error && (
+              costResources === 0 ? (
+                <p className="text-sm text-muted-foreground">No cost data</p>
+              ) : (
+                <div className="space-y-1">
+                  <p className="text-2xl font-semibold tabular-nums text-card-foreground">
+                    {formatCost(costTotal)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    across {costResources} resource{costResources === 1 ? '' : 's'}
+                  </p>
+                </div>
+              )
+            )}
+          </StatCard>
 
           {/* ── Last scan timestamp ────────────────────────────────────── */}
           <StatCard

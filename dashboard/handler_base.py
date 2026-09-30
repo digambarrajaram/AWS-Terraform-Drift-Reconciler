@@ -59,6 +59,128 @@ _AUTH_RATE_WINDOW_SEC = 60
 _AUTH_RATE_MAX = 20
 
 
+def _monthly_estimate_usd(cost_impact) -> float | None:
+    """Extract a finite monthly USD estimate from a drift_events.cost_impact value.
+
+    Handles native jsonb objects and legacy double-encoded jsonb strings
+    (see migrations/backfill_changes_jsonb_parsed.sql). Numeric strings are
+    coerced so Overview totals match Explorer/PR Queue displays.
+    """
+    value = cost_impact
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    estimate = value.get("monthly_estimate_usd")
+    if isinstance(estimate, bool):
+        return None
+    if isinstance(estimate, (int, float)):
+        result = float(estimate)
+    elif isinstance(estimate, str):
+        try:
+            result = float(estimate)
+        except ValueError:
+            return None
+    else:
+        return None
+    if result < 0:
+        return None
+    return result
+
+
+def _trends_summary_from_rows(rows: list) -> dict:
+    """Build Trends summary with mutually exclusive status buckets.
+
+    Total = resolved + open + other.  ``rollback`` is a pr_type overlay
+    (subset of total) and is not part of that status equation — callers
+    must label it as such so Resolved + Unresolved is never compared to
+    Total without Other.
+    """
+    resolved = open_count = other = rollback = 0
+    resources: set[str] = set()
+    other_by_status: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rid = row.get("resource_id")
+        if rid:
+            resources.add(rid)
+        status = (row.get("status") or "").strip().lower()
+        pr_type = (row.get("pr_type") or "").strip().lower()
+        if pr_type == "rollback":
+            rollback += 1
+        if status == "resolved":
+            resolved += 1
+        elif status == "open":
+            open_count += 1
+        else:
+            other += 1
+            key = status or "unknown"
+            other_by_status[key] = other_by_status.get(key, 0) + 1
+    return {
+        "total": len(rows),
+        "uniqueResources": len(resources),
+        "resolved": resolved,
+        "open": open_count,
+        "other": other,
+        "other_by_status": other_by_status,
+        "rollback": rollback,
+    }
+
+
+def _last_scan_drift_summary(result_summary) -> dict:
+    """Normalize scan_runs.result_summary.drift for the Overview card.
+
+    Open drift_events can briefly be empty after a PR resolves even when the
+    next (or last) scan still detected live drift — so Overview must prefer
+    the last completed scan's finding count over status=open ticket rows.
+    """
+    empty = {
+        "count": 0,
+        "found": False,
+        "skipped": False,
+        "reason": None,
+        "severity": [],
+    }
+    if not isinstance(result_summary, dict):
+        return empty
+    drift = result_summary.get("drift")
+    if not isinstance(drift, dict):
+        return empty
+
+    findings = drift.get("findings") or []
+    sev_counts: dict[str, int] = {}
+    if isinstance(findings, list):
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            raw = finding.get("risk_level") or finding.get("severity") or "OTHER"
+            key = str(raw).upper()
+            if key not in ("HIGH", "MEDIUM", "LOW"):
+                key = "OTHER"
+            sev_counts[key] = sev_counts.get(key, 0) + 1
+
+    try:
+        count = int(drift.get("count") or 0)
+    except (TypeError, ValueError):
+        count = len(findings) if isinstance(findings, list) else 0
+
+    return {
+        "count": max(count, 0),
+        "found": bool(drift.get("found")) or count > 0,
+        "skipped": bool(drift.get("skipped")),
+        "reason": drift.get("reason"),
+        "severity": [
+            {"severity": sev, "count": sev_counts[sev]}
+            for sev in ("HIGH", "MEDIUM", "LOW", "OTHER")
+            if sev in sev_counts
+        ],
+    }
+
+
 def _supabase_jwks_url() -> str | None:
     """Derive Supabase JWKS endpoint from SUPABASE_URL (no hardcoded project ref)."""
     base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -914,44 +1036,87 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 f"?select=severity,count&account=eq.{scope}",
                 headers=headers, timeout=10,
             )
+            # Prefer:count=exact can yield 206 Partial Content — same as
+            # /api/pr-queue. Rejecting non-200 made Overview fail entirely.
+            # Match /api/rollback-data "eligible" definition (not pr_type=rollback).
             rollback_resp = requests.get(
                 f"{base}/rest/v1/drift_events"
-                f"?select=id&status=eq.open&pr_type=eq.rollback&account=eq.{scope}",
+                f"?select=id&account=eq.{scope}"
+                f"&status=in.(open,resolved)&changes_jsonb=not.is.null"
+                f"&pr_number=not.is.null&limit=1",
                 headers={**headers, "Prefer": "count=exact"}, timeout=10,
             )
             scan_resp = requests.get(
                 f"{base}/rest/v1/scan_runs"
-                f"?select=completed_at&scope=eq.{scope}&status=eq.complete"
+                f"?select=completed_at,result_summary&scope=eq.{scope}&status=eq.complete"
                 f"&completed_at=not.is.null&order=completed_at.desc&limit=1",
                 headers=headers, timeout=10,
             )
-            cost_resp = requests.get(
-                f"{base}/rest/v1/drift_events"
-                f"?select=cost_impact&status=eq.open&account=eq.{scope}",
-                headers=headers, timeout=10,
-            )
-            responses = (severity_resp, rollback_resp, scan_resp, cost_resp)
-            if any(resp.status_code != 200 for resp in responses):
+            if any(
+                resp.status_code not in (200, 206)
+                for resp in (severity_resp, rollback_resp, scan_resp)
+            ):
                 self._json_error(502, "Overview query failed")
                 return
 
-            cost = 0
-            for row in cost_resp.json() or []:
-                value = row.get("cost_impact")
-                if isinstance(value, str):
-                    try:
-                        value = json.loads(value)
-                    except json.JSONDecodeError:
-                        value = None
-                estimate = value.get("monthly_estimate_usd") if isinstance(value, dict) else None
-                if isinstance(estimate, (int, float)):
-                    cost += estimate
+            # Sum monthly cost across all open findings with cost_impact.
+            # Filter nulls and page so PostgREST max-rows cannot truncate
+            # the total (the old client-side sum had the same silent cap).
+            cost = 0.0
+            resource_count = 0
+            page_size = 1000
+            offset = 0
+            while True:
+                cost_resp = requests.get(
+                    f"{base}/rest/v1/drift_events"
+                    f"?select=cost_impact&status=eq.open&account=eq.{scope}"
+                    f"&cost_impact=not.is.null"
+                    f"&offset={offset}&limit={page_size}",
+                    headers=headers, timeout=10,
+                )
+                if cost_resp.status_code not in (200, 206):
+                    self._json_error(502, "Overview query failed")
+                    return
+                rows = cost_resp.json() or []
+                for row in rows:
+                    estimate = _monthly_estimate_usd(row.get("cost_impact"))
+                    if estimate is not None:
+                        cost += estimate
+                        resource_count += 1
+                if len(rows) < page_size:
+                    break
+                offset += page_size
+
+            content_range = rollback_resp.headers.get("Content-Range", "*/0")
+            try:
+                rollback_count = (
+                    int(content_range.rsplit("/", 1)[-1])
+                    if "/" in content_range and not content_range.endswith("/*")
+                    else len(rollback_resp.json() or [])
+                )
+            except (TypeError, ValueError):
+                rollback_count = len(rollback_resp.json() or [])
+
+            scan_rows = scan_resp.json() or []
+            scan_row = scan_rows[0] if scan_rows else {}
+            open_severity = severity_resp.json() or []
+            try:
+                open_count = sum(int(row.get("count") or 0) for row in open_severity)
+            except (TypeError, ValueError):
+                open_count = 0
 
             payload = {
-                "severity": severity_resp.json() or [],
-                "rollback_count": len(rollback_resp.json() or []),
-                "last_scan": (scan_resp.json() or [{}])[0].get("completed_at"),
-                "cost_impact": cost,
+                # Unresolved open tickets (status=open) — secondary signal.
+                "severity": open_severity,
+                "open_count": open_count,
+                "rollback_count": rollback_count,
+                "last_scan": scan_row.get("completed_at"),
+                # Primary "current drift" signal — matches Scan History.
+                "last_scan_drift": _last_scan_drift_summary(
+                    scan_row.get("result_summary"),
+                ),
+                "cost_impact": round(cost, 2),
+                "cost_resource_count": resource_count,
             }
         except (requests.RequestException, ValueError) as exc:
             self._json_error(502, f"Supabase unreachable: {exc}")
@@ -1231,40 +1396,28 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 rpc_results[name] = resp.json() or []
 
             since = (datetime.now(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
-            drift_only = {
-                "unmanaged": "eq.false",
-                "pr_type": "not.in.(unmanaged,security_only)",
-            }
-
-            def fetch_events(extra=None):
-                query = {"account": f"eq.{scope}", "created_at": f"gte.{since}", **drift_only}
-                query.update(extra or {})
-                return requests.get(
-                    f"{base}/rest/v1/drift_events", params={"select": "resource_id", **query},
-                    headers=headers, timeout=10,
-                )
-
-            responses = [
-                fetch_events(),
-                fetch_events({"status": "eq.resolved"}),
-                fetch_events({"status": "eq.open"}),
-                fetch_events({"pr_type": "eq.rollback"}),
-            ]
-            if any(resp.status_code != 200 for resp in responses):
+            # Single fetch so status buckets are mutually exclusive and sum
+            # to total (resolved + open + other). Rollback is a pr_type
+            # overlay counted from the same rows.
+            summary_resp = requests.get(
+                f"{base}/rest/v1/drift_events",
+                params={
+                    "select": "resource_id,status,pr_type",
+                    "account": f"eq.{scope}",
+                    "created_at": f"gte.{since}",
+                    "unmanaged": "eq.false",
+                    "pr_type": "not.in.(unmanaged,security_only)",
+                },
+                headers=headers, timeout=10,
+            )
+            if summary_resp.status_code != 200:
                 self._json_error(502, "Trends summary query failed")
                 return
-            all_rows, resolved_rows, open_rows, rollback_rows = [resp.json() or [] for resp in responses]
             data = json.dumps({
                 "most_drifted": rpc_results["get_most_drifted"],
                 "mttr": rpc_results["get_mttr_by_severity"],
                 "volume": rpc_results["get_drift_volume_daily"],
-                "summary": {
-                    "total": len(all_rows),
-                    "uniqueResources": len({row.get("resource_id") for row in all_rows}),
-                    "resolved": len(resolved_rows),
-                    "open": len(open_rows),
-                    "rollback": len(rollback_rows),
-                },
+                "summary": _trends_summary_from_rows(summary_resp.json() or []),
             }).encode("utf-8")
         except (requests.RequestException, ValueError) as exc:
             self._json_error(502, f"Supabase unreachable: {exc}")

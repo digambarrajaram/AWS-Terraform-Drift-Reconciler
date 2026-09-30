@@ -9,7 +9,19 @@ export interface MTTRRow { severity: string; avg_hours: number; count: number; }
 
 export interface VolumeRow { day: string; count: number; }
 
-export interface DriftSummary { total: number; uniqueResources: number; resolved: number; open: number; rollback: number; }
+export interface DriftSummary {
+  total: number;
+  uniqueResources: number;
+  /** status=resolved — exclusive status bucket */
+  resolved: number;
+  /** status=open — exclusive status bucket */
+  open: number;
+  /** All other statuses (reverted, suppressed, …) — exclusive; resolved+open+other=total */
+  other: number;
+  other_by_status?: Record<string, number>;
+  /** pr_type=rollback overlay (subset of total; not exclusive of status buckets) */
+  rollback: number;
+}
 
 // ── Shared helpers ─────────────────────────────────────────────────────────
 

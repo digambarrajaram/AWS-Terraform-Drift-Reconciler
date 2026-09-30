@@ -405,18 +405,31 @@ class ApprovalsMixin:
                 return
 
             # Record merge info on the pending row so the gate-failure
-            # revert path has the merge commit SHA available.
+            # revert path has the merge commit SHA available.  Patch by
+            # id (not pr_number+scope) and require a returned row —
+            # PostgREST 2xx with an empty body means zero rows matched,
+            # which left status=applied with Merged: — in the UI.
             merge_sha = (merge_result or {}).get("sha")
             merge_info = {"merged_at": datetime.now(timezone.utc).isoformat()}
             if merge_sha:
                 merge_info["merge_commit_sha"] = merge_sha
             try:
                 merge_info_resp = requests.patch(
-                    f"{table_url}?pr_number=eq.{pr_number}&scope=eq.{scope}",
+                    f"{table_url}?id=eq.{pending_id}",
                     headers=headers, json=merge_info, timeout=10,
                 )
-                if merge_info_resp.status_code >= 300:
-                    self._json_error(502, "PR merged, but merge metadata could not be recorded; apply was not started.")
+                updated = []
+                if merge_info_resp.status_code < 300 and merge_info_resp.text:
+                    try:
+                        updated = merge_info_resp.json() or []
+                    except ValueError:
+                        updated = []
+                if merge_info_resp.status_code >= 300 or not updated:
+                    self._json_error(
+                        502,
+                        "PR merged, but merge metadata could not be recorded; "
+                        "apply was not started.",
+                    )
                     return
             except requests.RequestException as exc:
                 print(f"  ⚠ pending row merge-info update failed: {exc}", file=sys.stderr)

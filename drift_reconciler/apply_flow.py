@@ -163,14 +163,16 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             import drift_history as _dh
             if is_revert:
                 _dh.mark_reverted(
-                    pr_number, scope, status="rejected",
+                    pr_number, scope, status="reverted",
                     resolution=("PR rejected — file-only PR "
                                 "(unmanaged/security), no AWS change needed"),
+                    force=True,
                 )
             else:
                 _dh.resolve_entry(
                     pr_number, scope,
                     "PR merged — file-only change applied (no terraform action)",
+                    force=True,
                 )
             # Revert writes 'reverted' — NOT 'rejected'.  The decision
             # handler already claimed this row with status='rejected' when
@@ -417,13 +419,18 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
 
         # Update drift_events to match the outcome.  Approve → resolved
         # (code now matches live AWS).  Revert → reverted (AWS reverted
-        # to match pre-drift code; PR was never merged).
+        # to match pre-drift code; PR was never merged).  force=True so a
+        # stale finding status cannot disagree with pending_applies.
         if is_revert:
             import drift_history as _dh
-            _dh.mark_reverted(pr_number, scope)
+            _dh.mark_reverted(pr_number, scope, force=True)
         else:
             import drift_history as _dh
-            _dh.resolve_entry(pr_number, scope, "PR merged via dashboard — code updated to match live AWS state")
+            _dh.resolve_entry(
+                pr_number, scope,
+                "PR merged via dashboard — code updated to match live AWS state",
+                force=True,
+            )
     except subprocess.TimeoutExpired as exc:
         print(f"[apply] timed out: {exc}")
         _finish("failed", {"error": f"timed out: {exc}"})

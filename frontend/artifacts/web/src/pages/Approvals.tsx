@@ -11,7 +11,7 @@ import { LogViewer } from '@/components/shared/LogViewer';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { apiFetch } from '@/api/apiFetch';
 import { useScope } from '@/hooks/useScope';
-import { runningLabel, decisionButtonLabel, decisionToast, isJobDone } from './approval-labels';
+import { runningLabel, decisionButtonLabel, decisionToast, isJobDone, statusLabel } from './approval-labels';
 import { useScanLogs } from '@/hooks/useScanLogs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '@/lib/errorUtils';
@@ -71,11 +71,15 @@ const PR_TYPE_LABEL: Record<string, string> = {
 // …) is only displayed once the backend job writes it.
 const RUNNING_STYLE = 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse';
 
-function displayStatus(status: PendingApply['status'], prType: PendingApply['pr_type']): { label: string; style: string } {
+function displayStatus(
+  status: PendingApply['status'],
+  prType: PendingApply['pr_type'],
+  mergedAt?: string | null,
+): { label: string; style: string } {
   const running = runningLabel(status, prType);
   return running
     ? { label: running, style: RUNNING_STYLE }
-    : { label: status.replace(/_/g, ' '), style: STATUS_STYLE[status] };
+    : { label: statusLabel(status, { mergedAt }), style: STATUS_STYLE[status] };
 }
 
 const STATUS_STYLE: Record<PendingApply['status'], string> = {
@@ -83,8 +87,10 @@ const STATUS_STYLE: Record<PendingApply['status'], string> = {
   approved:               'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
   rejected:               'bg-red-100    text-red-700    dark:bg-red-900/30 dark:text-red-400',
   excepted:               'bg-amber-100  text-amber-800  dark:bg-amber-900/30 dark:text-amber-300',
-  applied:                'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
-  reverted:               'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
+  // Accepted — align with finding status "Accepted" (resolved)
+  applied:                'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
+  // Reverted — align with finding status "Reverted" (was same blue as applied)
+  reverted:               'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
   failed:                 'bg-zinc-100   text-zinc-600   dark:bg-zinc-800  dark:text-zinc-400',
   cancelled:              'bg-slate-100  text-slate-700  dark:bg-slate-900/30 dark:text-slate-400',
   reverted_gate_blocked:  'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
@@ -245,8 +251,8 @@ function DetailDrawer({
             <SheetHeader className="mb-4">
               <SheetTitle className="text-base break-all flex items-center gap-2">
                 PR #{row.pr_number}
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${displayStatus(current.status, current.pr_type).style}`}>
-                  {displayStatus(current.status, current.pr_type).label}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${displayStatus(current.status, current.pr_type, current.merged_at).style}`}>
+                  {displayStatus(current.status, current.pr_type, current.merged_at).label}
                 </span>
               </SheetTitle>
             </SheetHeader>
@@ -266,7 +272,10 @@ function DetailDrawer({
                   ? <CheckCircle size={14} className="text-emerald-500" />
                   : <XCircle size={14} className="text-destructive" />}
                 <span className="text-xs text-muted-foreground">
-                  Job finished: {current.status.replace(/_/g, ' ')}
+                  Job finished: {statusLabel(current.status, { mergedAt: current.merged_at })}
+                  {current.status === 'applied' && current.applied_at && !current.merged_at
+                    ? ` · applied ${fmtDate(current.applied_at)}`
+                    : ''}
                 </span>
               </div>
             )}
@@ -635,14 +644,14 @@ export default function Approvals() {
             <table className="w-full text-sm min-w-[760px]">
               <thead>
                 <tr className="border-b border-border bg-muted/40 text-left">
-                  {['PR', 'Scope', 'Type', 'Merged', 'Status', 'Decided By', 'Decided At', ''].map((h) => (
+                  {['PR', 'Scope', 'Type', 'Merged', 'Apply status', 'Decided By', 'Decided At', ''].map((h) => (
                     <th key={h} className="px-4 py-2.5 text-xs font-medium text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {rows.map((row) => {
-                  const shown = displayStatus(row.status, row.pr_type);
+                  const shown = displayStatus(row.status, row.pr_type, row.merged_at);
                   const awaiting = row.status === 'awaiting_approval';
                   const claimRunning = row.status === 'approved' || row.status === 'rejected';
                   const showApprove = !(row.pr_type === 'security_only' && row.review_only);

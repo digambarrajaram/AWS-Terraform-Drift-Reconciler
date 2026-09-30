@@ -151,13 +151,27 @@ def append_entry(
     })
 
 
-def mark_reverted(pr_number: int, account: str, status: str = "reverted",
-                  resolution: str = "PR rejected — AWS reverted to match original code") -> None:
-    """Mark the open entry for *pr_number* as *status* (reject path: PR
-    never merged; 'reverted' only when AWS was actually reverted to match
-    pre-drift code, 'manual_revert_required' when a gate blocked it)."""
+def mark_reverted(
+    pr_number: int,
+    account: str,
+    status: str = "reverted",
+    resolution: str = "PR rejected — AWS reverted to match original code",
+    *,
+    force: bool = False,
+) -> None:
+    """Mark the entry for *pr_number* as *status* (reject path: PR never
+    merged; 'reverted' only when AWS was actually reverted to match
+    pre-drift code, 'manual_revert_required' when a gate blocked it).
+
+    When *force* is True (apply job finished), update by pr_number+account
+    even if the row is no longer ``open`` — keeps Approvals and PR Queue
+    from showing contradictory statuses after a retry or stale sync.
+    """
+    params: dict[str, Any] = {"pr_number": pr_number, "account": account}
+    if not force:
+        params["status"] = "open"
     ok = _patch(
-        {"pr_number": pr_number, "status": "open"},
+        params,
         {
             "status": status,
             "resolution": resolution,
@@ -170,13 +184,24 @@ def mark_reverted(pr_number: int, account: str, status: str = "reverted",
         print(f"  [history] Failed to mark PR #{pr_number} {status}")
 
 
-def resolve_entry(pr_number: int, account: str, resolution: str = "") -> None:
-    """Mark the open entry for *pr_number* as resolved.
+def resolve_entry(
+    pr_number: int,
+    account: str,
+    resolution: str = "",
+    *,
+    force: bool = False,
+) -> None:
+    """Mark the entry for *pr_number* as resolved (Accept outcome).
 
-    Uses Supabase PATCH with a filter on pr_number + status=open.
-    Only updates the most recent matching row (order=created_at.desc&limit=1)."""
+    By default only ``status=open`` rows are updated.  Pass *force=True*
+    from the apply job so a prior stale ``reverted`` / gate status cannot
+    leave PR Queue saying Reverted while Approvals says Accepted.
+    """
+    params: dict[str, Any] = {"pr_number": pr_number, "account": account}
+    if not force:
+        params["status"] = "open"
     ok = _patch(
-        {"pr_number": pr_number, "status": "open"},
+        params,
         {
             "status": "resolved",
             "resolution": resolution,

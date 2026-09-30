@@ -4,11 +4,23 @@ import { apiFetch } from '@/api/apiFetch';
 const POLL_MS = 60_000;
 
 type SeverityRow = { severity: string; count: number };
+
+export type LastScanDrift = {
+  count: number;
+  found: boolean;
+  skipped: boolean;
+  reason: string | null;
+  severity: SeverityRow[];
+};
+
 type OverviewPayload = {
   severity: SeverityRow[];
+  open_count?: number;
   rollback_count: number;
   last_scan: string | null;
+  last_scan_drift?: LastScanDrift;
   cost_impact: number;
+  cost_resource_count?: number;
 };
 
 /** Query keys for the Overview aggregate. */
@@ -30,16 +42,28 @@ export function useOverviewData(scope: string | null) {
     queryFn: () => apiFetch<OverviewPayload>(`/overview?scope=${encodeURIComponent(scope!)}`),
   });
 
+  // Disabled queries report isLoading=false — treat missing scope as loading
+  // so cards don't flash zeros before the default scope is applied.
   const metric = <T,>(data: T | undefined) => ({
     data,
     error: overview.error,
-    isLoading: overview.isLoading,
+    isLoading: !enabled || overview.isLoading,
     isSuccess: overview.isSuccess,
   });
   return {
+    /** Unresolved open-ticket severity breakdown (status=open). */
     severitySummary: metric(overview.data?.severity),
+    openCount: metric(
+      overview.data?.open_count
+        ?? (overview.data?.severity ?? []).reduce((n, r) => n + Number(r.count || 0), 0),
+    ),
+    /** Live findings from the latest completed scan — matches Scan History. */
+    lastScanDrift: metric(overview.data?.last_scan_drift ?? {
+      count: 0, found: false, skipped: false, reason: null, severity: [],
+    }),
     rollbackCount: metric(overview.data?.rollback_count),
     lastScan: metric(overview.data?.last_scan ?? null),
     costImpact: metric(overview.data?.cost_impact),
+    costResourceCount: metric(overview.data?.cost_resource_count ?? 0),
   };
 }

@@ -7,6 +7,8 @@
 // drift wording; manual is a no-diff review PR but stays on the default
 // strings until someone specifies its wording.
 
+import { applyStatusLabel } from '@/lib/statusLabels';
+
 type ClaimStatus = 'approved' | 'rejected' | 'excepted';
 
 const FILE_ONLY_RUNNING: Record<string, Partial<Record<'approved' | 'rejected', string>>> = {
@@ -43,6 +45,19 @@ const JOB_DONE = new Set(['applied', 'failed', 'cancelled', 'reverted',
 /** True when the row has reached a terminal status (poller should stop). */
 export function isJobDone(status: string | null | undefined): boolean {
   return status != null && JOB_DONE.has(status);
+}
+
+/**
+ * Human-readable Approvals status. Shared with PR Queue / Explorer via
+ * ``applyStatusLabel`` so Accept → "Accepted" and Reject → "Reverted"
+ * match finding-status wording. ``applied`` without ``merged_at`` becomes
+ * "Accepted, not merged".
+ */
+export function statusLabel(
+  status: string,
+  opts?: { mergedAt?: string | null },
+): string {
+  return applyStatusLabel(status, opts);
 }
 
 const FILE_ONLY_TYPES = new Set(['unmanaged', 'security_only', 'manual']);

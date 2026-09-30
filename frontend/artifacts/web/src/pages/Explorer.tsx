@@ -4,7 +4,7 @@ import {
   Search, ChevronUp, ChevronDown, ChevronsUpDown,
   ChevronLeft, ChevronRight, Inbox, LayoutList, LayoutGrid,
   ShieldCheck, ShieldX, DollarSign, ChevronDown as ExpandIcon,
-  ExternalLink, CalendarRange, RotateCcw,
+  ExternalLink, CalendarRange, RotateCcw, Server, Layers, Ban,
 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -18,6 +18,7 @@ import {
   type SortColumn, type DriftFilters, type DriftSort,
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
+import { findingStatusLabel } from '@/lib/statusLabels';
 
 // ── Badge maps ──────────────────────────────────────────────────────────────
 
@@ -39,11 +40,102 @@ const STATUS_CLS: Record<DriftEvent['status'], string> = {
 
 // ── Shared UI atoms ─────────────────────────────────────────────────────────
 
-function Badge({ value, map }: { value: string; map: Record<string, string> }) {
+function Badge({ value, map, label }: { value: string; map: Record<string, string>; label?: string }) {
   const cls = map[value] ?? 'bg-muted text-muted-foreground';
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${cls}`}>
-      {value}
+      {label ?? value}
+    </span>
+  );
+}
+
+function StatusBadge({ status }: { status: DriftEvent['status'] | string }) {
+  return <Badge value={status} map={STATUS_CLS} label={findingStatusLabel(status)} />;
+}
+
+/** Visual distinction: scan/security findings vs Terraform resource drift. */
+const TYPE_META: Record<string, {
+  label: string;
+  icon: React.ElementType;
+  cls: string;
+  kind: 'scan' | 'resource';
+}> = {
+  security_only: {
+    label: 'Security',
+    icon: ShieldCheck,
+    cls: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300',
+    kind: 'scan',
+  },
+  manual: {
+    label: 'Manual review',
+    icon: ShieldCheck,
+    cls: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300',
+    kind: 'scan',
+  },
+  unmanaged: {
+    label: 'Unmanaged',
+    icon: Ban,
+    cls: 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300',
+    kind: 'resource',
+  },
+  rollback: {
+    label: 'Rollback',
+    icon: RotateCcw,
+    cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
+    kind: 'resource',
+  },
+  batch: {
+    label: 'Batch',
+    icon: Layers,
+    cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
+    kind: 'resource',
+  },
+  fix: {
+    label: 'Fix',
+    icon: Server,
+    cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
+    kind: 'resource',
+  },
+};
+
+function TypeBadge({ prType }: { prType: string | null | undefined }) {
+  if (!prType) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const meta = TYPE_META[prType];
+  if (!meta) {
+    return (
+      <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground capitalize">
+        {prType.replace(/_/g, ' ')}
+      </span>
+    );
+  }
+  const Icon = meta.icon;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}
+      title={meta.kind === 'scan' ? 'Security scan finding (not resource drift)' : 'Resource drift finding'}
+    >
+      <Icon size={11} className="shrink-0" />
+      {meta.label}
+    </span>
+  );
+}
+
+function ResourceCell({ resourceId, prType }: { resourceId: string; prType: string | null | undefined }) {
+  const isScan = prType === 'security_only' || prType === 'manual';
+  return (
+    <span className="flex items-center gap-1.5 min-w-0" title={resourceId}>
+      {isScan && (
+        <ShieldCheck
+          size={12}
+          className="shrink-0 text-teal-600 dark:text-teal-400"
+          aria-label="Security scan finding"
+        />
+      )}
+      <span className={`block truncate ${isScan ? 'text-teal-900 dark:text-teal-200' : ''}`}>
+        {resourceId}
+      </span>
     </span>
   );
 }
@@ -120,9 +212,9 @@ function EventDetail({ e }: { e: DriftEvent }) {
       <section className="space-y-3">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground border-b border-border pb-1">General</h3>
         <div className="grid grid-cols-2 gap-3">
-          {kv('Status',   <Badge value={e.status} map={STATUS_CLS} />)}
+          {kv('Finding status', <StatusBadge status={e.status} />)}
           {kv('Severity', <Badge value={e.severity} map={SEV_CLS} />)}
-          {kv('Type',     e.pr_type ?? '—')}
+          {kv('Type',     <TypeBadge prType={e.pr_type} />)}
           {kv('Region',   e.region)}
           {kv('Account',  e.account)}
           {kv('File',     e.file_path)}
@@ -281,12 +373,8 @@ function DriftCard({
         {/* Badges row */}
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge value={event.severity} map={SEV_CLS} />
-          <Badge value={event.status}   map={STATUS_CLS} />
-          {event.pr_type && (
-            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground capitalize">
-              {event.pr_type}
-            </span>
-          )}
+          <StatusBadge status={event.status} />
+          {event.pr_type && <TypeBadge prType={event.pr_type} />}
           {event.pr_number && (
             <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-primary">
               <ExternalLink size={9} /> #{event.pr_number}
@@ -294,9 +382,9 @@ function DriftCard({
           )}
         </div>
 
-        {/* Resource ID */}
+        {/* Resource ID — shield cue for security/scan findings */}
         <p className="font-mono text-sm font-semibold text-foreground break-all leading-tight">
-          {event.resource_id}
+          <ResourceCell resourceId={event.resource_id} prType={event.pr_type} />
         </p>
 
         {/* Meta row */}
@@ -443,10 +531,10 @@ function FilterBar({
           onChange={(e) => onFilters({ statusFilter: e.target.value })} className={selectCls}>
           <option value="all">All statuses</option>
           <option value="open">Open</option>
-          <option value="resolved">Resolved</option>
+          <option value="resolved">Accepted</option>
           <option value="suppressed">Suppressed</option>
           <option value="reverted">Reverted</option>
-          <option value="manual_revert_required">Manual revert required</option>
+          <option value="manual_revert_required">Manual action needed</option>
         </select>
 
         {/* Severity */}
@@ -779,7 +867,7 @@ export default function Explorer() {
                   <SortTh col="resource_id" label="Resource"  sort={sort} onSort={handleSort} />
                   <SortTh col="severity"    label="Severity"  sort={sort} onSort={handleSort} />
                   <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Type</th>
-                  <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Status</th>
+                  <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Finding status</th>
                   <SortTh col="created_at"  label="Created"   sort={sort} onSort={handleSort} />
                   <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">PR</th>
                 </tr>
@@ -806,16 +894,16 @@ export default function Explorer() {
                       ].join(' ')}
                     >
                       <td className="px-4 py-3 font-mono text-xs max-w-[240px]">
-                        <span className="block truncate" title={ev.resource_id}>{ev.resource_id}</span>
+                        <ResourceCell resourceId={ev.resource_id} prType={ev.pr_type} />
                       </td>
                       <td className="px-4 py-3">
                         <Badge value={ev.severity} map={SEV_CLS} />
                       </td>
-                      <td className="px-4 py-3 text-xs text-muted-foreground capitalize">
-                        {ev.pr_type ?? '—'}
+                      <td className="px-4 py-3">
+                        <TypeBadge prType={ev.pr_type} />
                       </td>
                       <td className="px-4 py-3">
-                        <Badge value={ev.status} map={STATUS_CLS} />
+                        <StatusBadge status={ev.status} />
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                         <span title={safeDate(ev.created_at)}>

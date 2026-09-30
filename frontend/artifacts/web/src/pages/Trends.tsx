@@ -120,27 +120,52 @@ interface TileProps {
   value:   number | string;
   icon:    React.ReactNode;
   accent?: string;
+  hint?:   string;
 }
 
-function StatTile({ label, value, icon, accent }: TileProps) {
+function StatTile({ label, value, icon, accent, hint }: TileProps) {
   return (
     <div className="rounded-xl border border-border bg-card p-4 flex items-center gap-3">
       <div className={`flex h-9 w-9 items-center justify-center rounded-lg shrink-0 ${accent ?? 'bg-muted text-muted-foreground'}`}>
         {icon}
       </div>
-      <div>
+      <div className="min-w-0">
         <p className="text-[11px] text-muted-foreground leading-none mb-1">{label}</p>
         <p className="text-xl font-semibold text-foreground leading-none">{value}</p>
+        {hint && (
+          <p className="mt-1 text-[10px] text-muted-foreground leading-snug truncate" title={hint}>
+            {hint}
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
+function otherHint(s: DriftSummary): string {
+  const by = s.other_by_status ?? {};
+  const parts: string[] = [];
+  for (const key of ['reverted', 'manual_revert_required', 'suppressed', 'unknown']) {
+    const n = by[key] ?? 0;
+    if (n > 0) {
+      const label = key === 'manual_revert_required' ? 'manual revert' : key;
+      parts.push(`${n} ${label}`);
+    }
+  }
+  // Any statuses outside the known set (forward-compatible).
+  for (const [key, n] of Object.entries(by)) {
+    if (['reverted', 'manual_revert_required', 'suppressed', 'unknown'].includes(key)) continue;
+    if (n > 0) parts.push(`${n} ${key}`);
+  }
+  if (parts.length === 0) return 'Reverted, suppressed, and other non-open statuses';
+  return parts.join(' · ');
+}
+
 function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefined; loading: boolean; error?: Error | null }) {
   if (loading) {
     return (
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        {[...Array(5)].map((_, i) => (
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6">
+        {[...Array(6)].map((_, i) => (
           <div key={i} className="rounded-xl border border-border bg-card p-4">
             <Skeleton className="h-9 w-9 rounded-lg mb-3" />
             <Skeleton className="h-3 w-20 mb-2" />
@@ -155,40 +180,57 @@ function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefi
     return <p className="text-sm text-destructive">Unable to load trend summary: {errorMessage(error)}</p>;
   }
 
-  const s = summary ?? { total: 0, uniqueResources: 0, resolved: 0, open: 0, rollback: 0 };
+  const s = summary ?? {
+    total: 0, uniqueResources: 0, resolved: 0, open: 0, other: 0, rollback: 0,
+  };
+  // Prefer server `other`; fall back so older payloads still add up.
+  const other = s.other ?? Math.max(0, s.total - s.resolved - s.open);
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-      <StatTile
-        label="Total Drifts"
-        value={s.total.toLocaleString()}
-        icon={<Activity size={16} />}
-        accent="bg-primary/10 text-primary"
-      />
-      <StatTile
-        label="Unique Resources"
-        value={s.uniqueResources.toLocaleString()}
-        icon={<Layers size={16} />}
-        accent="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
-      />
-      <StatTile
-        label="Resolved"
-        value={s.resolved.toLocaleString()}
-        icon={<CheckCircle size={16} />}
-        accent="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
-      />
-      <StatTile
-        label="Unresolved"
-        value={s.open.toLocaleString()}
-        icon={<Clock size={16} />}
-        accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
-      />
-      <StatTile
-        label="Rollback Events"
-        value={s.rollback.toLocaleString()}
-        icon={<GitPullRequest size={16} />}
-        accent="bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
-      />
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6">
+        <StatTile
+          label="Total Drifts"
+          value={s.total.toLocaleString()}
+          hint="Resolved + Unresolved + Other"
+          icon={<Activity size={16} />}
+          accent="bg-primary/10 text-primary"
+        />
+        <StatTile
+          label="Unique Resources"
+          value={s.uniqueResources.toLocaleString()}
+          icon={<Layers size={16} />}
+          accent="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
+        />
+        <StatTile
+          label="Resolved"
+          value={s.resolved.toLocaleString()}
+          hint="status = resolved"
+          icon={<CheckCircle size={16} />}
+          accent="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+        />
+        <StatTile
+          label="Unresolved"
+          value={s.open.toLocaleString()}
+          hint="status = open"
+          icon={<Clock size={16} />}
+          accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+        />
+        <StatTile
+          label="Other"
+          value={other.toLocaleString()}
+          hint={otherHint({ ...s, other })}
+          icon={<AlertTriangle size={16} />}
+          accent="bg-zinc-100 text-zinc-600 dark:bg-zinc-900/30 dark:text-zinc-400"
+        />
+        <StatTile
+          label="Rollback type"
+          value={s.rollback.toLocaleString()}
+          hint="Subset of total (overlaps status buckets)"
+          icon={<GitPullRequest size={16} />}
+          accent="bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+        />
+      </div>
     </div>
   );
 }
@@ -369,7 +411,7 @@ export default function Trends() {
         {/* MTTR by Severity */}
         <ChartCard
           title="Mean Time to Resolve by Severity"
-          subtitle="Resolved fix events in the selected period — not current open drift counts"
+          subtitle="Only resolved fix/batch PRs with resolved_at set — excludes rollbacks and Other statuses (counts on bars ≠ Resolved tile)"
           loading={mttr.isLoading}
           error={mttr.error as Error | null}
           empty={!mttr.isLoading && (mttr.data?.length ?? 0) === 0}

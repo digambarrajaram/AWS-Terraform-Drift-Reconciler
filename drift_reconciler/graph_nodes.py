@@ -193,6 +193,7 @@ def drift_alert(state: State):
 
     # PagerDuty → one page per finding.
     pd_sent = 0
+    pd_errors: list[str] = []
     for finding in pd_findings:
         if finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
             event_type = "Unmanaged resource"
@@ -208,16 +209,32 @@ def drift_alert(state: State):
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
             account_label=_ag._account_label,
+            error_detail=pd_errors,
         )
         if result:  # PagerDuty returns {} on failure, non-empty dict on dispatch
             pd_sent += 1
+            print(f"  [alert_agent] PagerDuty accepted: {finding['resource_id']}")
+        else:
+            print(f"  [alert_agent] PagerDuty FAILED for {finding['resource_id']}")
 
     # Slack → batched.
     slack_sent = 0
     if slack_findings:
         slack_sent = slack.notify_all(slack_findings, _ag._account_label)
 
-    return {"messages": [], "alerts_sent": {"pagerduty": pd_sent, "slack": slack_sent}}
+    alerts_payload: dict = {"pagerduty": pd_sent, "slack": slack_sent}
+    if pd_errors:
+        # De-dupe while preserving order — same missing-key error can repeat.
+        seen: set[str] = set()
+        unique_errs = []
+        for e in pd_errors:
+            if e not in seen:
+                seen.add(e)
+                unique_errs.append(e)
+        alerts_payload["errors"] = unique_errs
+        print(f"  [alert_agent] PagerDuty errors: {unique_errs}")
+
+    return {"messages": [], "alerts_sent": alerts_payload}
 def drift_pr_from_finding(state: State):
     import agent as _ag
     _ag.report_stage(state.get("run_id"), "drift_pr")

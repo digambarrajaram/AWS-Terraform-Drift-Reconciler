@@ -21,6 +21,11 @@ class State(TypedDict, total=False):
     scan_mode: str
     run_id: str | None
     terraform_failed: bool
+    # Returned by alert_agent / drift_pr — MUST be declared or LangGraph ≥1.x
+    # silently drops them from stream/invoke updates (scan summary then
+    # always shows alerts_sent=0 and empty pr_links).
+    alerts_sent: dict
+    pr_urls: list
 
 
 def map_risk(security_impact) -> str:

@@ -25,13 +25,19 @@ workflow.add_conditional_edges(
 )
 workflow.add_conditional_edges(
     "unmanaged_scan",
-    lambda state: "drift_pr" if state.get("scan_mode") == "unmanaged_only" else "reconcile_agent",
-    {"drift_pr": "drift_pr", "reconcile_agent": "reconcile_agent"},
+    # unmanaged_only used to jump straight to drift_pr, skipping alerts.
+    lambda state: "alert_agent" if state.get("scan_mode") == "unmanaged_only" else "reconcile_agent",
+    {"alert_agent": "alert_agent", "reconcile_agent": "reconcile_agent"},
 )
 workflow.add_edge("reconcile_agent", "trivy_gate")
 workflow.add_edge("trivy_gate", "alert_agent")
 workflow.add_edge("trivy_gate", "drift_pr")
-workflow.add_edge("alert_agent", END)
+# unmanaged_only: alert first, then open PRs (drift path fans out in parallel above).
+workflow.add_conditional_edges(
+    "alert_agent",
+    lambda state: "drift_pr" if state.get("scan_mode") == "unmanaged_only" else END,
+    {"drift_pr": "drift_pr", END: END},
+)
 workflow.add_edge("drift_pr", END)
 
 graph = workflow.compile()

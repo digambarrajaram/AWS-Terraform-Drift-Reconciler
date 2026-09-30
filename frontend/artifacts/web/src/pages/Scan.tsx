@@ -267,9 +267,16 @@ function ScanResult({ run }: { run: ScanRun }) {
       )}
 
       {rs?.alerts_sent && !failed && (
-        <div className="flex gap-4 text-xs text-muted-foreground">
-          <span>PagerDuty alerts: <strong className="text-foreground">{rs.alerts_sent.pagerduty}</strong></span>
-          <span>Slack alerts: <strong className="text-foreground">{rs.alerts_sent.slack}</strong></span>
+        <div className="space-y-1">
+          <div className="flex gap-4 text-xs text-muted-foreground">
+            <span>PagerDuty alerts: <strong className="text-foreground">{rs.alerts_sent.pagerduty}</strong></span>
+            <span>Slack alerts: <strong className="text-foreground">{rs.alerts_sent.slack}</strong></span>
+          </div>
+          {Array.isArray(rs.alerts_sent.errors) && rs.alerts_sent.errors.length > 0 && (
+            <p className="text-xs text-destructive">
+              Alert errors: {rs.alerts_sent.errors.join('; ')}
+            </p>
+          )}
         </div>
       )}
 

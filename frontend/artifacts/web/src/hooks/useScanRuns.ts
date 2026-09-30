@@ -41,6 +41,7 @@ export interface ScanRun {
     alerts_sent?: {
       pagerduty: number;
       slack: number;
+      errors?: string[];
     };
   } | null;
   pr_links: string[] | null;

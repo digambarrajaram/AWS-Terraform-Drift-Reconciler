@@ -636,11 +636,14 @@ if __name__ == "__main__":
                 urls = data.get("pr_urls") or []
                 if urls:
                     _all_pr_urls = urls
-                alerts = data.get("alerts_sent") or {}
-                if alerts.get("pagerduty"):
-                    _pd_alerts_sent = alerts["pagerduty"]
-                if alerts.get("slack"):
-                    _slack_messages_sent = alerts["slack"]
+                alerts = data.get("alerts_sent")
+                # LangGraph may emit the alert node with pagerduty=0; still
+                # record it so the summary reflects that the stage ran.
+                if isinstance(alerts, dict):
+                    if "pagerduty" in alerts:
+                        _pd_alerts_sent = int(alerts.get("pagerduty") or 0)
+                    if "slack" in alerts:
+                        _slack_messages_sent = int(alerts.get("slack") or 0)
 
         # Mark scan as complete.
         if _run_id:
@@ -677,6 +680,10 @@ if __name__ == "__main__":
             if args.scan_mode in ("drift_and_unmanaged", "unmanaged_only"):
                 summary["unmanaged"] = unmanaged_block
             summary["alerts_sent"] = {"pagerduty": _pd_alerts_sent, "slack": _slack_messages_sent}
+            print(
+                f"  [scan] alerts_sent: pagerduty={_pd_alerts_sent} "
+                f"slack={_slack_messages_sent}"
+            )
 
             update_scan_run(
                 _run_id,

@@ -72,6 +72,11 @@ class AlertStateSchemaTests(unittest.TestCase):
             # PagerDuty-routed findings also fan out to Slack.
             mock_slack.assert_called_once()
             self.assertEqual(len(mock_slack.call_args[0][0]), 2)
+            # Drift pages use critical + a non-stable dedup (not bare drift-<id>).
+            kwargs = mock_pd.call_args.kwargs
+            self.assertEqual(kwargs.get("severity"), "critical")
+            self.assertIn("dedup_key", kwargs)
+            self.assertNotEqual(kwargs["dedup_key"], "drift-aws_s3_bucket.b")
         finally:
             ag._account_label = prev
 

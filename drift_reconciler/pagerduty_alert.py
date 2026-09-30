@@ -8,13 +8,20 @@ def trigger_pagerduty_alert(
     dedup_key: str = None,
     account_label: str = None,
     error_detail: list[str] | None = None,
+    custom_details: dict | None = None,
 ) -> dict:
     """Trigger a PagerDuty alert.
 
     When *account_label* is supplied the summary and dedup_key are
     automatically scoped so identical resource addresses in different
     accounts never collide (dedup) and operators can tell at a glance
-    which account is affected (summary)."""
+    which account is affected (summary).
+
+    Note: Events API v2 with a *dedup_key* that matches an already-open
+    incident returns 202 but does **not** re-fire phone/SMS notifications.
+    Dashboard "Send Test" omits dedup_key so it always pages — drift alerts
+    must use a key that changes when a new page is desired.
+    """
     routing_key = ""
     try:
         try:
@@ -42,14 +49,17 @@ def trigger_pagerduty_alert(
         "routing_key": routing_key,
         "event_action": "trigger",
         "payload": {
-            "summary": summary,
+            "summary": summary[:1024],
             "severity": severity,
             "source": source,
-            "component": "Infrastructure Drift Monitor"
+            "component": "Infrastructure Drift Monitor",
         }
     }
+    if custom_details:
+        payload["payload"]["custom_details"] = custom_details
     if dedup_key:
-        payload["dedup_key"] = dedup_key
+        # PagerDuty hard-limits dedup_key to 255 chars.
+        payload["dedup_key"] = dedup_key[:255]
 
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     try:
@@ -60,7 +70,12 @@ def trigger_pagerduty_alert(
             if error_detail is not None:
                 error_detail.append(msg)
             return {}
-        return response.json()
+        body = response.json()
+        print(
+            f"[pagerduty] enqueued status={body.get('status')!r} "
+            f"dedup_key={dedup_key!r} severity={severity!r}"
+        )
+        return body
     except requests.exceptions.RequestException as e:
         msg = f"PagerDuty request failed: {e}"
         print(f"[Network Error] {e}")

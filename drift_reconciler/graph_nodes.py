@@ -173,6 +173,34 @@ def _finding_channel(rules: dict[str, str], finding: dict) -> str:
     return rules.get(sev) or rules.get(raw) or "none"
 
 
+def _pd_dedup_key(finding: dict, run_id: str | None = None) -> str:
+    """Build a dedup key that still allows phone pages on new scans.
+
+    Dashboard Send Test omits dedup_key → always pages.
+    A stable ``drift-<resource>`` key matches an open incident and PagerDuty
+    accepts the event (202) **without** re-calling. Fingerprint the drift
+    payload and include UTC day (+ run_id when present) so a scan pages at
+    least once per day even if the prior incident is still open.
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    rid = finding.get("resource_id") or "unknown"
+    fingerprint = (
+        finding.get("drift_summary")
+        or finding.get("plan_output")
+        or json.dumps(finding.get("changes") or {}, sort_keys=True, default=str)
+    )
+    digest = hashlib.sha256(str(fingerprint).encode("utf-8")).hexdigest()[:10]
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    # Include a short run suffix so two scans the same day still page when
+    # the operator is actively re-testing; keep it short for the 255 limit.
+    run_suffix = ""
+    if run_id:
+        run_suffix = "-" + str(run_id).replace("-", "")[-8:]
+    return f"drift-{rid}-{digest}-{day}{run_suffix}"
+
+
 def drift_alert(state: State):
     import agent as _ag
     _ag.report_stage(state.get("run_id"), "alert_agent")
@@ -215,29 +243,52 @@ def drift_alert(state: State):
             f"risk={f.get('risk_level')!r} → {_finding_channel(rules, f)}"
         )
 
-    # PagerDuty → one page per finding.
-    pd_sent = 0
     alert_errors: list[str] = []
+    if active and not pd_findings:
+        alert_errors.append(
+            "No findings routed to PagerDuty (Slack-only or silenced). "
+            "Send Test always pages and bypasses severity rules — set HIGH/MEDIUM/LOW "
+            "→ PagerDuty on Alerts and Save each row."
+        )
+
+    # PagerDuty → one page per finding.
+    # Use severity=critical so PD high-urgency phone/SMS rules fire.
+    # Dedup includes drift fingerprint + day + run so we don't silently no-op
+    # against an already-open incident the way a stable drift-<resource> key did
+    # (Send Test has no dedup_key → always called; drift alerts did not).
+    pd_sent = 0
+    run_id = state.get("run_id")
     for finding in pd_findings:
         if finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
             event_type = "Unmanaged resource"
         else:
             event_type = "Drift detected"
-        summary = f"{event_type}: {finding['resource_id']}"
+        risk = finding.get("risk_level") or "LOW"
+        summary = f"{event_type}: {finding['resource_id']} [{risk}]"
         cost = finding.get("cost_impact")
         if cost:
             summary += f" (${cost['monthly_estimate_usd']:.2f}/mo)"
+        dedup = _pd_dedup_key(finding, run_id)
         result = pga.trigger_pagerduty_alert(
             summary=summary,
-            severity="error",
+            severity="critical",
             source="terraform-drift-engine",
-            dedup_key=f"drift-{finding['resource_id']}",
+            dedup_key=dedup,
             account_label=_ag._account_label,
             error_detail=alert_errors,
+            custom_details={
+                "resource_id": finding.get("resource_id"),
+                "risk_level": risk,
+                "account": _ag._account_label,
+                "run_id": run_id,
+            },
         )
         if result:  # PagerDuty returns {} on failure, non-empty dict on dispatch
             pd_sent += 1
-            print(f"  [alert_agent] PagerDuty accepted: {finding['resource_id']}")
+            print(
+                f"  [alert_agent] PagerDuty accepted: {finding['resource_id']} "
+                f"dedup={dedup!r}"
+            )
         else:
             print(f"  [alert_agent] PagerDuty FAILED for {finding['resource_id']}")
 

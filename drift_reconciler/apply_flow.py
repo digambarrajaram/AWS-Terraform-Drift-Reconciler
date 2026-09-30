@@ -76,6 +76,10 @@ def _revert_on_gate_failure(
         print(f"[apply] Reverting merge commit {sha} on {branch} …")
         _git(["config", "user.name", "drift-reconciler"])
         _git(["config", "user.email", "drift-reconciler@noreply"])
+        # Sync to remote tip first — a stale local main causes
+        # non-fast-forward push rejection after revert.
+        _git(["fetch", "origin", branch], timeout=120)
+        _git(["checkout", "-B", branch, f"origin/{branch}"])
         _git(["revert", "--no-edit", "-m", "1", sha])
         _git(["push", "origin", branch], timeout=300)
         print("[apply] ✓ Revert pushed — code and live state are consistent again.")
@@ -195,9 +199,16 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
 
         sub_env = _resolve_env_credentials(env_dict, tf_dir=tf_dir)
 
-        mode_label = "reverting drift" if is_revert else "applying accepted drift"
+        from drift_reconciler.drift_history import get_pr_type
+        pr_type = get_pr_type(pr_number, scope)
+        if is_revert:
+            mode_label = "reverting drift"
+        elif pr_type == "rollback":
+            mode_label = "applying rollback"
+        else:
+            mode_label = "applying accepted drift"
         print(f"\n--- {mode_label} for PR #{pr_number} ({scope}) ---")
-        
+
         # Build backend_config dict from environment row
         backend_config = {}
         if env_dict:
@@ -301,20 +312,25 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             )
             return
 
-        # Gate A: pre-apply drift gate.  Only meaningful for normal applies
-        # — a revert's whole purpose is fixing existing drift, so open rows
-        # are expected and must not block it (Gate B below is the
-        # revert-specific check: the plan must match the stored baseline).
+        # Gate A: pre-apply drift gate.  Only meaningful for normal fix
+        # applies — reject-revert and merged rollback PRs exist to fix
+        # existing drift, so open rows must not block them (Gate B is
+        # the freshness check for those paths).
         # Excludes this PR's own rows (they stay 'open' until the
         # post-apply resolve step — including them would fail every apply).
         # Open rows are detection-time state, so re-verify them against
         # the live plan: a resource fixed in AWS since the scan no longer
         # appears in the plan and must not block this apply.
         from drift_reconciler.drift_history import get_open_resources, load_baselines
-        from drift_baseline import is_deleted_externally_baseline, verify_deleted_externally_plan
-        from drift_baseline import plan_field_baseline_token
+        from drift_baseline import check_baseline_freshness
         from rollback_check import _extract_field_values, live_drift_rows
-        if not is_revert:
+
+        # Merged rollback PRs use is_revert=False (Accept path) but store
+        # reversed_changes — Gate B must use rollback semantics or it
+        # treats still-drifted live state as "stale".
+        rollback_semantics = bool(is_revert or pr_type == "rollback")
+
+        if not rollback_semantics:
             open_rows = get_open_resources(scope, except_pr_number=pr_number)
             if open_rows:
                 live_drift = live_drift_rows(open_rows, plan_json)
@@ -324,89 +340,15 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                         + ", ".join(str(r.get("resource_id")) for r in live_drift[:5])
                     )
 
-        # Gate B: rollback freshness gate — compare live values from the
-        # plan JSON against the stored baseline (changes_jsonb) for this
-        # PR.  Shape confirmed from rollback_check.py's comparison loop
-        # and drift_history.load_baselines().
+        # Gate B: freshness gate — compare live plan values against the
+        # stored baseline (changes_jsonb) for this PR.
         if not gate_failure:
-            baselines = load_baselines(pr_number, scope)
-            if not baselines:
-                # Fail closed: load_baselines returns [] when the PR has no
-                # changes_jsonb rows, when every row's changes_jsonb is
-                # NULL, or when the baseline fetch itself failed — in all
-                # three the plan can't be verified against recorded state,
-                # so the revert must not apply unverified.  (Previously
-                # `if baselines:` silently skipped the entire gate.)
-                gate_failure = (
-                    "rollback_check: no usable baseline for this PR — "
-                    "cannot verify revert safety"
-                )
-            else:
-                for baseline in baselines:
-                    resource_id = baseline["resource_id"]
-                    changes = baseline.get("changes") or {}
-                    if is_deleted_externally_baseline(changes):
-                        err = verify_deleted_externally_plan(
-                            plan_json, resource_id, is_revert=is_revert,
-                        )
-                        if err:
-                            gate_failure = err
-                            break
-                        continue
-                    fields = list(changes.keys())
-                    if not fields:
-                        # Fail closed too: a baseline with no recorded field
-                        # changes verifies nothing — don't skip the check.
-                        gate_failure = (
-                            f"rollback_check: baseline for {resource_id} has "
-                            f"no recorded field changes — cannot verify revert safety"
-                        )
-                        break
-                    outcome, live_values = _extract_field_values(plan_json, resource_id, fields)
-                    if outcome == "not_found":
-                        # Fail closed: the resource this baseline was recorded
-                        # for isn't in the plan at all (absent from state, or
-                        # being created) — there are no live values to verify
-                        # against, so its baseline fields went unchecked.
-                        gate_failure = (
-                            f"rollback_check: baseline for {resource_id} not "
-                            f"found in current plan — cannot verify revert safety"
-                        )
-                        break
-                    if outcome == "no_diff":
-                        # Legitimate skip: the resource IS in the plan with
-                        # live state already equal to the rollback target —
-                        # nothing to revert, nothing unverified.  Mirrors
-                        # rollback_check.py's "already matches rollback
-                        # target — nothing to apply" no-op.
-                        continue
-                    for field in fields:
-                        # Drift convention: before=IaC, after=live-at-capture.
-                        # Accept (fix PR): live must still be baseline "after".
-                        # Revert (rollback PR): live may be "after" (still
-                        # drifted) or "before" (already restored) — any third
-                        # value means intervening change, fail closed.
-                        # Rollback PRs store reversed_changes, so their
-                        # "before" is the drifted value and "after" the IaC.
-                        if is_revert:
-                            expected = {
-                                plan_field_baseline_token(field, changes[field].get("before")),
-                                plan_field_baseline_token(field, changes[field].get("after")),
-                            }
-                        else:
-                            expected = {
-                                plan_field_baseline_token(field, changes[field].get("after")),
-                            }
-                        actual = live_values.get(field, "<missing>")
-                        if actual not in expected:
-                            gate_failure = (
-                                f"rollback_check: stale field {resource_id}.{field} "
-                                f"(expected={'|'.join(sorted(expected))[:60]} "
-                                f"actual={actual[:60]})"
-                            )
-                            break
-                    if gate_failure:
-                        break
+            gate_failure = check_baseline_freshness(
+                plan_json,
+                load_baselines(pr_number, scope),
+                rollback_semantics=rollback_semantics,
+                extract_field_values=_extract_field_values,
+            )
 
         if gate_failure:
             print(f"[apply] ⛔ Gate failed: {gate_failure}")

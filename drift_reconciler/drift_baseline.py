@@ -113,3 +113,82 @@ def verify_deleted_externally_plan(
         f"rollback_check: unexpected plan for deleted_externally fix on "
         f"{resource_id} — got {sorted(actions)}"
     )
+
+
+def freshness_expected_tokens(
+    field: str,
+    field_change: dict,
+    *,
+    rollback_semantics: bool,
+) -> set[str]:
+    """Live values Gate B accepts for one baseline field.
+
+    Fix/accept PRs: live must still equal capture-time ``after`` (drift
+    convention: after = live AWS).
+
+    Reject reverts and merged rollback PRs store (or use) reversed
+    before/after — live may still be the drifted value or already match
+    the IaC target.  Either is fine; a third value is stale.
+    """
+    before = plan_field_baseline_token(field, field_change.get("before"))
+    after = plan_field_baseline_token(field, field_change.get("after"))
+    if rollback_semantics:
+        return {before, after}
+    return {after}
+
+
+def check_baseline_freshness(
+    plan_json: dict,
+    baselines: list[dict],
+    *,
+    rollback_semantics: bool,
+    extract_field_values,
+) -> str | None:
+    """Gate B: return a failure message, or None when every baseline is fresh.
+
+    ``extract_field_values`` is ``rollback_check._extract_field_values``
+    (injected to avoid an import cycle from that module).
+    """
+    if not baselines:
+        return (
+            "rollback_check: no usable baseline for this PR — "
+            "cannot verify revert safety"
+        )
+
+    for baseline in baselines:
+        resource_id = baseline["resource_id"]
+        changes = baseline.get("changes") or {}
+        if is_deleted_externally_baseline(changes):
+            err = verify_deleted_externally_plan(
+                plan_json, resource_id, is_revert=rollback_semantics,
+            )
+            if err:
+                return err
+            continue
+        fields = list(changes.keys())
+        if not fields:
+            return (
+                f"rollback_check: baseline for {resource_id} has "
+                f"no recorded field changes — cannot verify revert safety"
+            )
+        outcome, live_values = extract_field_values(plan_json, resource_id, fields)
+        if outcome == "not_found":
+            return (
+                f"rollback_check: baseline for {resource_id} not "
+                f"found in current plan — cannot verify revert safety"
+            )
+        if outcome == "no_diff":
+            # Live already matches the planned code — nothing unverified.
+            continue
+        for field in fields:
+            expected = freshness_expected_tokens(
+                field, changes[field], rollback_semantics=rollback_semantics,
+            )
+            actual = live_values.get(field, "<missing>")
+            if actual not in expected:
+                return (
+                    f"rollback_check: stale field {resource_id}.{field} "
+                    f"(expected={'|'.join(sorted(expected))[:60]} "
+                    f"actual={actual[:60]})"
+                )
+    return None

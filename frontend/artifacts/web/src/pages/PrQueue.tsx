@@ -9,6 +9,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet';
+import {
+  FindingStatusBadge, TypeBadge, ResourceCell,
+} from '@/components/shared/FindingBadges';
 import { useScope } from '@/hooks/useScope';
 import { useEnvironments } from '@/hooks/useEnvironments';
 import { useAppConfig } from '@/api/config';
@@ -16,7 +19,6 @@ import {
   useDriftEvents, PAGE_SIZE, type SortColumn, type DriftFilters, type DriftSort,
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
-import { findingStatusLabel } from '@/lib/statusLabels';
 
 // ── Badges ─────────────────────────────────────────────────────────────────
 
@@ -26,27 +28,14 @@ const SEV: Record<string, string> = {
   MEDIUM: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   LOW:    'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
 };
-// Keyed on the DriftEvent status union so tsc flags a missing entry when a
-// new status is added (was Record<string, string> — silently partial).
-const STATUS: Record<DriftEvent['status'], string> = {
-  open:       'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  resolved:   'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  suppressed: 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400',
-  reverted:   'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
-  manual_revert_required: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400',
-};
 
-function Badge({ value, map, label }: { value: string; map: Record<string, string>; label?: string }) {
+function Badge({ value, map }: { value: string; map: Record<string, string> }) {
   const cls = map[value] ?? 'bg-muted text-muted-foreground';
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {label ?? value}
+    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${cls}`}>
+      {value}
     </span>
   );
-}
-
-function StatusBadge({ status }: { status: DriftEvent['status'] | string }) {
-  return <Badge value={status} map={STATUS} label={findingStatusLabel(status)} />;
 }
 
 // ── Sort header ────────────────────────────────────────────────────────────
@@ -175,9 +164,9 @@ function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
                   General
                 </h3>
                 <div className="grid grid-cols-2 gap-3">
-                  {kv('Finding status', <StatusBadge status={e.status} />)}
+                  {kv('Finding status', <FindingStatusBadge status={e.status} />)}
                   {kv('Severity', <Badge value={e.severity} map={SEV} />)}
-                  {kv('Type',     e.pr_type ?? '—')}
+                  {kv('Type',     <TypeBadge prType={e.pr_type} />)}
                   {kv('Region',   e.region)}
                   {kv('Account',  e.account)}
                   {kv('File',     e.file_path)}
@@ -467,7 +456,7 @@ export default function PrQueue() {
 
       <div className="rounded-xl border border-border overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[700px]">
+          <table className="w-full text-sm min-w-[760px]">
             <thead>
               <tr className="border-b border-border bg-muted/40">
                 <SortTh col="resource_id" label="Resource"   sort={sort} onSort={handleSort} />
@@ -509,9 +498,7 @@ export default function PrQueue() {
                   >
                     {/* Resource ID */}
                     <td className="px-4 py-3 font-mono text-xs max-w-[220px]">
-                      <span className="block truncate" title={ev.resource_id}>
-                        {ev.resource_id}
-                      </span>
+                      <ResourceCell resourceId={ev.resource_id} prType={ev.pr_type} />
                     </td>
 
                     {/* Severity */}
@@ -520,13 +507,13 @@ export default function PrQueue() {
                     </td>
 
                     {/* Type */}
-                    <td className="px-4 py-3 text-xs text-muted-foreground capitalize">
-                      {ev.pr_type ?? '—'}
+                    <td className="px-4 py-3">
+                      <TypeBadge prType={ev.pr_type} />
                     </td>
 
                     {/* Finding status — same labels as Approvals apply outcome */}
                     <td className="px-4 py-3">
-                      <StatusBadge status={ev.status} />
+                      <FindingStatusBadge status={ev.status} />
                     </td>
 
                     {/* Created */}

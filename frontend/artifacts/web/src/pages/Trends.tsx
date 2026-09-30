@@ -125,15 +125,15 @@ interface TileProps {
 
 function StatTile({ label, value, icon, accent, hint }: TileProps) {
   return (
-    <div className="rounded-xl border border-border bg-card p-4 flex items-center gap-3">
+    <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3 h-full min-h-[5.5rem]">
       <div className={`flex h-9 w-9 items-center justify-center rounded-lg shrink-0 ${accent ?? 'bg-muted text-muted-foreground'}`}>
         {icon}
       </div>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <p className="text-[11px] text-muted-foreground leading-none mb-1">{label}</p>
-        <p className="text-xl font-semibold text-foreground leading-none">{value}</p>
+        <p className="text-xl font-semibold text-foreground leading-none tabular-nums">{value}</p>
         {hint && (
-          <p className="mt-1 text-[10px] text-muted-foreground leading-snug truncate" title={hint}>
+          <p className="mt-1.5 text-[10px] text-muted-foreground leading-snug line-clamp-2" title={hint}>
             {hint}
           </p>
         )}
@@ -161,12 +161,15 @@ function otherHint(s: DriftSummary): string {
   return parts.join(' · ');
 }
 
+const TRENDS_TILE_GRID =
+  'grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 auto-rows-fr';
+
 function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefined; loading: boolean; error?: Error | null }) {
   if (loading) {
     return (
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6">
+      <div className={TRENDS_TILE_GRID}>
         {[...Array(6)].map((_, i) => (
-          <div key={i} className="rounded-xl border border-border bg-card p-4">
+          <div key={i} className="rounded-xl border border-border bg-card p-4 min-h-[5.5rem]">
             <Skeleton className="h-9 w-9 rounded-lg mb-3" />
             <Skeleton className="h-3 w-20 mb-2" />
             <Skeleton className="h-6 w-12" />
@@ -187,50 +190,48 @@ function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefi
   const other = s.other ?? Math.max(0, s.total - s.resolved - s.open);
 
   return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6">
-        <StatTile
-          label="Total Drifts"
-          value={s.total.toLocaleString()}
-          hint="Resolved + Unresolved + Other"
-          icon={<Activity size={16} />}
-          accent="bg-primary/10 text-primary"
-        />
-        <StatTile
-          label="Unique Resources"
-          value={s.uniqueResources.toLocaleString()}
-          icon={<Layers size={16} />}
-          accent="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
-        />
-        <StatTile
-          label="Resolved"
-          value={s.resolved.toLocaleString()}
-          hint="status = resolved"
-          icon={<CheckCircle size={16} />}
-          accent="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
-        />
-        <StatTile
-          label="Unresolved"
-          value={s.open.toLocaleString()}
-          hint="status = open"
-          icon={<Clock size={16} />}
-          accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
-        />
-        <StatTile
-          label="Other"
-          value={other.toLocaleString()}
-          hint={otherHint({ ...s, other })}
-          icon={<AlertTriangle size={16} />}
-          accent="bg-zinc-100 text-zinc-600 dark:bg-zinc-900/30 dark:text-zinc-400"
-        />
-        <StatTile
-          label="Rollback type"
-          value={s.rollback.toLocaleString()}
-          hint="Subset of total (overlaps status buckets)"
-          icon={<GitPullRequest size={16} />}
-          accent="bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
-        />
-      </div>
+    <div className={TRENDS_TILE_GRID}>
+      <StatTile
+        label="Total Drifts"
+        value={s.total.toLocaleString()}
+        hint="Accepted + Open + Other"
+        icon={<Activity size={16} />}
+        accent="bg-primary/10 text-primary"
+      />
+      <StatTile
+        label="Unique Resources"
+        value={s.uniqueResources.toLocaleString()}
+        icon={<Layers size={16} />}
+        accent="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
+      />
+      <StatTile
+        label="Accepted"
+        value={s.resolved.toLocaleString()}
+        hint="Finding status = resolved"
+        icon={<CheckCircle size={16} />}
+        accent="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+      />
+      <StatTile
+        label="Open"
+        value={s.open.toLocaleString()}
+        hint="Finding status = open"
+        icon={<Clock size={16} />}
+        accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+      />
+      <StatTile
+        label="Other"
+        value={other.toLocaleString()}
+        hint={otherHint({ ...s, other })}
+        icon={<AlertTriangle size={16} />}
+        accent="bg-zinc-100 text-zinc-600 dark:bg-zinc-900/30 dark:text-zinc-400"
+      />
+      <StatTile
+        label="Rollback type"
+        value={s.rollback.toLocaleString()}
+        hint="Subset of total (overlaps status buckets)"
+        icon={<GitPullRequest size={16} />}
+        accent="bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+      />
     </div>
   );
 }

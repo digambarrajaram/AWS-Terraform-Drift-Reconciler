@@ -4,12 +4,15 @@ import {
   Search, ChevronUp, ChevronDown, ChevronsUpDown,
   ChevronLeft, ChevronRight, Inbox, LayoutList, LayoutGrid,
   ShieldCheck, ShieldX, DollarSign, ChevronDown as ExpandIcon,
-  ExternalLink, CalendarRange, RotateCcw, Server, Layers, Ban,
+  ExternalLink, CalendarRange, RotateCcw,
 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet';
+import {
+  FindingStatusBadge, TypeBadge, ResourceCell,
+} from '@/components/shared/FindingBadges';
 import { useScope } from '@/hooks/useScope';
 import { useEnvironments } from '@/hooks/useEnvironments';
 import { useAppConfig } from '@/api/config';
@@ -18,7 +21,6 @@ import {
   type SortColumn, type DriftFilters, type DriftSort,
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
-import { findingStatusLabel } from '@/lib/statusLabels';
 
 // ── Badge maps ──────────────────────────────────────────────────────────────
 
@@ -28,114 +30,14 @@ const SEV_CLS: Record<string, string> = {
   MEDIUM: 'bg-amber-100  text-amber-700  dark:bg-amber-900/30 dark:text-amber-400',
   LOW:    'bg-blue-100   text-blue-700   dark:bg-blue-900/30  dark:text-blue-400',
 };
-// Keyed on the DriftEvent status union so tsc flags a missing entry when a
-// new status is added (was Record<string, string> — silently partial).
-const STATUS_CLS: Record<DriftEvent['status'], string> = {
-  open:       'bg-amber-100  text-amber-700  dark:bg-amber-900/30  dark:text-amber-400',
-  resolved:   'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  suppressed: 'bg-zinc-100   text-zinc-600   dark:bg-zinc-800      dark:text-zinc-400',
-  reverted:   'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
-  manual_revert_required: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400',
-};
 
 // ── Shared UI atoms ─────────────────────────────────────────────────────────
 
-function Badge({ value, map, label }: { value: string; map: Record<string, string>; label?: string }) {
+function Badge({ value, map }: { value: string; map: Record<string, string> }) {
   const cls = map[value] ?? 'bg-muted text-muted-foreground';
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${cls}`}>
-      {label ?? value}
-    </span>
-  );
-}
-
-function StatusBadge({ status }: { status: DriftEvent['status'] | string }) {
-  return <Badge value={status} map={STATUS_CLS} label={findingStatusLabel(status)} />;
-}
-
-/** Visual distinction: scan/security findings vs Terraform resource drift. */
-const TYPE_META: Record<string, {
-  label: string;
-  icon: React.ElementType;
-  cls: string;
-  kind: 'scan' | 'resource';
-}> = {
-  security_only: {
-    label: 'Security',
-    icon: ShieldCheck,
-    cls: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300',
-    kind: 'scan',
-  },
-  manual: {
-    label: 'Manual review',
-    icon: ShieldCheck,
-    cls: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300',
-    kind: 'scan',
-  },
-  unmanaged: {
-    label: 'Unmanaged',
-    icon: Ban,
-    cls: 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300',
-    kind: 'resource',
-  },
-  rollback: {
-    label: 'Rollback',
-    icon: RotateCcw,
-    cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
-    kind: 'resource',
-  },
-  batch: {
-    label: 'Batch',
-    icon: Layers,
-    cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
-    kind: 'resource',
-  },
-  fix: {
-    label: 'Fix',
-    icon: Server,
-    cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
-    kind: 'resource',
-  },
-};
-
-function TypeBadge({ prType }: { prType: string | null | undefined }) {
-  if (!prType) {
-    return <span className="text-xs text-muted-foreground">—</span>;
-  }
-  const meta = TYPE_META[prType];
-  if (!meta) {
-    return (
-      <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground capitalize">
-        {prType.replace(/_/g, ' ')}
-      </span>
-    );
-  }
-  const Icon = meta.icon;
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}
-      title={meta.kind === 'scan' ? 'Security scan finding (not resource drift)' : 'Resource drift finding'}
-    >
-      <Icon size={11} className="shrink-0" />
-      {meta.label}
-    </span>
-  );
-}
-
-function ResourceCell({ resourceId, prType }: { resourceId: string; prType: string | null | undefined }) {
-  const isScan = prType === 'security_only' || prType === 'manual';
-  return (
-    <span className="flex items-center gap-1.5 min-w-0" title={resourceId}>
-      {isScan && (
-        <ShieldCheck
-          size={12}
-          className="shrink-0 text-teal-600 dark:text-teal-400"
-          aria-label="Security scan finding"
-        />
-      )}
-      <span className={`block truncate ${isScan ? 'text-teal-900 dark:text-teal-200' : ''}`}>
-        {resourceId}
-      </span>
+    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${cls}`}>
+      {value}
     </span>
   );
 }
@@ -212,7 +114,7 @@ function EventDetail({ e }: { e: DriftEvent }) {
       <section className="space-y-3">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground border-b border-border pb-1">General</h3>
         <div className="grid grid-cols-2 gap-3">
-          {kv('Finding status', <StatusBadge status={e.status} />)}
+          {kv('Finding status', <FindingStatusBadge status={e.status} />)}
           {kv('Severity', <Badge value={e.severity} map={SEV_CLS} />)}
           {kv('Type',     <TypeBadge prType={e.pr_type} />)}
           {kv('Region',   e.region)}
@@ -373,7 +275,7 @@ function DriftCard({
         {/* Badges row */}
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge value={event.severity} map={SEV_CLS} />
-          <StatusBadge status={event.status} />
+          <FindingStatusBadge status={event.status} />
           {event.pr_type && <TypeBadge prType={event.pr_type} />}
           {event.pr_number && (
             <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-primary">
@@ -383,9 +285,9 @@ function DriftCard({
         </div>
 
         {/* Resource ID — shield cue for security/scan findings */}
-        <p className="font-mono text-sm font-semibold text-foreground break-all leading-tight">
+        <div className="font-mono text-sm font-semibold text-foreground break-all leading-tight">
           <ResourceCell resourceId={event.resource_id} prType={event.pr_type} />
-        </p>
+        </div>
 
         {/* Meta row */}
         <p className="text-[11px] text-muted-foreground">
@@ -861,7 +763,7 @@ export default function Explorer() {
       {view === 'table' && (
         <div className="rounded-xl border border-border overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[720px]">
+            <table className="w-full text-sm min-w-[760px]">
               <thead>
                 <tr className="border-b border-border bg-muted/40">
                   <SortTh col="resource_id" label="Resource"  sort={sort} onSort={handleSort} />
@@ -903,7 +805,7 @@ export default function Explorer() {
                         <TypeBadge prType={ev.pr_type} />
                       </td>
                       <td className="px-4 py-3">
-                        <StatusBadge status={ev.status} />
+                        <FindingStatusBadge status={ev.status} />
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                         <span title={safeDate(ev.created_at)}>

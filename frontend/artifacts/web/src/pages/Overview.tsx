@@ -48,7 +48,7 @@ function StatCard({
   children?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+    <div className="rounded-xl border border-border bg-card p-5 shadow-sm h-full flex flex-col">
       <div className="mb-3 flex items-center gap-2 text-muted-foreground">
         <Icon size={14} />
         <span className="text-xs font-medium uppercase tracking-wider">{label}</span>
@@ -203,7 +203,7 @@ export default function Overview() {
       {isEmpty ? (
         <NoEventsState />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 items-stretch">
           {/* ── Current drift from last scan (matches Scan History) ───── */}
           <StatCard
             icon={AlertTriangle}

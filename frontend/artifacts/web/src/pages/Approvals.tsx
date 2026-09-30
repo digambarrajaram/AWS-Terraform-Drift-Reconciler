@@ -251,7 +251,7 @@ function DetailDrawer({
             <SheetHeader className="mb-4">
               <SheetTitle className="text-base break-all flex items-center gap-2">
                 PR #{row.pr_number}
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${displayStatus(current.status, current.pr_type, current.merged_at).style}`}>
+                <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${displayStatus(current.status, current.pr_type, current.merged_at).style}`}>
                   {displayStatus(current.status, current.pr_type, current.merged_at).label}
                 </span>
               </SheetTitle>
@@ -678,7 +678,7 @@ export default function Approvals() {
                         {fmtDate(row.merged_at)}
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${shown.style}`}>
+                        <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${shown.style}`}>
                           {shown.label}
                         </span>
                       </td>

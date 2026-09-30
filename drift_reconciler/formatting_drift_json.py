@@ -252,18 +252,22 @@ def check_security_suppression(
         return None  # malformed date — can't confirm validity, fail open
 
 
-def _matches_exception(resource_address: str, drift_fields: set[str], status: str | None, entry: dict) -> bool:
-    """Return True if *entry* suppresses this specific drift finding."""
+def _address_matches_exception(resource_address: str, entry: dict) -> bool:
+    """True when *entry*'s resource_address matches *resource_address*."""
     addr = entry.get("resource_address", "")
     if not addr:
         return False
-
-    # resource_address can be an exact match or a prefix
     if resource_address == addr:
-        pass
-    elif addr.endswith(".") and resource_address.startswith(addr):
-        pass
-    else:
+        return True
+    # Prefix form: "aws_security_group." matches all SGs
+    if addr.endswith(".") and resource_address.startswith(addr):
+        return True
+    return False
+
+
+def _matches_exception(resource_address: str, drift_fields: set[str], status: str | None, entry: dict) -> bool:
+    """Return True if *entry* suppresses this drift (full or field-level)."""
+    if not _address_matches_exception(resource_address, entry):
         return False
 
     dtype = entry.get("drift_type", "*")
@@ -277,24 +281,57 @@ def _matches_exception(resource_address: str, drift_fields: set[str], status: st
 def apply_drift_exceptions(
     resources: list[dict], exceptions: list[dict]
 ) -> tuple[list[dict], list[dict]]:
-    """Split *resources* into (suppressed, remaining)."""
+    """Split *resources* into (suppressed, remaining).
+
+    Field-scoped exceptions (``drift_type`` = a field name) only remove that
+    field. Other drifted fields on the same resource stay actionable — a tags
+    exception must not hide an ``instance_type`` change.
+    """
     if not exceptions:
         return [], resources
 
     suppressed, remaining = [], []
     for r in resources:
-        fields = set(r.get("changes", {}).keys())
+        changes = dict(r.get("changes") or {})
+        fields = set(changes.keys())
         status = r.get("status")
-        matched = None
+        address = r.get("address", "")
+
+        full_match = None
+        removed_fields: set[str] = set()
+        field_match = None
         for exc in exceptions:
-            if _matches_exception(r.get("address", ""), fields, status, exc):
-                matched = exc
+            if not _address_matches_exception(address, exc):
+                continue
+            dtype = exc.get("drift_type", "*")
+            if dtype == "*" or dtype == status:
+                full_match = exc
                 break
-        if matched:
-            r["_suppressed_by"] = matched
+            if dtype in fields:
+                removed_fields.add(dtype)
+                field_match = exc
+
+        if full_match:
+            r["_suppressed_by"] = full_match
             suppressed.append(r)
-        else:
-            remaining.append(r)
+            continue
+
+        if removed_fields:
+            for field in removed_fields:
+                changes.pop(field, None)
+            if not changes and status != "deleted_externally":
+                r = dict(r)
+                r["changes"] = {}
+                r["_suppressed_by"] = field_match
+                suppressed.append(r)
+            else:
+                r = dict(r)
+                r["changes"] = changes
+                r["security_impact"] = classify_security_impact(address, changes)
+                remaining.append(r)
+            continue
+
+        remaining.append(r)
     return suppressed, remaining
 
 
@@ -347,62 +384,83 @@ def _lookup_file_path(file_index: dict, address: str | None) -> str | None:
     return None
 
 
+def _is_all_null_after(change: dict) -> bool:
+    """True when refresh/plan after-values are an all-null object (gone in AWS)."""
+    before = change.get("before")
+    after = change.get("after")
+    if not isinstance(before, dict) or not before:
+        return False
+    if not isinstance(after, dict) or not after:
+        return False
+    return all(v is None for v in after.values())
+
+
+def _extract_changes_dict(entry: dict, *, swap: bool) -> tuple[dict, set]:
+    """Return ``(changes_dict, action_set)`` in drift convention.
+
+    When *swap* is True the entry is from ``resource_changes`` (before=live,
+    after=config) and is inverted to before=IaC, after=live.
+    """
+    change = entry.get("change") or {}
+    action_set = set(change.get("actions") or [])
+    before = change.get("before") if isinstance(change.get("before"), dict) else {}
+    after = change.get("after") if isinstance(change.get("after"), dict) else {}
+    if swap:
+        before, after = after, before
+    diffs = flatten_diff(before, after)
+    changes_dict = {
+        field: {"before": b, "after": a}
+        for field, b, a in diffs
+        if field not in _READ_ONLY_DRIFT_ATTRS
+    }
+    return changes_dict, action_set
+
+
 def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
     prior_addresses = get_prior_state_addresses(plan)
-    native_drift = list(plan.get("resource_drift") or [])
+    native_by_addr: dict = {}
+    for entry in plan.get("resource_drift") or []:
+        if entry.get("mode") == "data":
+            continue
+        addr = entry.get("address")
+        if addr:
+            native_by_addr[addr] = entry
+
     change_entries, deleted_addresses = _entries_from_resource_changes(
         plan, prior_addresses
     )
-
-    # Union both sources. When the same address appears in both, prefer
-    # resource_changes — Terraform often puts only computed noise (tags_all)
-    # in resource_drift while the actionable update is under resource_changes.
-    # Keep native-only addresses (refresh drift with no matching plan change).
-    # Track addresses taken from resource_changes so we can normalize their
-    # before/after (live→config) into drift convention (config→live).
-    by_address: dict = {}
-    from_resource_changes: set[str] = set()
-    for entry in native_drift:
-        addr = entry.get("address")
-        if addr:
-            by_address[addr] = entry
+    planned_by_addr: dict = {}
     for entry in change_entries:
         addr = entry.get("address")
         if addr:
-            by_address[addr] = entry
-            from_resource_changes.add(addr)
-    drift_entries = list(by_address.values())
+            planned_by_addr[addr] = entry
 
+    # Field-level union: keep refresh-only diffs from resource_drift and
+    # overlay actionable resource_changes (config↔live). Overwriting the
+    # whole entry used to drop minor native drifts when the same address
+    # also appeared under resource_changes with a different field set.
+    all_addresses = set(native_by_addr) | set(planned_by_addr) | set(deleted_addresses)
     file_index = build_resource_file_index(tf_dir) if tf_dir else {}
 
-    if not drift_entries:
+    if not all_addresses:
         return {"report_type": "no_drift", "resources": []}
 
     resources = []
-    for entry in drift_entries:
-        if entry.get("mode") == "data":
-            continue
-        address = entry.get("address")
-        change = entry.get("change", {})
-        actions = change.get("actions", [])
-        after = change.get("after") or {}
-        action_set = set(actions)
-        is_replace = action_set == {"create", "delete"}
+    for address in sorted(all_addresses):
+        native = native_by_addr.get(address)
+        planned = planned_by_addr.get(address)
         fpath = _lookup_file_path(file_index, address)
 
-        # External deletion: create-from-state, or refresh showing all-null after.
+        planned_actions = set(((planned or {}).get("change") or {}).get("actions") or [])
+        is_replace = planned_actions == {"create", "delete"}
+
+        # External deletion: create-from-state, or native refresh all-null after.
         # Do NOT treat replace (delete+create) as deleted_externally.
         is_deleted = (
             not is_replace
             and (
                 address in deleted_addresses
-                or (
-                    isinstance(change.get("before"), dict)
-                    and isinstance(after, dict)
-                    and change.get("before")
-                    and after
-                    and all(v is None for v in after.values())
-                )
+                or (native is not None and _is_all_null_after(native.get("change") or {}))
             )
         )
 
@@ -423,19 +481,20 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
             })
             continue
 
-        before = change.get("before") if isinstance(change.get("before"), dict) else {}
-        after_obj = after if isinstance(after, dict) else {}
-        # resource_changes: before=live, after=config — invert to drift convention
-        # (before=IaC/config, after=live) used by findings, PRs, and rollback.
-        # resource_drift already uses prior-state→live (= drift convention).
-        if address in from_resource_changes:
-            before, after_obj = after_obj, before
-        diffs = flatten_diff(before, after_obj)
-        changes_dict = {field: {"before": b, "after": a} for field, b, a in diffs}
-        changes_dict = {
-            field: vals for field, vals in changes_dict.items()
-            if field not in _READ_ONLY_DRIFT_ATTRS
-        }
+        changes_dict: dict = {}
+        action_set: set = set()
+        if native is not None:
+            n_changes, n_actions = _extract_changes_dict(native, swap=False)
+            changes_dict.update(n_changes)
+            action_set |= n_actions
+        if planned is not None:
+            # resource_changes wins on overlapping fields (config↔live).
+            p_changes, p_actions = _extract_changes_dict(planned, swap=True)
+            changes_dict.update(p_changes)
+            action_set |= p_actions
+            if p_actions == {"create", "delete"}:
+                is_replace = True
+
         # Update/replace with no visible attribute delta (sensitive-only,
         # after_unknown, provider quirks) is still real drift — don't drop it.
         if not changes_dict and (is_replace or "update" in action_set):
@@ -478,7 +537,7 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
                 auto_fields.add(field)
                 auto_reasons.append(f"{field}: {rule['reason']}")
 
-        if auto_fields == set(changes_dict.keys()):
+        if auto_fields and auto_fields == set(changes_dict.keys()):
             # Every drifted field is auto-suppressed — silence it completely.
             resources.append({
                 "address": address,
@@ -490,6 +549,10 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
                 "_auto_reasons": auto_reasons,
             })
         else:
+            # Drop only the auto-suppressed fields; keep the rest actionable.
+            if auto_fields:
+                for field in auto_fields:
+                    changes_dict.pop(field, None)
             resources.append({
                 "address": address,
                 "changes": changes_dict,

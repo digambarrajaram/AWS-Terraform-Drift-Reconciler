@@ -166,11 +166,24 @@ def _load_routing_rules() -> dict[str, str]:
         return {"HIGH": "pagerduty", "MEDIUM": "slack", "LOW": "slack"}
 
 
+def _finding_channel(rules: dict[str, str], finding: dict) -> str:
+    """Resolve routing channel for a finding (case-insensitive severity)."""
+    raw = finding.get("risk_level") or "LOW"
+    sev = str(raw).strip().upper()
+    return rules.get(sev) or rules.get(raw) or "none"
+
+
 def drift_alert(state: State):
     import agent as _ag
     _ag.report_stage(state.get("run_id"), "alert_agent")
     """Route findings by severity using Supabase routing rules, falling
-    back to hardcoded HIGH→PagerDuty / else→Slack if unreachable."""
+    back to hardcoded HIGH→PagerDuty / else→Slack if unreachable.
+
+    Channel semantics:
+      - pagerduty → page PagerDuty *and* post Slack (if webhook configured)
+      - slack     → Slack only
+      - none      → silence
+    """
     if not state.get("drift_detected"):
         return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
 
@@ -180,20 +193,31 @@ def drift_alert(state: State):
         return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
 
     rules = _load_routing_rules()
+    # Normalize keys so DB quirks (mixed case) never silently drop alerts.
+    rules = {str(k).strip().upper(): v for k, v in rules.items()}
     print(f"  [alert_agent] routing rules for {_ag._account_label}: {rules}")
 
-    pd_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "pagerduty"]
-    slack_findings = [f for f in active if rules.get(f.get("risk_level", "LOW")) == "slack"]
-    silenced = len(active) - len(pd_findings) - len(slack_findings)
+    pd_findings = [f for f in active if _finding_channel(rules, f) == "pagerduty"]
+    # Slack gets explicit slack-routed findings PLUS pagerduty-routed ones
+    # (so "PagerDuty for any severity" still produces Slack messages).
+    slack_findings = [
+        f for f in active if _finding_channel(rules, f) in ("slack", "pagerduty")
+    ]
+    silenced = sum(1 for f in active if _finding_channel(rules, f) == "none")
     print(
         f"  [alert_agent] {len(active)} finding(s): "
-        f"{len(pd_findings)} → pagerduty, {len(slack_findings)} → slack, "
-        f"{silenced} silenced (channel=none or unmatched severity)"
+        f"{len(pd_findings)} → pagerduty, {len(slack_findings)} → slack "
+        f"(incl. PD fan-out), {silenced} silenced (channel=none)"
     )
+    for f in active:
+        print(
+            f"  [alert_agent]   {f.get('resource_id')} "
+            f"risk={f.get('risk_level')!r} → {_finding_channel(rules, f)}"
+        )
 
     # PagerDuty → one page per finding.
     pd_sent = 0
-    pd_errors: list[str] = []
+    alert_errors: list[str] = []
     for finding in pd_findings:
         if finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
             event_type = "Unmanaged resource"
@@ -209,7 +233,7 @@ def drift_alert(state: State):
             source="terraform-drift-engine",
             dedup_key=f"drift-{finding['resource_id']}",
             account_label=_ag._account_label,
-            error_detail=pd_errors,
+            error_detail=alert_errors,
         )
         if result:  # PagerDuty returns {} on failure, non-empty dict on dispatch
             pd_sent += 1
@@ -217,22 +241,30 @@ def drift_alert(state: State):
         else:
             print(f"  [alert_agent] PagerDuty FAILED for {finding['resource_id']}")
 
-    # Slack → batched.
+    # Slack → batched (includes PD-routed findings for visibility).
     slack_sent = 0
     if slack_findings:
-        slack_sent = slack.notify_all(slack_findings, _ag._account_label)
+        try:
+            slack_sent = slack.notify_all(slack_findings, _ag._account_label)
+            if slack_sent == 0:
+                alert_errors.append(
+                    "Slack webhook not configured or message send failed — "
+                    "check Alerts → Slack Webhook URL / Send Test"
+                )
+        except Exception as exc:
+            alert_errors.append(f"Slack send failed: {exc}")
+            print(f"  [alert_agent] Slack FAILED: {exc}")
 
     alerts_payload: dict = {"pagerduty": pd_sent, "slack": slack_sent}
-    if pd_errors:
-        # De-dupe while preserving order — same missing-key error can repeat.
+    if alert_errors:
         seen: set[str] = set()
         unique_errs = []
-        for e in pd_errors:
+        for e in alert_errors:
             if e not in seen:
                 seen.add(e)
                 unique_errs.append(e)
         alerts_payload["errors"] = unique_errs
-        print(f"  [alert_agent] PagerDuty errors: {unique_errs}")
+        print(f"  [alert_agent] alert errors: {unique_errs}")
 
     return {"messages": [], "alerts_sent": alerts_payload}
 def drift_pr_from_finding(state: State):

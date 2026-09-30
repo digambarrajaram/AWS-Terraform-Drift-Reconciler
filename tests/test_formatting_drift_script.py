@@ -196,6 +196,71 @@ class FormattingDriftScriptTests(unittest.TestCase):
         self.assertEqual(report["report_type"], "drift")
         self.assertIn("_plan_change", report["resources"][0]["changes"])
 
+    def test_merges_native_and_planned_field_diffs(self):
+        """Native-only fields must not be dropped when resource_changes also exists."""
+        plan = {
+            "resource_drift": [
+                {
+                    "address": "aws_instance.foo",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {"tags": {"Env": "prod"}, "instance_type": "t3.micro"},
+                        "after": {"tags": {"Env": "prod", "Owner": "ops"}, "instance_type": "t3.micro"},
+                    },
+                },
+            ],
+            "prior_state": {
+                "values": {
+                    "root_module": {
+                        "resources": [{"address": "aws_instance.foo"}],
+                    },
+                },
+            },
+            "resource_changes": [
+                {
+                    "address": "aws_instance.foo",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["update"],
+                        # before=live, after=config
+                        "before": {"instance_type": "t3.small", "tags": {"Env": "prod", "Owner": "ops"}},
+                        "after": {"instance_type": "t3.micro", "tags": {"Env": "prod"}},
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report = report_drift(plan, tf_dir=tmp, scope=None)
+        self.assertEqual(report["report_type"], "drift")
+        changes = report["resources"][0]["changes"]
+        self.assertIn("instance_type", changes)
+        self.assertIn("tags", changes)
+        # Planned values win on overlap: before=IaC, after=live
+        self.assertEqual(
+            changes["instance_type"],
+            {"before": "t3.micro", "after": "t3.small"},
+        )
+
+    def test_field_exception_keeps_other_drifted_fields(self):
+        from drift_reconciler.formatting_drift_json import apply_drift_exceptions
+
+        resources = [{
+            "address": "aws_instance.foo",
+            "changes": {
+                "tags": {"before": {}, "after": {"a": "1"}},
+                "instance_type": {"before": "t3.micro", "after": "t3.small"},
+            },
+            "security_impact": "low",
+        }]
+        suppressed, remaining = apply_drift_exceptions(
+            resources,
+            [{"resource_address": "aws_instance.foo", "drift_type": "tags"}],
+        )
+        self.assertEqual(suppressed, [])
+        self.assertEqual(len(remaining), 1)
+        self.assertNotIn("tags", remaining[0]["changes"])
+        self.assertIn("instance_type", remaining[0]["changes"])
+
 
 class FilePathLookupTests(unittest.TestCase):
     def test_module_and_index_addresses_resolve(self):

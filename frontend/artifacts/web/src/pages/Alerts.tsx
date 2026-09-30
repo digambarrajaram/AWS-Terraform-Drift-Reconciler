@@ -17,8 +17,8 @@ import {
 
 const SEVERITIES: Severity[] = ['HIGH', 'MEDIUM', 'LOW'];
 const CHANNELS: { value: Channel; label: string }[] = [
-  { value: 'pagerduty', label: 'PagerDuty' },
-  { value: 'slack',     label: 'Slack'     },
+  { value: 'pagerduty', label: 'PagerDuty (+ Slack if configured)' },
+  { value: 'slack',     label: 'Slack only' },
   { value: 'none',      label: 'None (no alert)' },
 ];
 const SCOPE_CHANNELS: { value: ScopeChannel; label: string }[] = [
@@ -473,9 +473,11 @@ export default function Alerts() {
           Each severity has a global default channel and, if a scope is selected, an
           optional scope-specific override. Use <strong className="text-foreground">Inherit global</strong> on
           a scope row unless you intentionally want a different channel.
-          <strong className="text-foreground"> None</strong> means no alert is sent — a scope
-          override of None will silence that severity even if the global default is PagerDuty.
-          Click Save on each row you change.
+          <strong className="text-foreground"> PagerDuty</strong> pages PagerDuty and also posts
+          to Slack when a webhook is configured.
+          <strong className="text-foreground"> None</strong> silences that severity for the scope.
+          After saving credentials, use <strong className="text-foreground">Send Test</strong> —
+          if Test fails, drift scans will not notify either. Click Save on each row you change.
         </p>
 
         <RoutingRulesSection

@@ -626,6 +626,7 @@ if __name__ == "__main__":
         _all_pr_urls: list[str] = []
         _pd_alerts_sent = 0
         _slack_messages_sent = 0
+        _alert_errors: list[str] = []
         for event in graph.stream(initial_state):
             for node, data in event.items():
                 if not data:
@@ -644,6 +645,9 @@ if __name__ == "__main__":
                         _pd_alerts_sent = int(alerts.get("pagerduty") or 0)
                     if "slack" in alerts:
                         _slack_messages_sent = int(alerts.get("slack") or 0)
+                    errs = alerts.get("errors")
+                    if isinstance(errs, list) and errs:
+                        _alert_errors = [str(e) for e in errs]
 
         # Mark scan as complete.
         if _run_id:
@@ -675,14 +679,32 @@ if __name__ == "__main__":
                 "findings": [{"resource_id": f.get("resource_id", "?"), "risk_level": f.get("risk_level", "LOW")} for f in unmanaged_findings],
                 "pr_links": unmanaged_urls,
             }
-            if args.scan_mode in ("drift_only", "drift_and_unmanaged") and not _terraform_failed:
-                summary["drift"] = drift_block
+            if args.scan_mode in ("drift_only", "drift_and_unmanaged"):
+                if _terraform_failed:
+                    # Keep a Drift card in the UI so "complete" scans never look
+                    # like "no drift" when the plan/backend actually failed.
+                    summary["drift"] = {
+                        "found": False,
+                        "count": 0,
+                        "findings": [],
+                        "pr_links": [],
+                        "skipped": True,
+                        "reason": (
+                            "Terraform plan/backend failed — configuration "
+                            "drift was not checked"
+                        ),
+                    }
+                else:
+                    summary["drift"] = drift_block
             if args.scan_mode in ("drift_and_unmanaged", "unmanaged_only"):
                 summary["unmanaged"] = unmanaged_block
             summary["alerts_sent"] = {"pagerduty": _pd_alerts_sent, "slack": _slack_messages_sent}
+            if _alert_errors:
+                summary["alerts_sent"]["errors"] = _alert_errors
             print(
                 f"  [scan] alerts_sent: pagerduty={_pd_alerts_sent} "
                 f"slack={_slack_messages_sent}"
+                + (f" errors={_alert_errors}" if _alert_errors else "")
             )
 
             update_scan_run(

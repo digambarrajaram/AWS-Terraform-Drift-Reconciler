@@ -46,11 +46,11 @@ class AlertStateSchemaTests(unittest.TestCase):
         self.assertEqual(len(out.get("pr_urls") or []), 1)
 
     @patch("graph_nodes.pga.trigger_pagerduty_alert", return_value={"status": "success"})
-    @patch("graph_nodes.slack.notify_all", return_value=0)
+    @patch("graph_nodes.slack.notify_all", return_value=1)
     @patch("graph_nodes._load_routing_rules", return_value={
         "HIGH": "pagerduty", "MEDIUM": "pagerduty", "LOW": "pagerduty",
     })
-    def test_drift_alert_dispatches_and_returns_counts(self, _rules, _slack, mock_pd):
+    def test_drift_alert_dispatches_and_returns_counts(self, _rules, mock_slack, mock_pd):
         import agent as ag
         from graph_nodes import drift_alert
 
@@ -67,7 +67,35 @@ class AlertStateSchemaTests(unittest.TestCase):
             }
             out = drift_alert(state)
             self.assertEqual(out["alerts_sent"]["pagerduty"], 2)
+            self.assertEqual(out["alerts_sent"]["slack"], 1)
             self.assertEqual(mock_pd.call_count, 2)
+            # PagerDuty-routed findings also fan out to Slack.
+            mock_slack.assert_called_once()
+            self.assertEqual(len(mock_slack.call_args[0][0]), 2)
+        finally:
+            ag._account_label = prev
+
+    @patch("graph_nodes.pga.trigger_pagerduty_alert", return_value={"status": "success"})
+    @patch("graph_nodes.slack.notify_all", return_value=1)
+    @patch("graph_nodes._load_routing_rules", return_value={
+        "HIGH": "pagerduty", "MEDIUM": "slack", "LOW": "slack",
+    })
+    def test_risk_level_case_insensitive(self, _rules, mock_slack, mock_pd):
+        import agent as ag
+        from graph_nodes import drift_alert
+
+        prev = ag._account_label
+        ag._account_label = "scope-test"
+        try:
+            out = drift_alert({
+                "drift_detected": True,
+                "drift_findings": [
+                    {"resource_id": "aws_s3_bucket.b", "risk_level": "high", "status": "updated"},
+                ],
+                "run_id": None,
+            })
+            self.assertEqual(out["alerts_sent"]["pagerduty"], 1)
+            self.assertEqual(mock_pd.call_count, 1)
         finally:
             ag._account_label = prev
 

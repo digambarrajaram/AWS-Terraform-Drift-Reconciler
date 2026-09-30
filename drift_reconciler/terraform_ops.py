@@ -255,7 +255,11 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
     # Call report_drift in-process — subprocess + PYTHONPATH was a recurring
     # source of silent ModuleNotFoundError → "no_drift" in unmanaged modes.
     try:
-        from drift_reconciler.formatting_drift_json import load_plan, report_drift
+        from drift_reconciler.formatting_drift_json import (
+            get_prior_state_addresses,
+            load_plan,
+            report_drift,
+        )
 
         plan_data = load_plan(target_plan_json)
         rd = plan_data.get("resource_drift") or []
@@ -267,8 +271,7 @@ def get_terraform_drift_data(tf_dir: str, drift_script_path: str) -> str:
         print(
             f"  Plan JSON stats: resource_drift={len(rd)} "
             f"resource_changes={len(rc)} non_noop_changes={len(non_noop)} "
-            f"prior_state_addrs="
-            f"{len(((plan_data.get('prior_state') or {}).get('values') or {}).get('root_module') or {})}"
+            f"prior_state_addrs={len(get_prior_state_addresses(plan_data))}"
         )
         for c in non_noop[:20]:
             print(

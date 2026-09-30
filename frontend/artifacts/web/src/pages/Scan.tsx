@@ -173,12 +173,22 @@ function ScanResult({ run }: { run: ScanRun }) {
       )}
 
       {rs && !failed && (
+        <div className="space-y-3">
+          {(rs.notice || rs.drift?.skipped) && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+              {rs.notice ?? rs.drift?.reason ?? 'Drift check was skipped.'}
+            </div>
+          )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {/* Drift — omitted when drift detection did not run. */}
           {rs.drift && (
             <div className="rounded-lg border border-border bg-card p-3">
               <p className="text-xs font-medium text-muted-foreground mb-1">Drift</p>
-              {rs.drift.found ? (
+              {rs.drift.skipped ? (
+                <p className="text-sm text-amber-700 dark:text-amber-300">
+                  {rs.drift.reason ?? 'Drift check skipped (terraform plan failed)'}
+                </p>
+              ) : rs.drift.found ? (
                 <>
                   <p className="text-lg font-semibold text-card-foreground">{rs.drift.count} finding{rs.drift.count !== 1 ? 's' : ''}</p>
                   {(rs.drift.pr_links ?? []).length > 0 && (
@@ -263,6 +273,7 @@ function ScanResult({ run }: { run: ScanRun }) {
               )}
             </div>
           )}
+        </div>
         </div>
       )}
 

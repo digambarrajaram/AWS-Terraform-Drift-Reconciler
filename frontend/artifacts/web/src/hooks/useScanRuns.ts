@@ -25,6 +25,8 @@ export interface ScanRun {
       count: number;
       findings: unknown[];
       pr_links: string[];
+      skipped?: boolean;
+      reason?: string;
     };
     unmanaged?: {
       found: boolean;

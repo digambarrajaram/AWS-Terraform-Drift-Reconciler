@@ -36,7 +36,7 @@ from drift_reconciler.drift_baseline import plan_field_values_equal
 
 # Provider-computed attributes that appear in plan JSON but must not be
 # written into HCL (terraform validate rejects them).
-_READ_ONLY_DRIFT_ATTRS = frozenset({"tags_all"})
+_READ_ONLY_DRIFT_ATTRS = frozenset({"tags_all", "last_modified"})
 
 SECURITY_RESOURCE_TYPES = (
     "aws_security_group",

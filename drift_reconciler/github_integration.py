@@ -619,13 +619,14 @@ def _apply_changes_batch(file_path: str, findings: list[dict], value_key: str = 
                     for field, vals in changes.items():
                         if "." in field or "[" in field:
                             continue
-                        total += 1
                         hcl_val = _json_to_hcl(vals.get(value_key))
-                        subprocess.run(
-                            ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                             hcl_val, "-f", tmp_path, "-u"],
-                            check=False,
+                        if hcl_val.strip() in ("", "[]", "{}", "null"):
+                            continue
+                        op = _hcledit_set_or_append(
+                            f"resource.{resource_id}.{field}", hcl_val, tmp_path,
                         )
+                        if op:
+                            total += 1
                     if total == 0:
                         print(f"  ⚠ {resource_id}: no patchable fields — "
                               f"PR may contain no file changes (manual HCL edit required)")
@@ -792,6 +793,37 @@ def _json_to_hcl(val) -> str:
     return f'"{escaped}"'
 
 
+def _hcledit_set_or_append(address: str, hcl_val: str, file_path: str) -> str | None:
+    """Set an existing HCL attribute, or append it when missing.
+
+    ``hcledit attribute set`` is a silent no-op (exit 0, file unchanged) when
+    the address does not exist — which is exactly the common drift case where
+    live AWS gained a field that IaC never declared (e.g. Lambda ``layers``).
+    Detect presence with ``attribute get`` and fall back to ``append``.
+    Returns ``\"set\"`` / ``\"append\"`` on success, or None on failure.
+    """
+    got = subprocess.run(
+        ["hcledit", "attribute", "get", address, "-f", file_path],
+        check=False, capture_output=True, text=True,
+    )
+    exists = bool((got.stdout or "").strip())
+    if exists:
+        cmd = ["hcledit", "attribute", "set", address, hcl_val, "-f", file_path, "-u"]
+        op = "set"
+    else:
+        cmd = [
+            "hcledit", "attribute", "append", address, hcl_val,
+            "-f", file_path, "-u", "--newline",
+        ]
+        op = "append"
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"[WARN] hcledit attribute {op} failed for {address}: {err}")
+        return None
+    return op
+
+
 def _regex_patch_tf_file(
     file_path: str, resource_id: str, changes: dict, deleted: bool,
     value_key: str = "after",
@@ -863,6 +895,9 @@ def _regex_patch_tf_file(
 
         # Attribute value replacement — set field to the patch target
         # (live/after for code_to_reality under drift convention).
+        # If the field is absent from the resource block (live-only drift),
+        # insert it before the closing brace — same as hcledit append.
+        field_applied = False
         for i in range(block_start, block_end + 1):
             if re.match(rf"^\s*{re.escape(field)}\s*=", lines[i]):
                 lines[i] = re.sub(
@@ -872,13 +907,23 @@ def _regex_patch_tf_file(
                     count=1,
                 )
                 applied = True
+                field_applied = True
                 print(f"  [regex] {resource_id}.{field}: set {value_key} on line {i+1}")
                 break
             if after_val and after_val in lines[i]:
                 lines[i] = lines[i].replace(after_val, target_val, 1)
                 applied = True
+                field_applied = True
                 print(f"  [regex] {resource_id}.{field}: value replace on line {i+1}")
                 break
+        if (
+            not field_applied
+            and target_val.strip() not in ("", "[]", "{}", "null")
+        ):
+            lines.insert(block_end, f"  {field} = {target_val}")
+            block_end += 1
+            applied = True
+            print(f"  [regex] {resource_id}.{field}: append {value_key} before line {block_end + 1}")
 
     if removals:
         # Delete from highest line first so indices stay valid.
@@ -938,16 +983,20 @@ def apply_changes_to_file(file_path, resource_id, changes, deleted=False, value_
                 if "." in field or "[" in field:
                     print(f"  [patch] {resource_id}.{field}: nested field — skipping hcledit")
                     continue
-                total += 1
-                print(f"  [patch] {resource_id}.{field}: hcledit attribute set ({value_key}) → {target_val[:60]}")
+                print(
+                    f"  [patch] {resource_id}.{field}: hcledit attribute "
+                    f"upsert ({value_key}) -> {target_val[:60]}"
+                )
                 try:
-                    subprocess.run(
-                        ["hcledit", "attribute", "set", f"resource.{resource_id}.{field}",
-                         target_val, "-f", tmp_path, "-u"],
-                        check=False,
+                    op = _hcledit_set_or_append(
+                        f"resource.{resource_id}.{field}", target_val, tmp_path,
                     )
                 except FileNotFoundError:
                     print(f"[WARN] hcledit invocation failed for {resource_id}.{field} — skipping.")
+                    continue
+                if op:
+                    total += 1
+                    print(f"  [patch] {resource_id}.{field}: hcledit {op}")
             print(f"  [patch] {resource_id}: total={total} hcledit_patchable, {len(block_removal_fields)} block_removal")
             # Apply block-level removals via regex to the file that
             # hcledit already touched, so both types of change land.

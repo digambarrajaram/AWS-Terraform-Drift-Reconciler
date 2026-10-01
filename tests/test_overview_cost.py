@@ -3,7 +3,8 @@
 Bugs covered:
 - Prefer:count=exact returning 206 used to fail the whole Overview endpoint
 - Double-encoded / string monthly_estimate_usd were skipped → $0 totals
-- Rollback count used len(body) instead of Content-Range
+- Eligible-for-rollback must be resolved fix-family PRs not already rolled back
+  (not status=open∪resolved ≈ Trends Accepted)
 - Current Drift uses last scan findings, not only status=open tickets
 
 Run: python -m unittest tests.test_overview_cost
@@ -15,7 +16,11 @@ import unittest
 from unittest.mock import MagicMock
 
 from dashboard import serve
-from dashboard.handler_base import _last_scan_drift_summary, _monthly_estimate_usd
+from dashboard.handler_base import (
+    _fetch_eligible_rollback_events,
+    _last_scan_drift_summary,
+    _monthly_estimate_usd,
+)
 
 
 class MonthlyEstimateTests(unittest.TestCase):
@@ -136,7 +141,10 @@ class OverviewEndpointTests(unittest.TestCase):
         urls = []
         payload = self._call([
             _Resp([{"severity": "HIGH", "count": 2}]),  # severity (open tickets)
-            _Resp([], status_code=206, headers={"Content-Range": "0-0/3"}),  # rollback
+            _Resp([  # eligible candidates (resolved fix-family)
+                {"pr_number": 1}, {"pr_number": 2}, {"pr_number": 3},
+            ], status_code=206),
+            _Resp([]),  # none already rolled back
             _Resp([{  # last scan — live drift even when open tickets exist
                 "completed_at": "2026-09-01T00:00:00Z",
                 "result_summary": {
@@ -166,18 +174,32 @@ class OverviewEndpointTests(unittest.TestCase):
         )
         scan_url = next(u for u in urls if "scan_runs" in u)
         self.assertIn("result_summary", scan_url)
-        # Open Rollbacks must match /api/rollback-data eligible filters.
+        # Eligible for Rollback = resolved fix-family, not open∪resolved Accepted.
         rollback_url = next(u for u in urls if "drift_events" in u and "pr_number" in u)
-        self.assertIn("status=in.(open,resolved)", rollback_url)
+        self.assertIn("status=eq.resolved", rollback_url)
+        self.assertIn("pr_type=in.(fix,batch,rollback)", rollback_url)
         self.assertIn("changes_jsonb=not.is.null", rollback_url)
         self.assertIn("pr_number=not.is.null", rollback_url)
-        self.assertNotIn("pr_type=eq.rollback", rollback_url)
+        self.assertNotIn("status=in.(open,resolved)", rollback_url)
+        rolled_url = next(u for u in urls if "rolled_back_from_pr" in u)
+        self.assertIn("rolled_back_from_pr=not.is.null", rolled_url)
+
+    def test_excludes_already_rolled_back_prs(self):
+        payload = self._call([
+            _Resp([]),
+            _Resp([{"pr_number": 10}, {"pr_number": 20}, {"pr_number": 30}]),
+            _Resp([{"rolled_back_from_pr": 20}]),
+            _Resp([]),
+            _Resp([]),
+        ])
+        self.assertEqual(payload["rollback_count"], 2)
 
     def test_current_drift_when_open_tickets_zero(self):
         """Scan History can show Drift:1 while status=open rows are empty."""
         payload = self._call([
             _Resp([]),  # no open tickets
-            _Resp([], headers={"Content-Range": "*/0"}),
+            _Resp([]),  # no eligible
+            _Resp([]),  # no rolled-back refs
             _Resp([{
                 "completed_at": "2026-09-30T12:00:00Z",
                 "result_summary": {
@@ -197,7 +219,8 @@ class OverviewEndpointTests(unittest.TestCase):
     def test_no_cost_rows(self):
         payload = self._call([
             _Resp([]),
-            _Resp([], headers={"Content-Range": "*/0"}),
+            _Resp([]),
+            _Resp([]),
             _Resp([]),
             _Resp([]),
         ])
@@ -206,6 +229,35 @@ class OverviewEndpointTests(unittest.TestCase):
         self.assertIsNone(payload["last_scan"])
         self.assertEqual(payload["last_scan_drift"]["count"], 0)
         self.assertEqual(payload["open_count"], 0)
+
+
+class EligibleRollbackHelperTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_get = serve.requests.get
+
+    def tearDown(self):
+        serve.requests.get = self._orig_get
+
+    def test_filters_status_pr_type_and_rolled_back(self):
+        urls = []
+
+        def fake_get(url, **_k):
+            urls.append(url)
+            if "rolled_back_from_pr" in url and "select=rolled_back_from_pr" in url:
+                return _Resp([{"rolled_back_from_pr": 2}])
+            return _Resp([{"pr_number": 1}, {"pr_number": 2}])
+
+        serve.requests.get = fake_get
+        rows, err = _fetch_eligible_rollback_events(
+            "https://supabase.invalid",
+            {"apikey": "k", "Authorization": "Bearer k"},
+            "scope-a",
+            select="pr_number",
+        )
+        self.assertIsNone(err)
+        self.assertEqual(rows, [{"pr_number": 1}])
+        self.assertIn("status=eq.resolved", urls[0])
+        self.assertIn("pr_type=in.(fix,batch,rollback)", urls[0])
 
 
 if __name__ == "__main__":

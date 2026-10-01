@@ -98,6 +98,24 @@ function FormError({ msg }: { msg: string }) {
   );
 }
 
+/** Truncated mono text with hover title + click-to-expand for full value. */
+function ExpandableMono({ value }: { value: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => setExpanded((v) => !v)}
+      title={expanded ? 'Click to collapse' : value}
+      aria-expanded={expanded}
+      className={`w-full text-left font-mono hover:text-foreground/80 ${
+        expanded ? 'break-all whitespace-normal' : 'block truncate'
+      }`}
+    >
+      {value}
+    </button>
+  );
+}
+
 // ── ExpireDialog ───────────────────────────────────────────────────────────
 
 function ExpireDialog({
@@ -615,8 +633,8 @@ function UnmanagedTab({
                   return (
                     <tr key={String(row.id)} className={`transition-colors hover:bg-muted/30 ${dim ? 'opacity-60' : ''}`}>
                       <td className="px-4 py-3 font-mono text-foreground">{row.resource_type}</td>
-                      <td className="px-4 py-3 font-mono max-w-[180px]">
-                        <span className="block truncate" title={row.resource_id_pattern}>{row.resource_id_pattern}</span>
+                      <td className="px-4 py-3 max-w-[180px]">
+                        <ExpandableMono value={row.resource_id_pattern} />
                       </td>
                       <td className="px-4 py-3 max-w-[200px]">
                         <span className="block truncate" title={row.reason}>{row.reason}</span>

@@ -33,6 +33,35 @@ _HEADERS = {
 }
 
 
+def resolve_region(account_label: str = "") -> str:
+    """Region for a new drift_events row — prefer the environment config.
+
+    History used to store ``os.environ.get("AWS_REGION", "unknown")``.  Dashboard
+    scans rarely set AWS_REGION on the agent process, so Explorer showed
+    REGION: unknown even when the Environments page had us-east-1.  Prefer
+    ``environments.region`` for *account_label*, then a real AWS_REGION, then
+    us-east-1 — never persist the literal ``unknown``.
+    """
+    slug = (account_label or "").strip()
+    if slug:
+        try:
+            from drift_reconciler.scope_resolution import (
+                ScopeConfigError,
+                fetch_environment_row,
+            )
+            env = fetch_environment_row(slug)
+            region = (env.get("region") or "").strip()
+            if region and region.lower() != "unknown":
+                return region
+        except Exception:
+            # ScopeConfigError / import / network — fall through.
+            pass
+    env_region = (os.environ.get("AWS_REGION") or "").strip()
+    if env_region and env_region.lower() != "unknown":
+        return env_region
+    return "us-east-1"
+
+
 def _post(row: dict[str, Any]) -> bool:
     """Insert one row.  Returns True on success.
 
@@ -506,7 +535,7 @@ def log_manual_entry(account: str, resolution: str) -> None:
     (workflow_dispatch) where there is no PR to resolve."""
     _post({
         "account": account,
-        "region": os.environ.get("AWS_REGION", "unknown"),
+        "region": resolve_region(account),
         "resource_id": "workflow_dispatch",
         "severity": "LOW",
         "pr_type": "manual",

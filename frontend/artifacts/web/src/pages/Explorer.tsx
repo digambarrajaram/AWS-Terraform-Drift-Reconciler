@@ -21,6 +21,7 @@ import {
   type SortColumn, type DriftFilters, type DriftSort,
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
+import { displayRegion } from '@/lib/drift';
 
 // ── Badge maps ──────────────────────────────────────────────────────────────
 
@@ -107,8 +108,9 @@ function buildPrUrl(repoUrl: string | null, githubRepo: string | undefined, prNu
   return base ? `${base.replace(/\.git$/, '').replace(/\/+$/, '')}/pull/${prNumber}` : null;
 }
 
-function EventDetail({ e }: { e: DriftEvent }) {
+function EventDetail({ e, envRegion }: { e: DriftEvent; envRegion?: string | null }) {
   const fields = normalizeFields(e.fields_changed);
+  const region = displayRegion(e.region, envRegion);
   return (
     <div className="space-y-6 text-sm">
       <section className="space-y-3">
@@ -117,7 +119,7 @@ function EventDetail({ e }: { e: DriftEvent }) {
           {kv('Finding status', <FindingStatusBadge status={e.status} />)}
           {kv('Severity', <Badge value={e.severity} map={SEV_CLS} />)}
           {kv('Type',     <TypeBadge prType={e.pr_type} />)}
-          {kv('Region',   e.region)}
+          {kv('Region',   region)}
           {kv('Account',  e.account)}
           {kv('File',     e.file_path)}
           {kv('Created',  safeDate(e.created_at))}
@@ -201,7 +203,13 @@ function EventDetail({ e }: { e: DriftEvent }) {
   );
 }
 
-function DetailDrawer({ event, onClose, repoUrl, githubRepo }: { event: DriftEvent | null; onClose: () => void; repoUrl: string | null; githubRepo?: string }) {
+function DetailDrawer({ event, onClose, repoUrl, githubRepo, envRegion }: {
+  event: DriftEvent | null;
+  onClose: () => void;
+  repoUrl: string | null;
+  githubRepo?: string;
+  envRegion?: string | null;
+}) {
   return (
     <Sheet open={!!event} onOpenChange={(v) => !v && onClose()}>
       <SheetContent className="w-full sm:max-w-xl overflow-y-auto">
@@ -217,7 +225,7 @@ function DetailDrawer({ event, onClose, repoUrl, githubRepo }: { event: DriftEve
                     </a>
                   : <span className="text-muted-foreground" title="Repository is not configured for this environment">PR #{event.pr_number}</span>
             )}
-            <EventDetail e={event} />
+            <EventDetail e={event} envRegion={envRegion} />
           </>
         )}
       </SheetContent>
@@ -257,9 +265,9 @@ function ChangesDiff({ changes }: { changes: NonNullable<DriftEvent['changes_jso
 }
 
 function DriftCard({
-  event, expanded, onToggle,
+  event, expanded, onToggle, envRegion,
 }: {
-  event: DriftEvent; expanded: boolean; onToggle: () => void;
+  event: DriftEvent; expanded: boolean; onToggle: () => void; envRegion?: string | null;
 }) {
   const fields     = normalizeFields(event.fields_changed);
   const hasCost    = event.cost_impact?.monthly_estimate_usd != null;
@@ -267,6 +275,7 @@ function DriftCard({
   const hasChanges = !!event.changes_jsonb && Object.keys(event.changes_jsonb).length > 0;
   const hasFields  = fields.length > 0;
   const hasDetails = hasCost || hasTrivy || hasChanges || hasFields;
+  const region     = displayRegion(event.region, envRegion);
 
   return (
     <div className="rounded-xl border border-border bg-card flex flex-col overflow-hidden">
@@ -292,7 +301,7 @@ function DriftCard({
         {/* Meta row */}
         <p className="text-[11px] text-muted-foreground">
           {event.account}
-          {event.region && <> · {event.region}</>}
+          {region !== '—' && <> · {region}</>}
           {' · '}
           <span title={safeDate(event.created_at)}>
             {safeDate(event.created_at, true)}
@@ -624,7 +633,9 @@ export default function Explorer() {
   const { scope } = useScope();
   const { activeEnvironments } = useEnvironments();
   const { data: config } = useAppConfig();
-  const repoUrl = activeEnvironments.find((e) => e.slug === scope)?.repo_url ?? null;
+  const activeEnv = activeEnvironments.find((e) => e.slug === scope);
+  const repoUrl = activeEnv?.repo_url ?? null;
+  const envRegion = activeEnv?.region ?? null;
 
   const [filters,     setFilters]     = useState<ExplorerFilters>(DEFAULT_FILTERS);
   const [sort,        setSort]        = useState<DriftSort>(DEFAULT_SORT);
@@ -875,6 +886,7 @@ export default function Explorer() {
                   event={ev}
                   expanded={expanded.has(ev.id)}
                   onToggle={() => toggleExpand(ev.id)}
+                  envRegion={envRegion}
                 />
               ))}
             </div>
@@ -892,7 +904,13 @@ export default function Explorer() {
       )}
 
       {/* Detail drawer — table view only */}
-      <DetailDrawer event={selected} onClose={() => setSelected(null)} repoUrl={repoUrl} githubRepo={config?.githubRepo} />
+      <DetailDrawer
+        event={selected}
+        onClose={() => setSelected(null)}
+        repoUrl={repoUrl}
+        githubRepo={config?.githubRepo}
+        envRegion={envRegion}
+      />
     </div>
   );
 }

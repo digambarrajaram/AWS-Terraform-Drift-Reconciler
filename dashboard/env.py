@@ -93,12 +93,19 @@ def _tf_dir_for(scope: str, user_id: str | None = None) -> str:
         raise RuntimeError(str(exc)) from exc
 
 
-def _configure_aws_env(env: dict, scope: str) -> None:
-    """Strip AWS_PROFILE from spawned agent env.
+def _configure_aws_env(env: dict, scope: str, user_id: str | None = None) -> None:
+    """Prepare spawned agent env: drop stale profile, set AWS_REGION.
 
     Role-only auth: the agent resolves credentials via AssumeRole
     (``get_aws_session``). A stale named profile must not override
     temporary session credentials. Legacy ``auth_type='profile'`` /
     ``keys`` paths have been removed.
+
+    Also inject ``AWS_REGION`` from the environment row so drift_events
+    history (and Bedrock defaults) match the Environments page — not
+    ``unknown`` when the host process has no AWS_REGION set.
     """
     env.pop("AWS_PROFILE", None)
+    region = _get_env_field(scope, "region", "", user_id=user_id).strip()
+    if region:
+        env["AWS_REGION"] = region

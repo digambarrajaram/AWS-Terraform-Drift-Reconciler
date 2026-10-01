@@ -449,7 +449,7 @@ _Opened automatically by AWS Terraform Drift Reconciler. Do not merge without re
             drift_history.append_entry(
                 resource_id=history_rid,
                 account_label=account_label,
-                region=os.environ.get("AWS_REGION", "unknown"),
+                region=drift_history.resolve_region(account_label),
                 pr_number=pr.number,
                 pr_type="rollback" if is_rollback else "security_only" if security else "unmanaged" if unmanaged else "fix",
                 severity=risk_level,
@@ -694,7 +694,7 @@ def create_drift_pr_for_file(findings: list[dict], mode: str, account_label: str
             drift_history.append_entry(
                 resource_id=f["resource_id"],
                 account_label=account_label,
-                region=os.environ.get("AWS_REGION", "unknown"),
+                region=drift_history.resolve_region(account_label),
                 pr_number=pr.number,
                 pr_type="batch",
                 severity=f.get("risk_level", "LOW"),

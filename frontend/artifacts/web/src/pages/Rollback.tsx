@@ -117,7 +117,9 @@ function EligiblePRList({
         ) : events.length === 0 ? (
           <div className="flex flex-col items-center gap-3 py-12 text-center">
             <Inbox size={32} className="text-muted-foreground/40" />
-            <p className="text-sm text-muted-foreground">No open drift events with PRs</p>
+            <p className="text-sm text-muted-foreground">
+              No eligible PRs for rollback — resolved fixes have already been rolled back, or none have baselines yet.
+            </p>
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -159,24 +161,15 @@ function EligiblePRList({
                   </td>
                   <td className="px-4 py-3 text-right">
                     {hasBaseline ? (
-                      ev.status === 'open' ? (
-                        <span
-                          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/60 italic"
-                          title="This PR is still open — rollback is available after the PR is merged."
-                        >
-                          Available after merge
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => onPreview(ev)}
-                          disabled={activePrNumber === ev.pr_number}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 disabled:pointer-events-none"
-                        >
-                          <RotateCcw size={11} />
-                          Preview Rollback
-                        </button>
-                      )
+                      <button
+                        type="button"
+                        onClick={() => onPreview(ev)}
+                        disabled={activePrNumber === ev.pr_number}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-40 disabled:pointer-events-none"
+                      >
+                        <RotateCcw size={11} />
+                        Preview Rollback
+                      </button>
                     ) : (
                       <span
                         className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/60 italic"

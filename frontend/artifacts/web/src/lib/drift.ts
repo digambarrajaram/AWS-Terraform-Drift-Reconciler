@@ -31,3 +31,16 @@ export function normalizeDriftEvent(e: DriftEvent): DriftEvent {
       e.cost_impact,
   };
 }
+
+/** Prefer a real stored region; fall back to the environment config for
+ *  legacy rows that persisted the literal ``unknown``. */
+export function displayRegion(
+  eventRegion: string | null | undefined,
+  envRegion?: string | null,
+): string {
+  const stored = (eventRegion || '').trim();
+  if (stored && stored.toLowerCase() !== 'unknown') return stored;
+  const fallback = (envRegion || '').trim();
+  if (fallback) return fallback;
+  return stored || '—';
+}

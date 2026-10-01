@@ -636,7 +636,7 @@ class ApprovalsMixin:
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            _configure_aws_env(env, scope)
+            _configure_aws_env(env, scope, self.auth_user_id)
             _spawn_with_capture(cmd, apply_run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
             print(f"  [apply] Spawned {decision} apply for PR #{pr_number} ({scope})", file=sys.stderr)
 

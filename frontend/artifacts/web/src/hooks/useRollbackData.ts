@@ -37,8 +37,8 @@ export interface RollbackRun {
 // ── useEligiblePRs ─────────────────────────────────────────────────────────
 
 /**
- * Open drift_events for the scope — these are the rollback candidates.
- * Filters client-side to only rows with a pr_number.
+ * Resolved fix/batch/rollback PRs for the scope that can still be rolled back
+ * (excludes PRs already referenced by rolled_back_from_pr).
  */
 export function useEligiblePRs(scope: string | null) {
   return useQuery<DriftEvent[]>({

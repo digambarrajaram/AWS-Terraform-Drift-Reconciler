@@ -259,10 +259,10 @@ export default function Overview() {
             )}
           </StatCard>
 
-          {/* ── Open rollback count ────────────────────────────────────── */}
+          {/* ── Eligible-for-rollback count (resolved fixes, not backlog) ─ */}
           <StatCard
             icon={RotateCcw}
-            label="Open Rollbacks"
+            label="Eligible for Rollback"
             value={isLoading ? undefined : (rollbackCount.data ?? 0)}
             loading={isLoading}
             error={rollbackCount.error}

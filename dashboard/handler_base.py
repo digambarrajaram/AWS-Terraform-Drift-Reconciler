@@ -131,6 +131,57 @@ def _trends_summary_from_rows(rows: list) -> dict:
     }
 
 
+def _fetch_eligible_rollback_events(
+    base: str,
+    headers: dict,
+    scope: str,
+    *,
+    select: str = "*",
+) -> tuple[list | None, str | None]:
+    """Resolved fix/batch/rollback PRs that can still be rolled back.
+
+    Matches legacy ``dashboard/rollback.js``: ``status=resolved``, fix-family
+    ``pr_type``, baseline present, and not already referenced by
+    ``rolled_back_from_pr``.  Used by Overview and ``/api/rollback-data``.
+
+    Returns ``(rows, None)`` on success or ``(None, error)`` on failure.
+    """
+    try:
+        eligible_resp = requests.get(
+            f"{base}/rest/v1/drift_events"
+            f"?select={select}&account=eq.{scope}"
+            f"&status=eq.resolved"
+            f"&pr_type=in.(fix,batch,rollback)"
+            f"&pr_number=not.is.null"
+            f"&changes_jsonb=not.is.null"
+            f"&order=created_at.desc",
+            headers=headers, timeout=10,
+        )
+        rolled_resp = requests.get(
+            f"{base}/rest/v1/drift_events"
+            f"?select=rolled_back_from_pr&account=eq.{scope}"
+            f"&rolled_back_from_pr=not.is.null",
+            headers=headers, timeout=10,
+        )
+    except requests.RequestException as exc:
+        return None, str(exc)
+    if (
+        eligible_resp.status_code not in (200, 206)
+        or rolled_resp.status_code not in (200, 206)
+    ):
+        return None, "eligible rollback query failed"
+    rolled_set = {
+        row.get("rolled_back_from_pr")
+        for row in (rolled_resp.json() or [])
+        if row.get("rolled_back_from_pr") is not None
+    }
+    rows = [
+        row for row in (eligible_resp.json() or [])
+        if row.get("pr_number") not in rolled_set
+    ]
+    return rows, None
+
+
 def _last_scan_drift_summary(result_summary) -> dict:
     """Normalize scan_runs.result_summary.drift for the Overview card.
 
@@ -665,7 +716,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            _configure_aws_env(env, scope)
+            _configure_aws_env(env, scope, self.auth_user_id)
             try:
                 _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
             except Exception as se:
@@ -746,7 +797,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            _configure_aws_env(env, scope)
+            _configure_aws_env(env, scope, self.auth_user_id)
             try:
                 _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
             except Exception as se:
@@ -823,7 +874,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            _configure_aws_env(env, scope)
+            _configure_aws_env(env, scope, self.auth_user_id)
             try:
                 _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
             except Exception as exc:
@@ -900,7 +951,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             ]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            _configure_aws_env(env, scope)
+            _configure_aws_env(env, scope, self.auth_user_id)
             try:
                 _spawn_with_capture(cmd, run_id, env=env, cwd=str(_REPO_ROOT), scope=scope)
             except Exception as exc:
@@ -1038,13 +1089,10 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             )
             # Prefer:count=exact can yield 206 Partial Content — same as
             # /api/pr-queue. Rejecting non-200 made Overview fail entirely.
-            # Match /api/rollback-data "eligible" definition (not pr_type=rollback).
-            rollback_resp = requests.get(
-                f"{base}/rest/v1/drift_events"
-                f"?select=id&account=eq.{scope}"
-                f"&status=in.(open,resolved)&changes_jsonb=not.is.null"
-                f"&pr_number=not.is.null&limit=1",
-                headers={**headers, "Prefer": "count=exact"}, timeout=10,
+            # Eligible-for-rollback = resolved fix-family PRs not yet rolled back
+            # (same definition as /api/rollback-data — not Trends "Accepted").
+            eligible_rows, eligible_err = _fetch_eligible_rollback_events(
+                base, headers, scope, select="pr_number",
             )
             scan_resp = requests.get(
                 f"{base}/rest/v1/scan_runs"
@@ -1052,11 +1100,15 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 f"&completed_at=not.is.null&order=completed_at.desc&limit=1",
                 headers=headers, timeout=10,
             )
-            if any(
-                resp.status_code not in (200, 206)
-                for resp in (severity_resp, rollback_resp, scan_resp)
+            if (
+                severity_resp.status_code not in (200, 206)
+                or eligible_rows is None
+                or scan_resp.status_code not in (200, 206)
             ):
-                self._json_error(502, "Overview query failed")
+                self._json_error(
+                    502,
+                    eligible_err or "Overview query failed",
+                )
                 return
 
             # Sum monthly cost across all open findings with cost_impact.
@@ -1087,15 +1139,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                     break
                 offset += page_size
 
-            content_range = rollback_resp.headers.get("Content-Range", "*/0")
-            try:
-                rollback_count = (
-                    int(content_range.rsplit("/", 1)[-1])
-                    if "/" in content_range and not content_range.endswith("/*")
-                    else len(rollback_resp.json() or [])
-                )
-            except (TypeError, ValueError):
-                rollback_count = len(rollback_resp.json() or [])
+            rollback_count = len(eligible_rows)
 
             scan_rows = scan_resp.json() or []
             scan_row = scan_rows[0] if scan_rows else {}
@@ -1296,11 +1340,8 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             return
         headers = {"apikey": key, "Authorization": f"Bearer {key}"}
         try:
-            eligible = requests.get(
-                f"{base}/rest/v1/drift_events?select=*&account=eq.{scope}"
-                "&status=in.(open,resolved)&changes_jsonb=not.is.null"
-                "&pr_number=not.is.null&order=created_at.desc",
-                headers=headers, timeout=10,
+            eligible_rows, eligible_err = _fetch_eligible_rollback_events(
+                base, headers, scope, select="*",
             )
             history = requests.get(
                 f"{base}/rest/v1/rollback_runs?select=*&scope=eq.{scope}"
@@ -1308,11 +1349,14 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 + "&order=started_at.desc",
                 headers=headers, timeout=10,
             )
-            if eligible.status_code != 200 or history.status_code != 200:
-                self._json_error(502, "Rollback data query failed")
+            if eligible_rows is None or history.status_code != 200:
+                self._json_error(
+                    502,
+                    eligible_err or "Rollback data query failed",
+                )
                 return
             data = json.dumps({
-                "eligible": eligible.json() or [],
+                "eligible": eligible_rows,
                 "history": history.json() or [],
             }).encode("utf-8")
         except (requests.RequestException, ValueError) as exc:

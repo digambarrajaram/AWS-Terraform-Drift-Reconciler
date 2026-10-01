@@ -11,6 +11,12 @@ import {
 } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { useScope } from '@/hooks/useScope';
 import {
   useMostDrifted, useMTTRBySeverity, useDriftVolumeDaily, useDriftSummary,
@@ -121,9 +127,11 @@ interface TileProps {
   icon:    React.ReactNode;
   accent?: string;
   hint?:   string;
+  /** Full text shown on hover when inline hint is abbreviated. */
+  hintDetail?: string;
 }
 
-function StatTile({ label, value, icon, accent, hint }: TileProps) {
+function StatTile({ label, value, icon, accent, hint, hintDetail }: TileProps) {
   return (
     <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3 h-full min-h-[5.5rem]">
       <div className={`flex h-9 w-9 items-center justify-center rounded-lg shrink-0 ${accent ?? 'bg-muted text-muted-foreground'}`}>
@@ -132,20 +140,37 @@ function StatTile({ label, value, icon, accent, hint }: TileProps) {
       <div className="min-w-0 flex-1">
         <p className="text-[11px] text-muted-foreground leading-none mb-1">{label}</p>
         <p className="text-xl font-semibold text-foreground leading-none tabular-nums">{value}</p>
-        {hint && (
-          <p className="mt-1.5 text-[10px] text-muted-foreground leading-snug line-clamp-2" title={hint}>
-            {hint}
-          </p>
-        )}
+        {hint && hintDetail ? (
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="mt-1.5 block w-full min-w-0 text-left text-[10px] text-muted-foreground leading-snug underline decoration-dotted decoration-muted-foreground/50 underline-offset-2 cursor-help"
+                  aria-label={hintDetail}
+                >
+                  {hint}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-xs text-xs leading-relaxed">
+                {hintDetail}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : hint ? (
+          <p className="mt-1.5 text-[10px] text-muted-foreground leading-snug">{hint}</p>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function otherHint(s: DriftSummary): string {
+const OTHER_STATUS_KEYS = ['reverted', 'manual_revert_required', 'suppressed', 'unknown'] as const;
+
+function otherBreakdown(s: DriftSummary): string | undefined {
   const by = s.other_by_status ?? {};
   const parts: string[] = [];
-  for (const key of ['reverted', 'manual_revert_required', 'suppressed', 'unknown']) {
+  for (const key of OTHER_STATUS_KEYS) {
     const n = by[key] ?? 0;
     if (n > 0) {
       const label = key === 'manual_revert_required' ? 'manual revert' : key;
@@ -154,11 +179,10 @@ function otherHint(s: DriftSummary): string {
   }
   // Any statuses outside the known set (forward-compatible).
   for (const [key, n] of Object.entries(by)) {
-    if (['reverted', 'manual_revert_required', 'suppressed', 'unknown'].includes(key)) continue;
+    if ((OTHER_STATUS_KEYS as readonly string[]).includes(key)) continue;
     if (n > 0) parts.push(`${n} ${key}`);
   }
-  if (parts.length === 0) return 'Reverted, suppressed, and other non-open statuses';
-  return parts.join(' · ');
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 const TRENDS_TILE_GRID =
@@ -221,7 +245,8 @@ function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefi
       <StatTile
         label="Other"
         value={other.toLocaleString()}
-        hint={otherHint({ ...s, other })}
+        hint="Reverted, suppressed, other"
+        hintDetail={otherBreakdown({ ...s, other })}
         icon={<AlertTriangle size={16} />}
         accent="bg-zinc-100 text-zinc-600 dark:bg-zinc-900/30 dark:text-zinc-400"
       />

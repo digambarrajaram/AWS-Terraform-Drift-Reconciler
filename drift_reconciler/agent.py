@@ -234,11 +234,19 @@ def _resolve_scope_tf_dir(args) -> str:
         validate_environment_scope_config,
     )
 
+    global _region
     uid = user_id_for_scope_context(args.account_label, getattr(args, "run_id", None))
     try:
         env_dict = fetch_environment_row(args.account_label, user_id=uid)
     except ScopeConfigError as exc:
         raise RuntimeError(str(exc)) from exc
+    # Prefer environments.region so history / AWS clients match the
+    # Environments page (CLI --region alone used to leave AWS_REGION unset
+    # and github_integration persisted "unknown").
+    env_region = (env_dict.get("region") or "").strip()
+    if env_region:
+        _region = env_region
+        os.environ["AWS_REGION"] = env_region
     if args.tf_dir is not None:
         tf_dir = os.path.abspath(args.tf_dir)
         assert_explicit_tf_dir(tf_dir, env_dict)

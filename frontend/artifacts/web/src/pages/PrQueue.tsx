@@ -19,6 +19,7 @@ import {
   useDriftEvents, PAGE_SIZE, type SortColumn, type DriftFilters, type DriftSort,
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
+import { displayRegion } from '@/lib/drift';
 
 // ── Badges ─────────────────────────────────────────────────────────────────
 
@@ -117,16 +118,18 @@ function safeDate(iso: string, relative = false): string {
   return relative ? formatDistanceToNow(date, { addSuffix: true }) : format(date, 'MMM d, yyyy, HH:mm');
 }
 
-function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
+function DetailDrawer({ event, onClose, repoUrl, githubRepo, envRegion }: {
   event: DriftEvent | null;
   onClose: () => void;
   repoUrl: string | null;
   githubRepo: string | undefined;
+  envRegion?: string | null;
 }) {
   const open   = !!event;
   const e      = event;
   const fields = e ? normalizeFields(e.fields_changed) : [];
   const prUrl  = e ? buildPrUrl(repoUrl, githubRepo, e.pr_number) : null;
+  const region = e ? displayRegion(e.region, envRegion) : '—';
 
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
@@ -167,7 +170,7 @@ function DetailDrawer({ event, onClose, repoUrl, githubRepo }: {
                   {kv('Finding status', <FindingStatusBadge status={e.status} />)}
                   {kv('Severity', <Badge value={e.severity} map={SEV} />)}
                   {kv('Type',     <TypeBadge prType={e.pr_type} />)}
-                  {kv('Region',   e.region)}
+                  {kv('Region',   region)}
                   {kv('Account',  e.account)}
                   {kv('File',     e.file_path)}
                   {kv('Created',  safeDate(e.created_at))}
@@ -384,7 +387,9 @@ export default function PrQueue() {
 
   // Resolve the GitHub repo for PR links — prefer the environment-level
   // repo_url, fall back to the global GITHUB_REPO from config.
-  const repoUrl    = activeEnvironments.find((e) => e.slug === scope)?.repo_url ?? null;
+  const activeEnv  = activeEnvironments.find((e) => e.slug === scope);
+  const repoUrl    = activeEnv?.repo_url ?? null;
+  const envRegion  = activeEnv?.region ?? null;
   const githubRepo = config?.githubRepo;
 
   const [filters,     setFilters]     = useState<DriftFilters>(DEFAULT_FILTERS);
@@ -584,7 +589,13 @@ export default function PrQueue() {
         )}
       </div>
 
-      <DetailDrawer event={selected} onClose={() => setSelected(null)} repoUrl={repoUrl} githubRepo={githubRepo} />
+      <DetailDrawer
+        event={selected}
+        onClose={() => setSelected(null)}
+        repoUrl={repoUrl}
+        githubRepo={githubRepo}
+        envRegion={envRegion}
+      />
     </div>
   );
 }

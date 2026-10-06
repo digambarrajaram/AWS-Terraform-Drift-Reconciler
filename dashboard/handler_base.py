@@ -138,11 +138,14 @@ def _fetch_eligible_rollback_events(
     *,
     select: str = "*",
 ) -> tuple[list | None, str | None]:
-    """Resolved fix/batch/rollback PRs that can still be rolled back.
+    """Resolved fix/batch/security/rollback PRs that can still be rolled back.
 
-    Matches legacy ``dashboard/rollback.js``: ``status=resolved``, fix-family
-    ``pr_type``, baseline present, and not already referenced by
-    ``rolled_back_from_pr``.  Used by Overview and ``/api/rollback-data``.
+    Includes ``security_only`` PRs that were **applied to infra** (so a
+    broken hardening can be reverted).  Excludes excepted security PRs —
+    those never changed AWS.  Also requires a baseline and excludes PRs
+    already referenced by ``rolled_back_from_pr``.
+
+    Used by Overview and ``/api/rollback-data``.
 
     Returns ``(rows, None)`` on success or ``(None, error)`` on failure.
     """
@@ -151,7 +154,7 @@ def _fetch_eligible_rollback_events(
             f"{base}/rest/v1/drift_events"
             f"?select={select}&account=eq.{scope}"
             f"&status=eq.resolved"
-            f"&pr_type=in.(fix,batch,rollback)"
+            f"&pr_type=in.(fix,batch,rollback,security_only)"
             f"&pr_number=not.is.null"
             f"&changes_jsonb=not.is.null"
             f"&order=created_at.desc",
@@ -163,11 +166,21 @@ def _fetch_eligible_rollback_events(
             f"&rolled_back_from_pr=not.is.null",
             headers=headers, timeout=10,
         )
+        # Excepted security PRs are status=resolved on drift_events but
+        # never merged/applied — keep them off the rollback list.
+        excepted_resp = requests.get(
+            f"{base}/rest/v1/pending_applies"
+            f"?select=pr_number&scope=eq.{scope}"
+            f"&status=eq.excepted"
+            f"&pr_type=eq.security_only",
+            headers=headers, timeout=10,
+        )
     except requests.RequestException as exc:
         return None, str(exc)
     if (
         eligible_resp.status_code not in (200, 206)
         or rolled_resp.status_code not in (200, 206)
+        or excepted_resp.status_code not in (200, 206)
     ):
         return None, "eligible rollback query failed"
     rolled_set = {
@@ -175,9 +188,26 @@ def _fetch_eligible_rollback_events(
         for row in (rolled_resp.json() or [])
         if row.get("rolled_back_from_pr") is not None
     }
+    excepted_set = {
+        row.get("pr_number")
+        for row in (excepted_resp.json() or [])
+        if row.get("pr_number") is not None
+    }
+
+    def _exclude(row: dict) -> bool:
+        prn = row.get("pr_number")
+        if prn in rolled_set or prn in excepted_set:
+            return True
+        # Belt-and-suspenders when select includes resolution/pr_type.
+        if row.get("pr_type") == "security_only":
+            res = (row.get("resolution") or "").strip().lower()
+            if res.startswith("excepted"):
+                return True
+        return False
+
     rows = [
         row for row in (eligible_resp.json() or [])
-        if row.get("pr_number") not in rolled_set
+        if not _exclude(row)
     ]
     return rows, None
 

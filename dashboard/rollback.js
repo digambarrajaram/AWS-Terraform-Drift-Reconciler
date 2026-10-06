@@ -12,13 +12,14 @@ function _supabase() {
 }
 
 async function fetchEligiblePRs(scope) {
-  // Resolved PRs eligible for rollback.
+  // Resolved PRs eligible for rollback (includes applied security fixes;
+  // excepted security PRs never changed infra and stay off this list).
   const { data: resolved, error } = await _supabase()
     .from("drift_events")
-    .select("id,created_at,resource_id,severity,pr_number,pr_type,drift_summary,changes_jsonb")
+    .select("id,created_at,resource_id,severity,pr_number,pr_type,drift_summary,changes_jsonb,resolution")
     .eq("account", scope)
     .eq("status", "resolved")
-    .in("pr_type", ["fix", "batch", "rollback"])
+    .in("pr_type", ["fix", "batch", "rollback", "security_only"])
     .order("created_at", { ascending: false })
     .limit(100);
 
@@ -31,9 +32,25 @@ async function fetchEligiblePRs(scope) {
     .select("rolled_back_from_pr")
     .not("rolled_back_from_pr", "is", null);
 
-  const rolledBackSet = new Set((rolledBack || []).map(r => r.rolled_back_from_pr));
+  // Excepted security PRs are resolved without merge/apply.
+  const { data: excepted } = await _supabase()
+    .from("pending_applies")
+    .select("pr_number")
+    .eq("scope", scope)
+    .eq("status", "excepted")
+    .eq("pr_type", "security_only");
 
-  return resolved.filter(r => !rolledBackSet.has(r.pr_number));
+  const rolledBackSet = new Set((rolledBack || []).map(r => r.rolled_back_from_pr));
+  const exceptedSet = new Set((excepted || []).map(r => r.pr_number));
+
+  return resolved.filter(r => {
+    if (rolledBackSet.has(r.pr_number) || exceptedSet.has(r.pr_number)) return false;
+    if (r.pr_type === "security_only" &&
+        (r.resolution || "").trim().toLowerCase().startsWith("excepted")) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function renderRollbackList(rows) {

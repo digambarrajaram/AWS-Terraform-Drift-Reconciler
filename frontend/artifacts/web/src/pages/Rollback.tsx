@@ -118,7 +118,7 @@ function EligiblePRList({
           <div className="flex flex-col items-center gap-3 py-12 text-center">
             <Inbox size={32} className="text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">
-              No eligible PRs for rollback — resolved fixes have already been rolled back, or none have baselines yet.
+              No eligible PRs for rollback — applied fixes have already been rolled back, none have baselines yet, or security findings were only excepted (not applied to infra).
             </p>
           </div>
         ) : (

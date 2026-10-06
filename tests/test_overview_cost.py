@@ -145,6 +145,7 @@ class OverviewEndpointTests(unittest.TestCase):
                 {"pr_number": 1}, {"pr_number": 2}, {"pr_number": 3},
             ], status_code=206),
             _Resp([]),  # none already rolled back
+            _Resp([]),  # no excepted security PRs
             _Resp([{  # last scan — live drift even when open tickets exist
                 "completed_at": "2026-09-01T00:00:00Z",
                 "result_summary": {
@@ -177,18 +178,22 @@ class OverviewEndpointTests(unittest.TestCase):
         # Eligible for Rollback = resolved fix-family, not open∪resolved Accepted.
         rollback_url = next(u for u in urls if "drift_events" in u and "pr_number" in u)
         self.assertIn("status=eq.resolved", rollback_url)
-        self.assertIn("pr_type=in.(fix,batch,rollback)", rollback_url)
+        self.assertIn("pr_type=in.(fix,batch,rollback,security_only)", rollback_url)
         self.assertIn("changes_jsonb=not.is.null", rollback_url)
         self.assertIn("pr_number=not.is.null", rollback_url)
         self.assertNotIn("status=in.(open,resolved)", rollback_url)
         rolled_url = next(u for u in urls if "rolled_back_from_pr" in u)
         self.assertIn("rolled_back_from_pr=not.is.null", rolled_url)
+        excepted_url = next(u for u in urls if "pending_applies" in u)
+        self.assertIn("status=eq.excepted", excepted_url)
+        self.assertIn("pr_type=eq.security_only", excepted_url)
 
     def test_excludes_already_rolled_back_prs(self):
         payload = self._call([
             _Resp([]),
             _Resp([{"pr_number": 10}, {"pr_number": 20}, {"pr_number": 30}]),
             _Resp([{"rolled_back_from_pr": 20}]),
+            _Resp([]),  # no excepted
             _Resp([]),
             _Resp([]),
         ])
@@ -200,6 +205,7 @@ class OverviewEndpointTests(unittest.TestCase):
             _Resp([]),  # no open tickets
             _Resp([]),  # no eligible
             _Resp([]),  # no rolled-back refs
+            _Resp([]),  # no excepted
             _Resp([{
                 "completed_at": "2026-09-30T12:00:00Z",
                 "result_summary": {
@@ -221,6 +227,7 @@ class OverviewEndpointTests(unittest.TestCase):
             _Resp([]),
             _Resp([]),
             _Resp([]),
+            _Resp([]),  # no excepted
             _Resp([]),
             _Resp([]),
         ])
@@ -245,6 +252,8 @@ class EligibleRollbackHelperTests(unittest.TestCase):
             urls.append(url)
             if "rolled_back_from_pr" in url and "select=rolled_back_from_pr" in url:
                 return _Resp([{"rolled_back_from_pr": 2}])
+            if "pending_applies" in url:
+                return _Resp([])
             return _Resp([{"pr_number": 1}, {"pr_number": 2}])
 
         serve.requests.get = fake_get
@@ -257,7 +266,34 @@ class EligibleRollbackHelperTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(rows, [{"pr_number": 1}])
         self.assertIn("status=eq.resolved", urls[0])
-        self.assertIn("pr_type=in.(fix,batch,rollback)", urls[0])
+        self.assertIn("pr_type=in.(fix,batch,rollback,security_only)", urls[0])
+
+    def test_excludes_excepted_security_prs(self):
+        """Excepted security PRs never applied to infra — not rollback-eligible."""
+        def fake_get(url, **_k):
+            if "rolled_back_from_pr" in url and "select=rolled_back_from_pr" in url:
+                return _Resp([])
+            if "pending_applies" in url:
+                return _Resp([{"pr_number": 50}])
+            return _Resp([
+                {"pr_number": 40, "pr_type": "security_only",
+                 "resolution": "PR merged via dashboard — code updated to match live AWS state"},
+                {"pr_number": 50, "pr_type": "security_only",
+                 "resolution": "Excepted via dashboard — security finding suppressed"},
+                {"pr_number": 60, "pr_type": "fix"},
+            ])
+
+        serve.requests.get = fake_get
+        rows, err = _fetch_eligible_rollback_events(
+            "https://supabase.invalid",
+            {"apikey": "k", "Authorization": "Bearer k"},
+            "scope-a",
+        )
+        self.assertIsNone(err)
+        self.assertEqual(
+            [r["pr_number"] for r in rows],
+            [40, 60],
+        )
 
 
 if __name__ == "__main__":

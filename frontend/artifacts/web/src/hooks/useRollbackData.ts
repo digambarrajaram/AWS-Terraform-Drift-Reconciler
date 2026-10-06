@@ -37,8 +37,9 @@ export interface RollbackRun {
 // ── useEligiblePRs ─────────────────────────────────────────────────────────
 
 /**
- * Resolved fix/batch/rollback PRs for the scope that can still be rolled back
- * (excludes PRs already referenced by rolled_back_from_pr).
+ * Resolved fix/batch/security/rollback PRs for the scope that can still be
+ * rolled back. Applied security fixes are included; excepted security PRs
+ * (never applied to infra) and already-rolled-back PRs are excluded.
  */
 export function useEligiblePRs(scope: string | null) {
   return useQuery<DriftEvent[]>({

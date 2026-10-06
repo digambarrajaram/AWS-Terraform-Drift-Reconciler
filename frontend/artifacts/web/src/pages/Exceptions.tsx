@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { errorMessage } from '@/lib/errorUtils';
 import {
   Plus, Trash2, Clock, ChevronDown, ChevronUp,
-  ShieldCheck, ShieldOff, Inbox, AlertTriangle,
+  ShieldCheck, ShieldOff, Inbox, AlertTriangle, Eye,
 } from 'lucide-react';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -98,21 +98,69 @@ function FormError({ msg }: { msg: string }) {
   );
 }
 
-/** Truncated mono text with hover title + click-to-expand for full value. */
-function ExpandableMono({ value }: { value: string }) {
+/** Truncated text with hover title + click-to-expand for full value. */
+function ExpandableText({
+  value, mono = false,
+}: {
+  value: string; mono?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+  if (!value) return <span className="text-muted-foreground">—</span>;
   return (
     <button
       type="button"
       onClick={() => setExpanded((v) => !v)}
       title={expanded ? 'Click to collapse' : value}
       aria-expanded={expanded}
-      className={`w-full text-left font-mono hover:text-foreground/80 ${
-        expanded ? 'break-all whitespace-normal' : 'block truncate'
-      }`}
+      className={`w-full text-left hover:text-foreground/80 ${
+        mono ? 'font-mono' : ''
+      } ${expanded ? 'break-words whitespace-pre-wrap' : 'block truncate'}`}
     >
       {value}
     </button>
+  );
+}
+
+function DetailRow({ label, value, mono = false }: {
+  label: string; value: React.ReactNode; mono?: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-0.5 py-1.5 border-b border-border/60 last:border-0">
+      <dt className="text-[11px] font-medium text-muted-foreground pt-0.5">{label}</dt>
+      <dd className={`text-xs text-foreground break-words whitespace-pre-wrap ${mono ? 'font-mono' : ''}`}>
+        {value ?? '—'}
+      </dd>
+    </div>
+  );
+}
+
+function ExceptionDetailDialog({
+  open, title, rows, onClose,
+}: {
+  open: boolean;
+  title: string;
+  rows: Array<{ label: string; value: React.ReactNode; mono?: boolean }>;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        <dl className="mt-1">
+          {rows.map((r) => (
+            <DetailRow key={r.label} label={r.label} value={r.value} mono={r.mono} />
+          ))}
+        </dl>
+        <DialogFooter className="mt-4">
+          <button type="button" onClick={onClose}
+            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent transition-colors">
+            Close
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -196,12 +244,17 @@ function DeleteDialog({
 // ── RowActions ─────────────────────────────────────────────────────────────
 
 function RowActions({
-  onExpire, onDelete, showExpire = true,
+  onDetails, onExpire, onDelete, showExpire = true,
 }: {
-  onExpire?: () => void; onDelete: () => void; showExpire?: boolean;
+  onDetails: () => void; onExpire?: () => void; onDelete: () => void; showExpire?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1">
+      <button type="button" onClick={onDetails}
+        title="View details"
+        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors">
+        <Eye size={12} /> Details
+      </button>
       {showExpire && (
         <button type="button" onClick={onExpire}
           title="Set expiry"
@@ -235,6 +288,7 @@ function DriftTab({
   const [showForm, setShowForm]   = useState(false);
   const [form, setForm]           = useState(DRIFT_BLANK);
   const [formErr, setFormErr]     = useState('');
+  const [detailTarget, setDetailTarget] = useState<DriftException | null>(null);
   const [expireTarget, setExpireTarget] = useState<DriftException | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DriftException | null>(null);
 
@@ -404,12 +458,12 @@ function DriftTab({
                   const dim = expired || !row.active;
                   return (
                     <tr key={String(row.id)} className={`transition-colors hover:bg-muted/30 ${dim ? 'opacity-60' : ''}`}>
-                      <td className="px-4 py-3 font-mono max-w-[200px]">
-                        <span className="block truncate" title={row.resource_address}>{row.resource_address}</span>
+                      <td className="px-4 py-3 max-w-[220px]">
+                        <ExpandableText value={row.resource_address} mono />
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{row.drift_type ?? '—'}</td>
-                      <td className="px-4 py-3 max-w-[200px]">
-                        <span className="block truncate" title={row.reason}>{row.reason}</span>
+                      <td className="px-4 py-3 max-w-[260px]">
+                        <ExpandableText value={row.reason} />
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
                       <td className="px-4 py-3 whitespace-nowrap">
@@ -427,6 +481,7 @@ function DriftTab({
                       </td>
                       <td className="px-4 py-3">
                         <RowActions
+                          onDetails={() => setDetailTarget(row)}
                           onExpire={() => setExpireTarget(row)}
                           onDelete={() => setDeleteTarget(row)}
                         />
@@ -440,6 +495,21 @@ function DriftTab({
         )}
       </div>
 
+      <ExceptionDetailDialog
+        open={!!detailTarget}
+        title="Drift exception details"
+        onClose={() => setDetailTarget(null)}
+        rows={detailTarget ? [
+          { label: 'Resource', value: detailTarget.resource_address, mono: true },
+          { label: 'Drift type', value: detailTarget.drift_type ?? '—' },
+          { label: 'Reason', value: detailTarget.reason },
+          { label: 'Approved by', value: detailTarget.approved_by ?? '—' },
+          { label: 'Expires', value: <ExpiresCell expires={detailTarget.expires} /> },
+          { label: 'Auto', value: detailTarget.auto ? 'Yes' : 'No' },
+          { label: 'Status', value: <ActiveBadge active={detailTarget.active} expires={detailTarget.expires} /> },
+          { label: 'Scope', value: detailTarget.scope, mono: true },
+        ] : []}
+      />
       <ExpireDialog
         open={!!expireTarget}
         label={expireTarget?.resource_address ?? ''}
@@ -475,6 +545,7 @@ function UnmanagedTab({
   const [showForm, setShowForm]   = useState(false);
   const [form, setForm]           = useState(UNM_BLANK);
   const [formErr, setFormErr]     = useState('');
+  const [detailTarget, setDetailTarget] = useState<UnmanagedException | null>(null);
   const [expireTarget, setExpireTarget] = useState<UnmanagedException | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<UnmanagedException | null>(null);
 
@@ -634,10 +705,10 @@ function UnmanagedTab({
                     <tr key={String(row.id)} className={`transition-colors hover:bg-muted/30 ${dim ? 'opacity-60' : ''}`}>
                       <td className="px-4 py-3 font-mono text-foreground">{row.resource_type}</td>
                       <td className="px-4 py-3 max-w-[180px]">
-                        <ExpandableMono value={row.resource_id_pattern} />
+                        <ExpandableText value={row.resource_id_pattern} mono />
                       </td>
-                      <td className="px-4 py-3 max-w-[200px]">
-                        <span className="block truncate" title={row.reason}>{row.reason}</span>
+                      <td className="px-4 py-3 max-w-[260px]">
+                        <ExpandableText value={row.reason} />
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
                       <td className="px-4 py-3 text-muted-foreground">
@@ -653,6 +724,7 @@ function UnmanagedTab({
                       </td>
                       <td className="px-4 py-3">
                         <RowActions
+                          onDetails={() => setDetailTarget(row)}
                           onExpire={() => setExpireTarget(row)}
                           onDelete={() => setDeleteTarget(row)}
                         />
@@ -666,6 +738,26 @@ function UnmanagedTab({
         )}
       </div>
 
+      <ExceptionDetailDialog
+        open={!!detailTarget}
+        title="Unmanaged exception details"
+        onClose={() => setDetailTarget(null)}
+        rows={detailTarget ? [
+          { label: 'Type', value: detailTarget.resource_type, mono: true },
+          { label: 'ID pattern', value: detailTarget.resource_id_pattern, mono: true },
+          { label: 'Reason', value: detailTarget.reason },
+          { label: 'Approved by', value: detailTarget.approved_by ?? '—' },
+          {
+            label: 'Max cost/mo',
+            value: detailTarget.max_monthly_cost_usd != null
+              ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(detailTarget.max_monthly_cost_usd)
+              : '—',
+          },
+          { label: 'Expires', value: <ExpiresCell expires={detailTarget.expires} /> },
+          { label: 'Status', value: <ActiveBadge active={detailTarget.active} expires={detailTarget.expires} /> },
+          { label: 'Scope', value: detailTarget.scope, mono: true },
+        ] : []}
+      />
       <ExpireDialog
         open={!!expireTarget}
         label={expireTarget ? `${expireTarget.resource_type} / ${expireTarget.resource_id_pattern}` : ''}
@@ -701,6 +793,7 @@ function SecurityTab({
   const [showForm, setShowForm]   = useState(false);
   const [form, setForm]           = useState(SECURITY_BLANK);
   const [formErr, setFormErr]     = useState('');
+  const [detailTarget, setDetailTarget] = useState<SecurityException | null>(null);
   const [expireTarget, setExpireTarget] = useState<SecurityException | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SecurityException | null>(null);
 
@@ -867,12 +960,12 @@ function SecurityTab({
                   const dim = expired || !row.active;
                   return (
                     <tr key={String(row.id)} className={`transition-colors hover:bg-muted/30 ${dim ? 'opacity-60' : ''}`}>
-                      <td className="px-4 py-3 font-mono max-w-[200px]">
-                        <span className="block truncate" title={row.resource_address}>{row.resource_address}</span>
+                      <td className="px-4 py-3 max-w-[220px]">
+                        <ExpandableText value={row.resource_address} mono />
                       </td>
                       <td className="px-4 py-3 font-mono text-foreground">{row.rule_id}</td>
-                      <td className="px-4 py-3 max-w-[200px]">
-                        <span className="block truncate" title={row.reason}>{row.reason}</span>
+                      <td className="px-4 py-3 max-w-[260px]">
+                        <ExpandableText value={row.reason} />
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
                       <td className="px-4 py-3 whitespace-nowrap">
@@ -890,6 +983,7 @@ function SecurityTab({
                       </td>
                       <td className="px-4 py-3">
                         <RowActions
+                          onDetails={() => setDetailTarget(row)}
                           onExpire={() => setExpireTarget(row)}
                           onDelete={() => setDeleteTarget(row)}
                         />
@@ -903,6 +997,21 @@ function SecurityTab({
         )}
       </div>
 
+      <ExceptionDetailDialog
+        open={!!detailTarget}
+        title="Security exception details"
+        onClose={() => setDetailTarget(null)}
+        rows={detailTarget ? [
+          { label: 'Resource', value: detailTarget.resource_address, mono: true },
+          { label: 'Rule ID', value: detailTarget.rule_id, mono: true },
+          { label: 'Reason', value: detailTarget.reason },
+          { label: 'Approved by', value: detailTarget.approved_by ?? '—' },
+          { label: 'Expires', value: <ExpiresCell expires={detailTarget.expires} /> },
+          { label: 'Auto', value: detailTarget.auto ? 'Yes' : 'No' },
+          { label: 'Status', value: <ActiveBadge active={detailTarget.active} expires={detailTarget.expires} /> },
+          { label: 'Scope', value: detailTarget.scope, mono: true },
+        ] : []}
+      />
       <ExpireDialog
         open={!!expireTarget}
         label={expireTarget?.resource_address ?? ''}

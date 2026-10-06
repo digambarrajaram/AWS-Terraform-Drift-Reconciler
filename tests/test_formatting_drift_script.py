@@ -168,6 +168,59 @@ class FormattingDriftScriptTests(unittest.TestCase):
             {"before": "ami-new", "after": "ami-old"},
         )
 
+    def test_refresh_purged_resource_is_deleted_externally(self):
+        """AWS-gone + refresh dropped from prior_state still classifies deletion.
+
+        Terraform auto-removes missing resources from state during refresh, so
+        prior_state no longer lists the address and resource_changes shows
+        create.  Native resource_drift with after=null is the signal.
+        """
+        plan = {
+            "resource_drift": [
+                {
+                    "address": "module.network.aws_vpc_security_group_egress_rule.s3_https",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {
+                            "id": "sgr-abc",
+                            "from_port": 443,
+                            "to_port": 443,
+                        },
+                        "after": None,
+                    },
+                },
+            ],
+            "prior_state": {
+                "values": {
+                    "root_module": {
+                        "resources": [],
+                        "child_modules": [],
+                    },
+                },
+            },
+            "resource_changes": [
+                {
+                    "address": "module.network.aws_vpc_security_group_egress_rule.s3_https",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["create"],
+                        "before": None,
+                        "after": {"from_port": 443, "to_port": 443},
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report = report_drift(plan, tf_dir=tmp, scope=None)
+        self.assertEqual(report["report_type"], "drift")
+        self.assertEqual(len(report["resources"]), 1)
+        self.assertEqual(report["resources"][0]["status"], "deleted_externally")
+        self.assertEqual(
+            report["resources"][0]["address"],
+            "module.network.aws_vpc_security_group_egress_rule.s3_https",
+        )
+
     def test_update_with_empty_visible_diff_still_reported(self):
         plan = {
             "resource_drift": [],

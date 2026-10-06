@@ -385,13 +385,22 @@ def _lookup_file_path(file_index: dict, address: str | None) -> str | None:
 
 
 def _is_all_null_after(change: dict) -> bool:
-    """True when refresh/plan after-values are an all-null object (gone in AWS)."""
+    """True when refresh/plan after-values show the resource is gone in AWS.
+
+    Terraform may emit ``after: null``, ``after: {}``, or an object whose
+    values are all null after a refresh removes a missing resource from
+    state.  Any of those with a non-empty ``before`` means deleted externally.
+    """
     before = change.get("before")
     after = change.get("after")
     if not isinstance(before, dict) or not before:
         return False
-    if not isinstance(after, dict) or not after:
+    if after is None:
+        return True
+    if not isinstance(after, dict):
         return False
+    if not after:
+        return True
     return all(v is None for v in after.values())
 
 

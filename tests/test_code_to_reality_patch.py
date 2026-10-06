@@ -172,6 +172,75 @@ class CodeToRealityPatchTests(unittest.TestCase):
             self.assertIn("layers", out)
             self.assertIn("arn:aws:lambda:us-east-1:1:layer:x:1", out)
 
+    def test_module_prefixed_address_patches_bare_resource_block(self):
+        """module.X.type.name must target resource \"type\" \"name\" in the file."""
+        with tempfile.TemporaryDirectory() as td:
+            tf = os.path.join(td, "main.tf")
+            with open(tf, "w", encoding="utf-8") as fh:
+                fh.write(
+                    'resource "aws_sns_topic" "events" {\n'
+                    '  name             = "events"\n'
+                    '  kms_master_key_id = "alias/aws/sns"\n'
+                    "}\n"
+                )
+            orig_hcledit = gi.is_hcledit_available
+            gi.is_hcledit_available = lambda: False
+            try:
+                out = gi.apply_changes_to_file(
+                    tf,
+                    "module.test_support.aws_sns_topic.events",
+                    {
+                        "kms_master_key_id": {
+                            "before": "alias/aws/sns",
+                            "after": "",
+                        },
+                    },
+                    value_key="after",
+                )
+            finally:
+                gi.is_hcledit_available = orig_hcledit
+            self.assertNotIn("kms_master_key_id", out)
+            self.assertIn('name             = "events"', out)
+
+    def test_module_prefixed_deleted_externally_removes_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            tf = os.path.join(td, "main.tf")
+            with open(tf, "w", encoding="utf-8") as fh:
+                fh.write(
+                    'resource "aws_vpc_security_group_egress_rule" "s3_https" {\n'
+                    '  from_port = 443\n'
+                    '  to_port   = 443\n'
+                    "}\n\n"
+                    'resource "aws_security_group" "app" {\n'
+                    '  name = "app"\n'
+                    "}\n"
+                )
+            orig_hcledit = gi.is_hcledit_available
+            gi.is_hcledit_available = lambda: False
+            try:
+                out = gi.apply_changes_to_file(
+                    tf,
+                    "module.network.aws_vpc_security_group_egress_rule.s3_https",
+                    {},
+                    deleted=True,
+                )
+            finally:
+                gi.is_hcledit_available = orig_hcledit
+            self.assertNotIn("s3_https", out)
+            self.assertIn('resource "aws_security_group" "app"', out)
+
+    def test_hcl_resource_type_name_strips_modules(self):
+        self.assertEqual(
+            gi._hcl_resource_type_name(
+                "module.network.aws_vpc_security_group_egress_rule.s3_https"
+            ),
+            ("aws_vpc_security_group_egress_rule", "s3_https"),
+        )
+        self.assertEqual(
+            gi._hcl_resource_type_name("aws_instance.foo[0]"),
+            ("aws_instance", "foo"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

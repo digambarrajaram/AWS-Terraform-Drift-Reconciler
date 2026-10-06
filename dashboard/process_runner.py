@@ -134,6 +134,12 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope:
             _pair = _RUNNING.pop(run_id, None)
         _run_scope = _pair[2] if _pair else ""
 
+        # Always snapshot the log into the DB for terminal scan/rollback
+        # rows — /tmp/drift-logs is purged on restart and after 24h, which
+        # left completed runs with empty log viewers on recheck.
+        if not was_cancelled:
+            _persist_run_log(run_id, log_path)
+
         if proc.returncode == 0:
             return
 
@@ -202,6 +208,92 @@ def _spawn_with_capture(cmd: list[str], run_id: str, env: dict, cwd: str, scope:
 
     threading.Thread(target=_watch_exit, daemon=True, name=f"watch-{run_id[:8]}").start()
     return proc
+
+
+# Cap persisted logs so result_summary stays within PostgREST/JSONB comfort.
+_LOG_PERSIST_MAX_CHARS = 200_000
+
+
+def _read_log_snapshot(run_id: str, log_path: Path) -> str:
+    """Best-effort full log text for DB persistence (file, else ring buffer)."""
+    text = ""
+    try:
+        if log_path.is_file():
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if not text:
+        with _LOG_LOCK:
+            buf = _LOG_BUFFERS.get(run_id)
+            if buf:
+                text = "\n".join(buf)
+    if len(text) > _LOG_PERSIST_MAX_CHARS:
+        text = text[-_LOG_PERSIST_MAX_CHARS:]
+    return text
+
+
+def _persist_run_log(run_id: str, log_path: Path) -> None:
+    """Merge ``log_output`` into scan_runs/rollback_runs result JSONB.
+
+    Skips pending_applies (those already store ``result.output``).  Merges
+    into the existing summary so finalize_trivy_only_scan / agent writes
+    are not overwritten.
+
+    Retries briefly: the agent PATCHes ``status=complete`` just before
+    exit, and that write can land after ``proc.wait()`` returns.
+    """
+    text = _read_log_snapshot(run_id, log_path)
+    if not text:
+        return
+    url_base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url_base or not key:
+        return
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    import time as _time
+    for attempt in range(5):
+        for table, result_col in (
+            ("scan_runs", "result_summary"),
+            ("rollback_runs", "result"),
+        ):
+            try:
+                resp = requests.get(
+                    f"{url_base}/rest/v1/{table}"
+                    f"?select=status,{result_col}&id=eq.{run_id}",
+                    headers=headers,
+                    timeout=5,
+                )
+                if resp.status_code != 200 or not resp.json():
+                    continue
+                row = resp.json()[0]
+                # Wait for the agent (or fail path) to finish — mid-run
+                # patches would race finalize_trivy_only_scan.
+                if row.get("status") not in ("complete", "failed", "cancelled"):
+                    break  # retry outer loop
+                existing = row.get(result_col)
+                if not isinstance(existing, dict):
+                    existing = {"summary": existing} if existing else {}
+                if existing.get("log_output") == text:
+                    return
+                merged = dict(existing)
+                merged["log_output"] = text
+                requests.patch(
+                    f"{url_base}/rest/v1/{table}?id=eq.{run_id}",
+                    headers=headers,
+                    json={result_col: merged},
+                    timeout=5,
+                )
+                return
+            except requests.RequestException:
+                continue
+        else:
+            # Row not found in either table — nothing to persist.
+            return
+        _time.sleep(0.4 * (attempt + 1))
 
 
 def _cleanup_old_logs() -> None:

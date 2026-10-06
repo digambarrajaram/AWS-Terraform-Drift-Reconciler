@@ -168,17 +168,21 @@ class RunsMixin:
                 # Supabase round-trips a request — fine once, but the
                 # drawer polls every 800 ms, so scope the probe to the
                 # table the id actually lives in.
-                tables = ("pending_applies",) if "/api/pending-applies/" in parsed.path else ("scan_runs", "rollback_runs")
-                for table in tables:
+                if "/api/pending-applies/" in parsed.path:
+                    tables = (("pending_applies", "result"),)
+                else:
+                    tables = (
+                        ("scan_runs", "result_summary"),
+                        ("rollback_runs", "result"),
+                    )
+                for table, result_col in tables:
                     try:
                         # The drawer renders status from this same payload,
                         # so it has exactly one poller per row — the log
-                        # poll.  select=status,result is pending-only: scan/
-                        # rollback tables don't have a result column, and
-                        # PostgREST 400s on unknown columns.
-                        sel = "status,result" if table == "pending_applies" else "status"
+                        # poll.  Column names differ per table.
                         resp = requests.get(
-                            f"{url_base}/rest/v1/{table}?select={sel}&id=eq.{run_id}",
+                            f"{url_base}/rest/v1/{table}"
+                            f"?select=status,{result_col}&id=eq.{run_id}",
                             headers=headers, timeout=5,
                         )
                         if resp.status_code == 200 and resp.json():
@@ -196,9 +200,23 @@ class RunsMixin:
                                     "excepted",
                                 )
                                 result = row.get("result") or {}
-                                result_output = result.get("output") if isinstance(result, dict) else None
+                                result_output = (
+                                    result.get("output")
+                                    if isinstance(result, dict) else None
+                                )
                             else:
-                                complete = status in ("complete", "failed", "cancelled")
+                                complete = status in (
+                                    "complete", "failed", "cancelled"
+                                )
+                                summary = row.get(result_col)
+                                if isinstance(summary, dict):
+                                    result_output = (
+                                        summary.get("log_output")
+                                        or summary.get("log_tail")
+                                        or summary.get("output")
+                                    )
+                                elif isinstance(summary, str) and summary:
+                                    result_output = summary
                             break
                     except requests.RequestException:
                         continue
@@ -213,7 +231,16 @@ class RunsMixin:
         # after a dashboard restart.  Only when the file is gone AND the row
         # is terminal, so this never masks live-but-empty logs.
         if not result_lines and complete and result_output:
-            result_lines.append({"n": 0, "ts": "", "text": result_output})
+            # Persisted scan logs are multi-line; split so the viewer
+            # shows one entry per original log line.
+            for i, line in enumerate(str(result_output).splitlines() or [str(result_output)]):
+                ts = ""
+                text = line
+                if line.startswith("[") and "] " in line:
+                    bracket_end = line.index("] ")
+                    ts = line[1:bracket_end]
+                    text = line[bracket_end + 2:]
+                result_lines.append({"n": i, "ts": ts, "text": text})
 
         payload = json.dumps(
             {"lines": result_lines, "complete": complete, "status": status},

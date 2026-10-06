@@ -131,8 +131,30 @@ class LogsEndpointTests(unittest.TestCase):
         )
         self.assertTrue(payload["complete"])
         self.assertEqual(tables, ["scan_runs", "rollback_runs"])
-        # scan/rollback probes keep select=status only.
-        self.assertIn("select=status&id=", urls[0])
+        # scan/rollback probes now include the result column so completed
+        # runs can fall back to persisted log_output after /tmp purge.
+        self.assertIn("select=status,result_summary&id=", urls[0])
+
+    def test_scan_complete_serves_persisted_log_output(self):
+        """After /tmp purge, completed scan_runs still show logs from DB."""
+        payload, tables, _ = self._call(
+            f"/api/scan/{self.run_id}/logs?offset=0",
+            [_Resp([{
+                "status": "complete",
+                "result_summary": {
+                    "mode": "trivy_only",
+                    "log_output": (
+                        "[2026-10-06T01:00:00.000Z] line one\n"
+                        "[2026-10-06T01:00:01.000Z] line two"
+                    ),
+                },
+            }])],
+        )
+        self.assertTrue(payload["complete"])
+        self.assertEqual(tables, ["scan_runs"])
+        self.assertEqual(len(payload["lines"]), 2)
+        self.assertEqual(payload["lines"][0]["text"], "line one")
+        self.assertEqual(payload["lines"][1]["text"], "line two")
 
 
 class PendingAppliesRouteTests(unittest.TestCase):

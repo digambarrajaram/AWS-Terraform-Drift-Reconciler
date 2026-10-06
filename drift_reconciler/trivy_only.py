@@ -184,13 +184,26 @@ def finalize_trivy_only_scan(run_id: str | None, results: dict) -> None:
 
     pr_urls = results.get("pr_urls") or []
     needs_review = results.get("needs_review") or []
+    findings_total = int(results.get("findings_total") or 0)
+    findings_excepted = int(results.get("findings_excepted") or 0)
+    findings_actionable = int(
+        results.get("findings_actionable")
+        if results.get("findings_actionable") is not None
+        else max(0, findings_total - findings_excepted)
+    )
     summary = {
         "mode": "trivy_only",
         "security": {
+            # ``found`` remains "PRs opened" for existing UI cards.
             "found": len(pr_urls) > 0,
             "count": len(pr_urls),
             "pr_links": [r["url"] for r in pr_urls],
             "needs_review": needs_review,
+            # Full Trivy counts so one scan reports everything detected,
+            # even when findings were excepted or blocked by an open PR.
+            "findings_total": findings_total,
+            "findings_excepted": findings_excepted,
+            "findings_actionable": findings_actionable,
         },
     }
     update_scan_run(
@@ -232,12 +245,20 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         raw = _ag._run_trivy(tmpdir)
         if "error" in raw:
             print(f"  [trivy-only] Scan error: {raw['error']}")
-            return {"pr_urls": [], "needs_review": []}
+            return {
+                "pr_urls": [], "needs_review": [],
+                "findings_total": 0, "findings_excepted": 0,
+                "findings_actionable": 0,
+            }
 
         raw_issues = _extract_issues(raw, tmpdir)
         if not raw_issues:
             print("  [trivy-only] No issues found.")
-            return {"pr_urls": [], "needs_review": []}
+            return {
+                "pr_urls": [], "needs_review": [],
+                "findings_total": 0, "findings_excepted": 0,
+                "findings_actionable": 0,
+            }
 
         # ── Filter suppressed (before the summary log) ────────────────
         # Trivy always reports live misconfigs; exceptions only mean we
@@ -258,6 +279,11 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
                 kept.append(i)
         issues = kept
         total = len(raw_issues)
+        findings_meta = {
+            "findings_total": total,
+            "findings_excepted": len(suppressed),
+            "findings_actionable": len(issues),
+        }
 
         if suppressed and not issues:
             print(
@@ -266,7 +292,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             )
             for label, exc_row in suppressed:
                 unmanaged_scanner.print_exception_skip(label, exc_row)
-            return {"pr_urls": [], "needs_review": []}
+            return {
+                "pr_urls": [], "needs_review": [],
+                **findings_meta,
+            }
 
         if suppressed:
             labels = [label for label, _ in suppressed]
@@ -315,7 +344,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         review_prs = _create_manual_review_prs(needs_review, account_label, run_id)
         if not all_fixes:
             print("  [trivy-only] No verified fixes to open a PR for.")
-            return {"pr_urls": review_prs, "needs_review": needs_review}
+            return {
+                "pr_urls": review_prs, "needs_review": needs_review,
+                **findings_meta,
+            }
 
         files_touched = len({f["file_path"] for f in all_fixes})
         print(f"  [trivy-only] {len(all_fixes)} verified fix(es) across "
@@ -352,7 +384,23 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         if existing:
             print(f"  Skipping {derived_resource_id}: open security PR "
                   f"#{existing['pr_number']} already exists")
-            return {"pr_urls": review_prs, "needs_review": needs_review}
+            # Still surface the findings so scan 1's result_summary is not
+            # empty — otherwise the dashboard says "no findings" until the
+            # open PR closes and a second scan opens a new one.
+            for fix in all_fixes:
+                needs_review.append({
+                    "rule_id": fix["rule_id"],
+                    "resource": fix.get("resource"),
+                    "resolution": fix.get("description") or "",
+                    "reason": (
+                        f"open security PR #{existing['pr_number']} "
+                        f"already covers this finding"
+                    ),
+                })
+            return {
+                "pr_urls": review_prs, "needs_review": needs_review,
+                **findings_meta,
+            }
 
         by_file: dict[str, list[dict]] = {}
         for fix in all_fixes:
@@ -400,7 +448,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         if not file_payloads:
             print("  [trivy-only] Verified fixes already present locally — "
                   "no PR needed.")
-            return {"pr_urls": review_prs, "needs_review": needs_review}
+            return {
+                "pr_urls": review_prs, "needs_review": needs_review,
+                **findings_meta,
+            }
 
         rule_severity: dict[str, str] = {}
         for iss in issues:
@@ -509,7 +560,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
                 print(f"  ⚠ security PR #{pr.number}: no (resource, rule_id) "
                       f"pairs recorded — Except cannot auto-add exceptions")
 
-        return {"pr_urls": pr_urls + review_prs, "needs_review": needs_review}
+        return {
+            "pr_urls": pr_urls + review_prs, "needs_review": needs_review,
+            **findings_meta,
+        }
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

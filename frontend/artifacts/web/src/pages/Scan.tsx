@@ -268,6 +268,20 @@ function ScanResult({ run }: { run: ScanRun }) {
                 <p className="text-sm text-muted-foreground">
                   {rs.security.needs_review.length} finding{rs.security.needs_review.length !== 1 ? 's' : ''} need{rs.security.needs_review.length === 1 ? 's' : ''} review
                 </p>
+              ) : (rs.security.findings_excepted ?? 0) > 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Trivy reported {rs.security.findings_total ?? rs.security.findings_excepted} finding
+                  {(rs.security.findings_total ?? rs.security.findings_excepted) !== 1 ? 's' : ''}
+                  ; all already excepted
+                </p>
+              ) : (rs.security.findings_total ?? 0) > 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Trivy reported {rs.security.findings_total} finding
+                  {rs.security.findings_total !== 1 ? 's' : ''}
+                  {(rs.security.findings_actionable ?? 0) > 0
+                    ? ` (${rs.security.findings_actionable} actionable)`
+                    : ''}
+                </p>
               ) : (
                 <p className="text-sm text-muted-foreground">No security findings found</p>
               )}

@@ -39,6 +39,12 @@ export interface ScanRun {
       count: number;
       pr_links: string[];
       needs_review: unknown[];
+      /** Total Trivy FAIL findings before exception filter. */
+      findings_total?: number;
+      /** Findings skipped because already excepted. */
+      findings_excepted?: number;
+      /** Findings still actionable after exception filter. */
+      findings_actionable?: number;
     };
     alerts_sent?: {
       pagerduty: number;

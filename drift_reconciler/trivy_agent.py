@@ -581,6 +581,29 @@ def _resolve_tf_dir(file_path: str) -> str | None:
     return None
 
 
+_VAR_BLOCK_RE = re.compile(r'variable\s+"([^"]+)"\s*\{')
+_VAR_REF_RE = re.compile(r'\bvar\.([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def _declared_variables(tf_dir: str) -> set[str]:
+    """Return variable names declared under *tf_dir* (all ``.tf`` files)."""
+    declared: set[str] = set()
+    if not tf_dir or not os.path.isdir(tf_dir):
+        return declared
+    for dirpath, dirnames, filenames in os.walk(tf_dir):
+        dirnames[:] = [d for d in dirnames if d != ".terraform"]
+        for name in filenames:
+            if not name.endswith(".tf"):
+                continue
+            text = _read_file(os.path.join(dirpath, name)) or ""
+            declared.update(_VAR_BLOCK_RE.findall(text))
+    return declared
+
+
+def _var_refs_in(text: str) -> set[str]:
+    return set(_VAR_REF_RE.findall(text or ""))
+
+
 def _apply_fix(file_path: str, issue: dict) -> tuple[str, int] | None:
     content = _read_file(file_path)
     if content is None:
@@ -627,6 +650,27 @@ def _apply_fix(file_path: str, issue: dict) -> tuple[str, int] | None:
     # change alone doesn't guarantee the model never adds one anyway.
     if re.search(r'#\s*trivy:ignore', new_block):
         print(f"  ⚠ LLM output for {issue['rule_id']} contains a suppression comment, rejecting")
+        return None
+
+    # HARD CHECK 0: do not introduce var.X that the module never declared.
+    # A common LLM failure mode is rewriting a log group / SNS block to use
+    # var.name_prefix / var.tags copied from neighboring resources when
+    # variables.tf is missing or incomplete — terraform apply then fails
+    # with "Reference to undeclared input variable".
+    # Use the file's directory when .terraform is absent (trivy-only temp
+    # copies are not initialized).
+    module_dir = _resolve_tf_dir(file_path) or os.path.dirname(os.path.abspath(file_path))
+    declared = _declared_variables(module_dir)
+    new_refs = _var_refs_in(new_block)
+    old_refs = _var_refs_in(block_text)
+    # Allow vars already used in the original block even if undeclared
+    # (pre-existing broken config); block only *new* undeclared refs.
+    introduced_undeclared = (new_refs - old_refs) - declared
+    if introduced_undeclared:
+        print(
+            f"  ✗ REJECTED {issue['rule_id']}: introduces undeclared "
+            f"variable(s) {sorted(introduced_undeclared)} — refusing to write"
+        )
         return None
 
     new_block_lines = new_block.splitlines()

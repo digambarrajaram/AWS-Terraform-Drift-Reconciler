@@ -274,8 +274,8 @@ python drift_reconciler/agent.py --trends --trends-account scope-a
 
 | PR kind | Merge | Except | Reject |
 |---|---|---|---|
-| Real-fix `security_only` (`review_only=false`) | Merge `.tf` patch; **no** auto-exception | Close without merge; write security exception from `fixes_jsonb` | Close PR; finding can resurface next scan |
-| Review-only security (`review_only=true`) | Merge report + auto-except | Hidden | Close PR; finding can resurface next scan |
+| Real-fix `security_only` (`review_only=false`) | Merge `.tf` patch, then **terraform apply** to AWS; **no** auto-exception. Rollback restores pre-fix file content via the Rollback page | Close without merge; write security exception from `fixes_jsonb` | Close PR; finding can resurface next scan |
+| Review-only security (`review_only=true`) | Blocked — use Except | Close without merge; write security exception | Close PR; finding can resurface next scan |
 | Unmanaged / drift fix / batch | Unchanged (merge+except or apply/revert) | — | Unchanged |
 
 Cancel is available while an apply/revert job is in the claim state (`approved` / `rejected`) — same kill path as Cancel Scan.

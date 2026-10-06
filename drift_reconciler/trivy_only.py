@@ -357,6 +357,7 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             with open(tmp_file_path, encoding="utf-8") as f:
                 patched_content = f.read()
             rel_posix = rel.replace("\\", "/")
+            original_content = ""
             if os.path.isfile(original_path):
                 with open(original_path, encoding="utf-8") as f:
                     original_content = f.read()
@@ -378,7 +379,10 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
                     f"drift-reports/{_ag.gi._safe_label(account_label)}/"
                     f"security-{os.path.basename(rel)}"
                 )
-            file_payloads.append((repo_path, patched_content, plan_chunk))
+            # (repo_path, patched, diff, original) — original feeds rollback baseline
+            file_payloads.append(
+                (repo_path, patched_content, plan_chunk, original_content)
+            )
 
         if not file_payloads:
             print("  [trivy-only] Verified fixes already present locally — "
@@ -406,16 +410,21 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             f"- **`{f['rule_id']}`** ({f.get('resource') or '?'}): {f['description']}"
             for f in all_fixes
         )
-        plan_output = "\n".join(chunk for _p, _c, chunk in file_payloads)
-        primary_path, primary_content, _ = file_payloads[0]
-        additional = [(p, c) for p, c, _ in file_payloads[1:]]
-        files_label = ", ".join(os.path.basename(p) for p, _c, _d in file_payloads)
+        plan_output = "\n".join(chunk for _p, _c, chunk, _o in file_payloads)
+        primary_path, primary_content, _, primary_original = file_payloads[0]
+        additional = [(p, c) for p, c, _d, _o in file_payloads[1:]]
+        files_label = ", ".join(os.path.basename(p) for p, _c, _d, _o in file_payloads)
         pr_title = (
             f"Security fix: {count} issue{'s' if count != 1 else ''} "
             f"({files_label})"
         )
 
+        from drift_reconciler.drift_baseline import tf_file_baseline
+        import drift_reconciler.drift_history as drift_history
+
         pr_urls: list[dict] = []
+        # History rows are written per file below (whole-file rollback
+        # baselines) — skip the default single append_entry.
         pr = _ag.gi.create_drift_pr(
             resource_id=derived_resource_id,
             pr_title=pr_title,
@@ -427,10 +436,41 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             account_label=account_label,
             security=True,
             additional_files=additional or None,
+            changes=tf_file_baseline(primary_original, primary_content)
+            if primary_original else None,
+            append_history=False,
         )
         if pr is not None:
             pr_urls.append({"url": pr.html_url, "type": "security_only"})
             create_pending_apply(pr.number, account_label, "security_only")
+            region = drift_history.resolve_region(account_label)
+            baselines_stored = 0
+            for idx, (repo_path, patched, _chunk, original) in enumerate(file_payloads):
+                if not original:
+                    print(f"  ⚠ {repo_path}: no original content — "
+                          f"rollback baseline not stored")
+                    continue
+                # First file keeps resource_id=trivy-security so open-PR
+                # dedup (get_open_event) still finds this scan's row.
+                rid = (
+                    derived_resource_id if idx == 0
+                    else f"trivy-security:{os.path.basename(repo_path)}"
+                )
+                drift_history.append_entry(
+                    resource_id=rid,
+                    account_label=account_label,
+                    region=region,
+                    pr_number=pr.number,
+                    pr_type="security_only",
+                    severity=risk_level,
+                    fields_changed=["__tf_file__"],
+                    drift_summary=drift_summary,
+                    changes_jsonb=tf_file_baseline(original, patched),
+                    file_path=repo_path,
+                )
+                baselines_stored += 1
+            print(f"  [trivy-only] stored {baselines_stored} file baseline(s) "
+                  f"for rollback on PR #{pr.number}")
             pairs = sorted({
                 (fix.get("resource") or "", fix["rule_id"])
                 for fix in all_fixes

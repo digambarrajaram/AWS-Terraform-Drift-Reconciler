@@ -6,6 +6,10 @@ import json
 # Synthetic plan field — never written to HCL (filtered from patches).
 DELETED_EXTERNALLY_FIELD = "__deleted_externally__"
 
+# Whole-file before/after for security hardening PRs (LLM block rewrites
+# have no field-level drift baseline).  Rollback restores ``before``.
+TF_FILE_FIELD = "__tf_file__"
+
 # Plan JSON represents “no tags” as null or {}; treat as equivalent for drift/gates.
 _EMPTY_MAP_FIELDS = frozenset({"tags", "tags_all"})
 
@@ -46,6 +50,28 @@ def deleted_externally_baseline() -> dict:
 
 def is_deleted_externally_baseline(changes: dict | None) -> bool:
     return bool(changes and DELETED_EXTERNALLY_FIELD in changes)
+
+
+def tf_file_baseline(before: str, after: str) -> dict:
+    """Baseline shape for a security (or other) whole-file .tf patch."""
+    return {
+        TF_FILE_FIELD: {
+            "before": before,
+            "after": after,
+        }
+    }
+
+
+def is_tf_file_baseline(changes: dict | None) -> bool:
+    return bool(changes and TF_FILE_FIELD in changes)
+
+
+def tf_file_before(changes: dict | None) -> str | None:
+    if not is_tf_file_baseline(changes):
+        return None
+    val = (changes or {}).get(TF_FILE_FIELD) or {}
+    before = val.get("before")
+    return before if isinstance(before, str) else None
 
 
 def changes_for_history(finding: dict) -> dict | None:
@@ -164,6 +190,10 @@ def check_baseline_freshness(
             )
             if err:
                 return err
+            continue
+        if is_tf_file_baseline(changes):
+            # Whole-file security baseline — no per-field live AWS tokens.
+            # Apply/rollback safety is the terraform plan + Gate C.
             continue
         fields = list(changes.keys())
         if not fields:

@@ -109,21 +109,27 @@ def _revert_on_gate_failure(
         })
 
 
-_FILE_ONLY_PR_TYPES = ("unmanaged", "security_only")
+_FILE_ONLY_PR_TYPES = ("unmanaged",)
 
 
 def _pr_requires_terraform(pr_number: int, scope: str) -> bool:
     """Dispatcher for the apply/reject flows: True when this PR goes
     through the terraform gate/apply path.
 
-    File-only PRs (pr_type ``unmanaged`` — an unmanaged-resource report —
-    or ``security_only`` — a security patch to the .tf file) ARE the fix
-    in the PR itself: no init/plan/apply/revert, no drift gate.  All other
-    types (drift/fix, batch, rollback) keep the full gate/apply/revert
-    path.  Falls back to the terraform path when the pr_type can't be
-    read (DB down) — today's behavior."""
+    File-only: ``unmanaged`` (report-only) and review-only security
+    (no .tf patch).  Real-fix ``security_only`` merges must
+    ``terraform apply`` so AWS picks up encryption/X-Ray/etc. — code
+    merge alone does not fix the finding.  Falls back to the terraform
+    path when the pr_type can't be read (DB down)."""
     from drift_reconciler.drift_history import get_pr_type
-    return get_pr_type(pr_number, scope) not in _FILE_ONLY_PR_TYPES
+    from drift_reconciler.pending_applies import is_review_only
+
+    pr_type = get_pr_type(pr_number, scope)
+    if pr_type in _FILE_ONLY_PR_TYPES:
+        return False
+    if pr_type == "security_only" and is_review_only(pr_number, scope):
+        return False
+    return True
 
 
 def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = None, is_revert: bool = False) -> None:
@@ -155,17 +161,16 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         )
 
     try:
-        # File-only PRs (unmanaged / security) skip terraform entirely —
-        # the PR itself is the fix.  The GitHub side (merge on approve,
-        # close on reject) already happened in serve.py; just finalize
-        # the DB rows here, no init/plan/apply/revert, no drift gate.
+        # File-only PRs (unmanaged / review-only security) skip terraform —
+        # the PR itself is the record.  Real-fix security goes through
+        # init/plan/apply below so infra matches the merged .tf patch.
         if not _ag._pr_requires_terraform(pr_number, scope):
             import drift_history as _dh
             if is_revert:
                 _dh.mark_reverted(
                     pr_number, scope, status="reverted",
                     resolution=("PR rejected — file-only PR "
-                                "(unmanaged/security), no AWS change needed"),
+                                "(unmanaged/review-only security), no AWS change needed"),
                     force=True,
                 )
             else:
@@ -207,6 +212,8 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             mode_label = "reverting drift"
         elif pr_type == "rollback":
             mode_label = "applying rollback"
+        elif pr_type == "security_only":
+            mode_label = "applying security fix"
         else:
             mode_label = "applying accepted drift"
         print(f"\n--- {mode_label} for PR #{pr_number} ({scope}) ---")
@@ -317,7 +324,11 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # Gate A: pre-apply drift gate.  Only meaningful for normal fix
         # applies — reject-revert and merged rollback PRs exist to fix
         # existing drift, so open rows must not block them (Gate B is
-        # the freshness check for those paths).
+        # the freshness check for those paths).  Security hardening also
+        # skips Gate A: open drift rows must not block applying a verified
+        # security .tf patch (the security rows themselves are excluded
+        # via except_pr_number, but unrelated open drift would otherwise
+        # deadlock Approvals).
         # Excludes this PR's own rows (they stay 'open' until the
         # post-apply resolve step — including them would fail every apply).
         # Open rows are detection-time state, so re-verify them against
@@ -331,8 +342,9 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
         # reversed_changes — Gate B must use rollback semantics or it
         # treats still-drifted live state as "stale".
         rollback_semantics = bool(is_revert or pr_type == "rollback")
+        is_security_apply = pr_type == "security_only"
 
-        if not rollback_semantics:
+        if not rollback_semantics and not is_security_apply:
             open_rows = get_open_resources(scope, except_pr_number=pr_number)
             if open_rows:
                 live_drift = live_drift_rows(open_rows, plan_json)
@@ -343,7 +355,9 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
                     )
 
         # Gate B: freshness gate — compare live plan values against the
-        # stored baseline (changes_jsonb) for this PR.
+        # stored baseline (changes_jsonb) for this PR.  Security uses
+        # whole-file baselines (``__tf_file__``); check_baseline_freshness
+        # accepts those without field-level AWS tokens.
         if not gate_failure:
             gate_failure = check_baseline_freshness(
                 plan_json,

@@ -9,8 +9,12 @@ import sys
 import github_integration as gi
 from drift_baseline import (
     DELETED_EXTERNALLY_FIELD,
+    TF_FILE_FIELD,
     deleted_externally_baseline,
     is_deleted_externally_baseline,
+    is_tf_file_baseline,
+    tf_file_before,
+    tf_file_baseline,
     verify_deleted_externally_plan,
 )
 from terraform_errors import humanize_rollback_error, _strip_ansi
@@ -309,6 +313,28 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
             patched = None
             with open(file_path, encoding="utf-8") as fh:
                 patched = fh.read()
+        elif is_tf_file_baseline(original_changes):
+            # Security hardening: restore the pre-fix whole-file content.
+            before = tf_file_before(original_changes)
+            if before is None:
+                print(f"  ✗ {resource_id}: __tf_file__ baseline missing before content — skipping")
+                continue
+            print(f"  ↻ {resource_id}: restoring pre-security .tf content …")
+            _report_rollback_stage(run_id, "patching_file")
+            try:
+                with open(file_path, encoding="utf-8") as fh:
+                    current = fh.read()
+                if current == before:
+                    print(f"  ✓ {resource_id}: already matches rollback target — nothing to do")
+                    continue
+                with open(file_path, "w", encoding="utf-8") as fh:
+                    fh.write(before)
+                patched = before
+            except OSError as exc:
+                print(f"  ✗ {resource_id}: failed to restore file — {exc}")
+                continue
+            after_content = (original_changes.get(TF_FILE_FIELD) or {}).get("after") or current
+            reversed_changes = tf_file_baseline(after_content, before)
         else:
             # Swap before↔after to produce the reverse patch.
             reversed_changes: dict[str, dict] = {}
@@ -361,6 +387,10 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
                 plan_errors.append(str(exc))
                 continue
             print(f"  ✓ {resource_id}: freshness confirmed (create planned)")
+        elif is_tf_file_baseline(original_changes):
+            # Whole-file restore already written; plan/apply of the rollback
+            # PR is the infra gate (Gate C on approve).
+            print(f"  ✓ {resource_id}: pre-security file content restored for rollback PR")
         else:
             # Freshness check — run terraform plan and extract live values.
             _report_rollback_stage(run_id, "fetching_live_state")

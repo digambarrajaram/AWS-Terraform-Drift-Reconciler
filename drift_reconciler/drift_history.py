@@ -248,8 +248,8 @@ def get_pr_type(pr_number: int, account: str) -> str | None:
     None when the PR has no rows or the fetch fails.
 
     Used by the apply/reject dispatcher to distinguish file-only PRs
-    (unmanaged / security_only — no terraform action) from drift/fix PRs
-    (full gate/apply/revert path)."""
+    (unmanaged / review-only security) from terraform-apply PRs
+    (drift/fix, real-fix security_only, batch, rollback)."""
     if not _URL or not _KEY:
         return None
     try:

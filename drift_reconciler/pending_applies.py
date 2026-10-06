@@ -225,6 +225,30 @@ def mark_superseded(pr_number: int, scope: str, user_id: str | None = None) -> b
         return False
 
 
+def is_review_only(pr_number: int, scope: str, user_id: str | None = None) -> bool:
+    """True when the pending row is a review-only security PR (no .tf patch).
+
+    Used by the apply dispatcher: review-only stays file-only; real-fix
+    ``security_only`` runs terraform apply so infra matches the merged fix.
+    """
+    if not _URL or not _KEY:
+        return False
+    user_id = _resolve_user_id(scope, user_id)
+    try:
+        resp = requests.get(
+            f"{_URL}/rest/v1/{_TABLE}"
+            f"?select=review_only&{_identity_query(pr_number, scope, user_id)}&limit=1",
+            headers={k: v for k, v in _HEADERS.items() if k != "Content-Type"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return False
+        rows = resp.json() if resp.text else []
+        return bool(rows and rows[0].get("review_only"))
+    except requests.RequestException:
+        return False
+
+
 def update_pending_apply(pr_number: int, scope: str, user_id: str | None = None, **fields) -> bool:
     """Update the decided (approved OR rejected) pending_applies row for
     *user_id* + *pr_number* + *scope*.

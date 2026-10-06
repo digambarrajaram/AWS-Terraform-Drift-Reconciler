@@ -53,11 +53,12 @@ UNPATCHABLE_BLOCK_FIELDS = {
 from drift_reconciler.formatting_drift_json import _READ_ONLY_DRIFT_ATTRS as COMPUTED_DRIFT_FIELDS  # noqa: E402
 from drift_reconciler.drift_baseline import (  # noqa: E402
     DELETED_EXTERNALLY_FIELD,
+    TF_FILE_FIELD,
     changes_for_history,
     plan_field_values_equal,
 )
 
-_NON_PATCHABLE_BASELINE_FIELDS = frozenset({DELETED_EXTERNALLY_FIELD})
+_NON_PATCHABLE_BASELINE_FIELDS = frozenset({DELETED_EXTERNALLY_FIELD, TF_FILE_FIELD})
 
 
 def filter_patchable_changes(changes: dict | None) -> dict:

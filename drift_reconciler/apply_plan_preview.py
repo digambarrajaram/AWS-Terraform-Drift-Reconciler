@@ -18,7 +18,7 @@ from drift_reconciler.github_client_utils import resolve_repo_target
 from drift_reconciler.plan_analysis import plan_risk_summary
 from drift_reconciler.terraform_ops import _ensure_terraform_init, _strip_hardcoded_aws_profile
 
-_FILE_ONLY_PR_TYPES = frozenset({"unmanaged", "security_only"})
+_FILE_ONLY_PR_TYPES = frozenset({"unmanaged"})
 
 
 def _git_root(tf_dir: str) -> str:
@@ -82,6 +82,10 @@ def preview_apply_plan(
     """Plan with PR head checked out; restore clone branch before return."""
     if pr_type in _FILE_ONLY_PR_TYPES:
         return {"skipped": True, "reason": "file-only PR — no terraform apply"}
+    if pr_type == "security_only":
+        from drift_reconciler.pending_applies import is_review_only
+        if is_review_only(pr_number, scope):
+            return {"skipped": True, "reason": "review-only security PR — no terraform apply"}
 
     repo_slug, token, branch = resolve_repo_target(scope)
     if not repo_slug or not token:

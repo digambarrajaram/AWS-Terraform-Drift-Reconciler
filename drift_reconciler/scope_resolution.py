@@ -191,7 +191,12 @@ def infer_workload(
     tf_directory_path: str,
     tf_dir: str | None = None,
 ) -> str | None:
-    """Workload from slug/path, else from declared resources under *tf_dir*."""
+    """Workload from slug/path, else from declared resources under *tf_dir*.
+
+    Modular roots that declare more than one workload resource type
+    (e.g. lambda + vpc in one stack) are allowed: return ``None`` so
+    IAM role rewriting stays off and the configured ``aws_role_arn`` is used.
+    """
     from_slug_path = detect_workload(slug, tf_directory_path)
     if from_slug_path:
         return from_slug_path
@@ -204,10 +209,16 @@ def infer_workload(
         if any(r in found for r in resources)
     ]
     if len(matches) > 1:
-        raise ScopeConfigError(
-            f"Scope '{slug}' terraform under {tf_dir} declares multiple workloads "
-            f"({matches}) — split stacks or fix tf_directory_path."
+        # Combined / modular stacks are valid Terraform roots. Do not reject
+        # them — leave workload unspecified rather than forcing a split.
+        logger.info(
+            "Scope '%s' terraform under %s declares multiple workloads %s; "
+            "treating workload as unspecified (modular/combined stack).",
+            slug,
+            tf_dir,
+            matches,
         )
+        return None
     return matches[0] if matches else None
 
 
@@ -271,17 +282,25 @@ def resolve_apply_role_arn(
 
 
 def scan_tf_resource_types(tf_dir: str) -> set[str]:
-    """Return Terraform resource type strings declared under *tf_dir*."""
+    """Return Terraform resource type strings declared under *tf_dir*.
+
+    Skips ``.terraform/`` (provider/module cache) so init artifacts do not
+    pollute workload inference for modular layouts.
+    """
     types: set[str] = set()
     if not os.path.isdir(tf_dir):
         return types
     for path in glob.glob(os.path.join(tf_dir, "**", "*.tf"), recursive=True):
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    text = fh.read()
-            except OSError:
-                continue
-            types.update(_RESOURCE_BLOCK_RE.findall(text))
+        # Normalize separators so ".terraform" segments match on Windows too.
+        parts = os.path.normpath(path).split(os.sep)
+        if ".terraform" in parts:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        types.update(_RESOURCE_BLOCK_RE.findall(text))
     return types
 
 
@@ -326,15 +345,23 @@ def validate_tf_dir_for_scope(
     slug: str,
     workload: str | None,
 ) -> None:
-    """Verify *tf_dir* exists and declares resources expected for *workload*."""
+    """Verify *tf_dir* exists and declares resources expected for *workload*.
+
+    Requires at least one ``*.tf`` at the directory root so callers cannot
+    point at a parent of multiple stacks (``ec2/`` + ``lambda/`` + ``multi-f/``)
+    or at a bare ``modules/`` tree.
+    """
     if not os.path.isdir(tf_dir):
         raise ScopeConfigError(
             f"Terraform directory for scope '{slug}' does not exist: {tf_dir}"
         )
-    tf_files = glob.glob(os.path.join(tf_dir, "**", "*.tf"), recursive=True)
-    if not tf_files:
+    root_tf = glob.glob(os.path.join(tf_dir, "*.tf"))
+    if not root_tf:
         raise ScopeConfigError(
-            f"Terraform directory for scope '{slug}' has no .tf files: {tf_dir}"
+            f"Terraform directory for scope '{slug}' has no .tf files at the "
+            f"root of {tf_dir}. Point tf_directory_path at a single stack root "
+            f"(where you run terraform init/plan), e.g. 'multi-f' or 'lambda' "
+            f"— not the repo parent and not a modules/ subfolder."
         )
     if not workload:
         return

@@ -389,7 +389,12 @@ def resolve_tf_dir(environment: dict) -> str:
         refresh_clone(clone_path, branch, slug)
 
     # Return clone_path + tf_directory_path subpath (or clone_path alone).
-    sub = (environment.get("tf_directory_path") or "").strip().lstrip("/")
+    # Normalize "./foo", "foo/", and mixed separators so modular paths like
+    # "./infra-test/multi-f/" resolve cleanly under the clone.
+    sub = (environment.get("tf_directory_path") or "").strip().replace("\\", "/")
+    while sub.startswith("./"):
+        sub = sub[2:]
+    sub = sub.strip("/")
     if sub:
-        return os.path.join(clone_path, sub)
-    return clone_path
+        return os.path.abspath(os.path.join(clone_path, *sub.split("/")))
+    return os.path.abspath(clone_path)

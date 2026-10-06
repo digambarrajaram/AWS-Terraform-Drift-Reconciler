@@ -228,10 +228,12 @@ def copy_tf_tree(src_root: str, dst_root: str) -> None:
 
     Used by trivy-only and trivy-gate so scans see the same file tree Trivy
     would walk when invoked on a full clone (not only top-level ``.tf`` files).
+    Skips ``.terraform/`` caches so modular stacks are not polluted by init.
     """
     src_root = os.path.abspath(src_root)
     dst_root = os.path.abspath(dst_root)
-    for dirpath, _dirnames, filenames in os.walk(src_root):
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirnames[:] = [d for d in dirnames if d != ".terraform"]
         for name in filenames:
             if not name.endswith(".tf"):
                 continue

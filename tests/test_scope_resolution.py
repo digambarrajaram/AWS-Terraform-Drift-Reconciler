@@ -74,6 +74,42 @@ class InferWorkloadTests(unittest.TestCase):
             "lambda",
         )
 
+    def test_modular_root_with_lambda_and_vpc_is_unspecified(self):
+        """Combined modular stacks must not fail scope resolution."""
+        tmp = tempfile.mkdtemp(prefix="scope_multi_tf_")
+        modules = os.path.join(tmp, "modules")
+        os.makedirs(os.path.join(modules, "lambda"), exist_ok=True)
+        os.makedirs(os.path.join(modules, "vpc"), exist_ok=True)
+        with open(os.path.join(tmp, "main.tf"), "w", encoding="utf-8") as fh:
+            fh.write(
+                'module "lambda" { source = "./modules/lambda" }\n'
+                'module "vpc" { source = "./modules/vpc" }\n'
+            )
+        with open(
+            os.path.join(modules, "lambda", "main.tf"), "w", encoding="utf-8"
+        ) as fh:
+            fh.write('resource "aws_lambda_function" "hello" {}\n')
+        with open(
+            os.path.join(modules, "vpc", "main.tf"), "w", encoding="utf-8"
+        ) as fh:
+            fh.write('resource "aws_vpc" "main" {}\n')
+        self.assertIsNone(
+            infer_workload("prod-setup", "./infra-test/multi-f/", tmp),
+        )
+
+    def test_scan_ignores_dot_terraform_cache(self):
+        tmp = tempfile.mkdtemp(prefix="scope_tf_cache_")
+        with open(os.path.join(tmp, "main.tf"), "w", encoding="utf-8") as fh:
+            fh.write('resource "aws_lambda_function" "hello" {}\n')
+        cache = os.path.join(tmp, ".terraform", "modules", "vpc")
+        os.makedirs(cache, exist_ok=True)
+        with open(os.path.join(cache, "main.tf"), "w", encoding="utf-8") as fh:
+            fh.write('resource "aws_vpc" "main" {}\n')
+        self.assertEqual(
+            infer_workload("prod-setup", "infra-test/multi-f", tmp),
+            "lambda",
+        )
+
 
 class TfDirValidationTests(unittest.TestCase):
     def setUp(self):
@@ -91,6 +127,48 @@ class TfDirValidationTests(unittest.TestCase):
                 },
                 self.tmp,
             )
+
+    def test_parent_of_multiple_stacks_is_rejected(self):
+        """Repo parent with only nested stack roots must not be accepted."""
+        parent = tempfile.mkdtemp(prefix="scope_parent_")
+        for name in ("ec2", "lambda", "multi-f"):
+            child = os.path.join(parent, name)
+            os.makedirs(child, exist_ok=True)
+            with open(os.path.join(child, "main.tf"), "w", encoding="utf-8") as fh:
+                fh.write('resource "aws_instance" "x" {}\n')
+        with self.assertRaises(ScopeConfigError) as ctx:
+            validate_environment_scope_config(
+                {
+                    "slug": "prod-setup",
+                    "tf_directory_path": ".",
+                    "aws_role_arn": "arn:aws:iam::1:role/drift-reconciler-apply",
+                },
+                parent,
+                check_role=False,
+            )
+        self.assertIn("no .tf files at the root", str(ctx.exception))
+
+    def test_modular_multi_f_root_is_accepted(self):
+        root = tempfile.mkdtemp(prefix="scope_multif_")
+        modules = os.path.join(root, "modules", "network")
+        os.makedirs(modules, exist_ok=True)
+        with open(os.path.join(root, "main.tf"), "w", encoding="utf-8") as fh:
+            fh.write('module "network" { source = "./modules/network" }\n')
+        with open(os.path.join(root, "backend.tf"), "w", encoding="utf-8") as fh:
+            fh.write('terraform { backend "s3" {} }\n')
+        with open(os.path.join(modules, "main.tf"), "w", encoding="utf-8") as fh:
+            fh.write('resource "aws_vpc" "main" {}\n')
+            fh.write('resource "aws_lambda_function" "app" {}\n')
+        workload = validate_environment_scope_config(
+            {
+                "slug": "prod-setup",
+                "tf_directory_path": "multi-f",
+                "aws_role_arn": "arn:aws:iam::1:role/drift-reconciler-apply",
+            },
+            root,
+            check_role=False,
+        )
+        self.assertIsNone(workload)
 
     def test_ec2_seed_dir_under_repo(self):
         tf_dir = os.path.join(_ROOT, "terraform_code", "ec2_terraform_account_a")

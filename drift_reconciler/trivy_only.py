@@ -234,17 +234,17 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             print(f"  [trivy-only] Scan error: {raw['error']}")
             return {"pr_urls": [], "needs_review": []}
 
-        issues = _extract_issues(raw, tmpdir)
-        if not issues:
+        raw_issues = _extract_issues(raw, tmpdir)
+        if not raw_issues:
             print("  [trivy-only] No issues found.")
             return {"pr_urls": [], "needs_review": []}
 
-        print(f"  [trivy-only] {len(issues)} issue(s) found")
-
-        # ── Filter suppressed ─────────────────────────────────────────
+        # ── Filter suppressed (before the summary log) ────────────────
+        # Trivy always reports live misconfigs; exceptions only mean we
+        # already accepted them — do not log those as actionable issues.
         suppressed: list[tuple[str, dict]] = []
         kept: list[dict] = []
-        for i in issues:
+        for i in raw_issues:
             exc_row = None
             if i.get("resource") and i.get("rule_id"):
                 exc_row = check_security_suppression(
@@ -257,19 +257,32 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
             else:
                 kept.append(i)
         issues = kept
+        total = len(raw_issues)
+
+        if suppressed and not issues:
+            print(
+                f"  [trivy-only] Trivy reported {total} finding(s); "
+                f"all already excepted for {scope} — nothing to do."
+            )
+            for label, exc_row in suppressed:
+                unmanaged_scanner.print_exception_skip(label, exc_row)
+            return {"pr_urls": [], "needs_review": []}
+
         if suppressed:
             labels = [label for label, _ in suppressed]
+            print(
+                f"  [trivy-only] Trivy reported {total} finding(s): "
+                f"{len(suppressed)} already excepted, "
+                f"{len(issues)} to evaluate"
+            )
             print(
                 f"  {len(suppressed)} security finding(s) excepted for "
                 f"{scope} — these will be skipped: {', '.join(labels)}"
             )
             for label, exc_row in suppressed:
                 unmanaged_scanner.print_exception_skip(label, exc_row)
-            print(
-                f"  {len(issues)} security finding(s) have no exception on "
-                f"file — continuing evaluation"
-            )
         else:
+            print(f"  [trivy-only] {len(issues)} issue(s) found")
             print(
                 f"  No security findings are currently excepted for {scope} — "
                 f"all {len(issues)} finding(s) will be evaluated normally."

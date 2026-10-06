@@ -277,7 +277,8 @@ def create_drift_pr(
         trivy_passed: bool | None = None,
         trivy_summary: dict | None = None,
         rolled_back_from_pr: int | None = None,
-        append_history: bool = True):
+        append_history: bool = True,
+        additional_files: list[tuple[str, str]] | None = None):
     g, repo, env_branch = _resolve_github_client(account_label)
     if g is None or repo is None:
         raise RuntimeError(
@@ -305,12 +306,12 @@ def create_drift_pr(
         except GithubException as cleanup_exc:
             print(f"  ⚠ Failed to delete unused branch {head_branch}: {cleanup_exc}")
 
-    # Write the file change on the head branch.  get_contents first: the
+    # Write file change(s) on the head branch.  get_contents first: the
     # path may already exist on the branch (a previously merged drift
     # report, or a re-run against the same path) — then update it with the
     # existing blob's sha.  Only when it's genuinely new (404) create it.
-    # Identical blob vs *file_content*: GitHub's Contents API still creates
-    # a commit whose tree SHA is unchanged → PR with changed_files=0
+    # Identical blob vs content: GitHub's Contents API still creates a
+    # commit whose tree SHA is unchanged → PR with changed_files=0
     # (vpc #93/#94).  For report-only paths (drift-reports/*.md) we still
     # need a PR when the resource was un-excepted — bump a re-review stamp
     # so the commit is non-empty and Approvals gets a fresh queue entry.
@@ -321,54 +322,83 @@ def create_drift_pr(
     # when head == base ("No commits between…"), which used to crash the
     # whole trivy_only scan at stage trivy_only_review.  Callers pass a
     # drift-reports/*.md body; the PR is still "review" (no .tf change).
-    write_file = bool(file_path and file_content) and (
+    #
+    # additional_files lets one PR carry multiple .tf patches (trivy-only
+    # used to open one PR per file, which split a single scan and raced
+    # dedup).  Files already identical to base are skipped; if every file
+    # matches base the empty PR is aborted.
+    write_primary = bool(file_path and file_content) and (
         not review_only or _is_report_path(file_path)
     )
-    if write_file:
+    files_to_write: list[tuple[str, str]] = []
+    if write_primary:
+        files_to_write.append((file_path, file_content))
+    if not review_only:
+        for extra_path, extra_content in (additional_files or []):
+            if extra_path and extra_content and extra_path != file_path:
+                files_to_write.append((extra_path, extra_content))
+
+    def _write_one(path: str, content: str) -> bool:
+        """Write *path* when it differs from base.  Returns True if written."""
         try:
-            try:
-                existing = repo.get_contents(file_path, ref=head_branch)
-                existing_text = existing.decoded_content.decode("utf-8")
-                if existing_text == file_content:
-                    if _is_report_path(file_path):
-                        stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-                        file_content = (
-                            file_content.rstrip()
-                            + f"\n\n<!-- drift-reconciler: re-review {stamp} -->\n"
-                        )
-                        print(
-                            f"  ↻  {resource_id}: {file_path} unchanged on base — "
-                            f"stamping re-review so a new PR can re-enter Approvals"
-                        )
-                    else:
-                        print(
-                            f"  ⏭  {resource_id}: {file_path} already matches "
-                            f"base — skipping empty PR"
-                        )
-                        _delete_head_branch()
-                        return None
-                repo.update_file(
-                    path=file_path,
-                    message=pr_title,
-                    content=file_content,
-                    sha=existing.sha,
-                    branch=head_branch,
-                )
-            except UnknownObjectException:
-                repo.create_file(
-                    path=file_path,
-                    message=pr_title,
-                    content=file_content,
-                    branch=head_branch,
-                )
+            existing = repo.get_contents(path, ref=head_branch)
+            existing_text = existing.decoded_content.decode("utf-8")
+            to_write = content
+            if existing_text == content:
+                if _is_report_path(path):
+                    stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                    to_write = (
+                        content.rstrip()
+                        + f"\n\n<!-- drift-reconciler: re-review {stamp} -->\n"
+                    )
+                    print(
+                        f"  ↻  {resource_id}: {path} unchanged on base — "
+                        f"stamping re-review so a new PR can re-enter Approvals"
+                    )
+                else:
+                    print(
+                        f"  ⏭  {resource_id}: {path} already matches "
+                        f"base — skipping file"
+                    )
+                    return False
+            repo.update_file(
+                path=path,
+                message=pr_title,
+                content=to_write,
+                sha=existing.sha,
+                branch=head_branch,
+            )
+            return True
+        except UnknownObjectException:
+            repo.create_file(
+                path=path,
+                message=pr_title,
+                content=content,
+                branch=head_branch,
+            )
+            return True
+
+    if files_to_write:
+        written = 0
+        try:
+            for path, content in files_to_write:
+                if _write_one(path, content):
+                    written += 1
         except GithubException as exc:
-            print(f"  ⚠ GitHub file write failed for {file_path} "
+            print(f"  ⚠ GitHub file write failed for {path} "
                   f"({exc.status}): {exc.data}")
             _delete_head_branch()
             raise DriftPRError(
-                f"GitHub API error writing {file_path} on {head_branch}: "
+                f"GitHub API error writing {path} on {head_branch}: "
                 f"{exc.status} {exc.data}"
             ) from exc
+        if written == 0:
+            print(
+                f"  ⏭  {resource_id}: all file(s) already match "
+                f"base — skipping empty PR"
+            )
+            _delete_head_branch()
+            return None
     elif review_only:
         # No report body supplied — cannot open a GitHub PR with zero
         # commits.  Fail soft here rather than 422 at create_pull.

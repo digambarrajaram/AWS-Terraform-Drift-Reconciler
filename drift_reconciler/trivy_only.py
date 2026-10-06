@@ -1,16 +1,89 @@
 """Standalone --trivy-only scan path."""
 from __future__ import annotations
 
-import json
+import difflib
 import os
 import shutil
 import tempfile
 
-import github_integration as gi
-import drift_reconciler.drift_history as drift_history
 import unmanaged_scanner
-from trivy_agent import _run_trivy, _extract_issues, fix_issues, copy_tf_tree, State as TrivyState
-from scan_runs import report_stage
+from trivy_agent import (
+    _extract_issues,
+    copy_tf_tree,
+    State as TrivyState,
+)
+
+
+def _verify_fixes_cleared(
+    tmpdir: str,
+    all_fixes: list[dict],
+    needs_review: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Re-scan after LLM patches; drop fixes that did not clear Trivy.
+
+    Merged-but-ineffective rewrites used to reopen the same AWS-00xx PR
+    every scan because the agent trusted the LLM without checking Trivy.
+    Those pairs become manual-review items instead.
+    """
+    # Route through agent so tests that patch agent._run_trivy also cover
+    # the post-fix verify pass (same binding as the initial scan).
+    import agent as _ag
+    raw = _ag._run_trivy(tmpdir)
+    if "error" in raw:
+        print(f"  ⚠ [trivy-only] post-fix re-scan failed: {raw['error']} — "
+              f"keeping {len(all_fixes)} unverified fix(es)")
+        return all_fixes, needs_review
+
+    remaining = {
+        (i.get("resource") or "", i.get("rule_id") or "")
+        for i in _extract_issues(raw, tmpdir)
+        if i.get("rule_id")
+    }
+    remaining_rules = {rid for _r, rid in remaining}
+
+    def _fix_still_fails(fix: dict) -> bool:
+        key = (fix.get("resource") or "", fix.get("rule_id") or "")
+        if key in remaining:
+            return True
+        # FixEntry without resource: fall back to rule_id only.
+        if not fix.get("resource") and fix.get("rule_id") in remaining_rules:
+            return True
+        return False
+
+    effective: list[dict] = []
+    # Per-file: if any claimed fix on a file still fails, exclude the whole
+    # file so we never PR a mixed effective/ineffective rewrite.
+    by_file: dict[str, list[dict]] = {}
+    for fix in all_fixes:
+        by_file.setdefault(fix["file_path"], []).append(fix)
+
+    for file_path, fixes_in_file in by_file.items():
+        still_failing = [f for f in fixes_in_file if _fix_still_fails(f)]
+        if still_failing:
+            print(
+                f"  ⚠ [trivy-only] {len(still_failing)}/{len(fixes_in_file)} "
+                f"fix(es) in {os.path.basename(file_path)} still fail Trivy "
+                f"— routing to manual review (will not open a fix PR)"
+            )
+            for f in fixes_in_file:
+                needs_review.append({
+                    "rule_id": f["rule_id"],
+                    "resource": f.get("resource"),
+                    "resolution": f.get("description") or "",
+                    "reason": "automated fix did not clear Trivy finding",
+                })
+            continue
+        effective.extend(fixes_in_file)
+
+    if all_fixes and not effective:
+        print("  [trivy-only] no LLM fix cleared its Trivy finding")
+    elif len(effective) < len(all_fixes):
+        print(
+            f"  [trivy-only] {len(effective)}/{len(all_fixes)} fix(es) "
+            f"verified clear by re-scan"
+        )
+    return effective, needs_review
+
 
 def _create_manual_review_prs(needs_review: list[dict], account_label: str,
                               run_id: str | None) -> list[dict]:
@@ -135,10 +208,9 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
 
     Copies ``.tf`` files to a temp directory, scans for misconfigurations,
     filters out suppressed issues via the exception registry, attempts
-    automatic fixes, and creates one PR per modified file with
-    ``pr_type="security_only"`` — plus one review-only PR (no file diff)
-    per resource whose findings could not be auto-fixed, so they surface
-    in the approval queue instead of being silently dropped.
+    automatic fixes, **re-scans to verify** each fix cleared Trivy, then
+    opens **one** ``security_only`` PR for all verified file patches — plus
+    one review-only PR per resource whose findings could not be auto-fixed.
 
     Returns ``{"pr_urls": [...], "needs_review": [...]}`` — ``pr_urls`` is
     a list of ``{"url": str, "type": "security_only"|"manual"}`` dicts, and
@@ -146,6 +218,7 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
     mirrored by the review-only PRs).
     """
     from drift_reconciler.formatting_drift_json import check_security_suppression
+    from drift_reconciler.pending_applies import create_pending_apply, set_security_fixes
 
     _ag.report_stage(run_id, "trivy_only_scan")
 
@@ -202,7 +275,7 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
                 f"all {len(issues)} finding(s) will be evaluated normally."
             )
 
-        # ── Apply fixes (single pass — no re-scan loop) ──────────────
+        # ── Apply fixes, then verify with a re-scan ───────────────────
         fix_state: TrivyState = {
             "tf_dir": tmpdir,
             "scan_results": [],
@@ -220,147 +293,170 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
         result = _ag.fix_issues(fix_state)
         all_fixes = result.get("fixes_applied", [])
         needs_review = result.get("needs_review", [])
+
+        if all_fixes:
+            all_fixes, needs_review = _verify_fixes_cleared(
+                tmpdir, all_fixes, needs_review,
+            )
+
         review_prs = _create_manual_review_prs(needs_review, account_label, run_id)
         if not all_fixes:
-            print("  [trivy-only] No fixes applied.")
+            print("  [trivy-only] No verified fixes to open a PR for.")
             return {"pr_urls": review_prs, "needs_review": needs_review}
 
         files_touched = len({f["file_path"] for f in all_fixes})
-        print(f"  [trivy-only] {len(all_fixes)} fix(es) applied across {files_touched} file(s)")
+        print(f"  [trivy-only] {len(all_fixes)} verified fix(es) across "
+              f"{files_touched} file(s)")
 
-        # ── Map Trivy severity → drift risk_level vocabulary ──────────
+        # ── One security PR per scope (all files) ─────────────────────
         _sev_to_risk = {"CRITICAL": "HIGH", "HIGH": "HIGH", "MEDIUM": "MEDIUM"}
-        # LOW and UNKNOWN default to "LOW"
+        _SEVERITY_RANK_LOOKUP = {
+            "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4,
+        }
+        derived_resource_id = "trivy-security"
 
-        # ── Group fixes by file → one PR per file ─────────────────────
-        import difflib
+        _ag.report_stage(run_id, "trivy_only_pr")
+
+        existing = _ag.drift_history.get_open_event(
+            derived_resource_id, account_label, "security_only",
+        )
+        if not existing:
+            # Honor legacy per-file dedup ids while older PRs are still open.
+            seen_legacy: set[str] = set()
+            for fix in all_fixes:
+                legacy_id = (
+                    "trivy-security-"
+                    + os.path.basename(fix["file_path"]).replace(".tf", "")
+                )
+                if legacy_id in seen_legacy:
+                    continue
+                seen_legacy.add(legacy_id)
+                existing = _ag.drift_history.get_open_event(
+                    legacy_id, account_label, "security_only",
+                )
+                if existing:
+                    break
+        if existing:
+            print(f"  Skipping {derived_resource_id}: open security PR "
+                  f"#{existing['pr_number']} already exists")
+            return {"pr_urls": review_prs, "needs_review": needs_review}
 
         by_file: dict[str, list[dict]] = {}
         for fix in all_fixes:
             by_file.setdefault(fix["file_path"], []).append(fix)
 
-        _ag.report_stage(run_id, "trivy_only_pr")
-
-        pr_urls: list[dict] = []
-        for tmp_file_path, fixes_in_file in by_file.items():
-            basename = os.path.basename(tmp_file_path)
-            derived_resource_id = f"trivy-security-{basename.replace('.tf', '')}"
-
-            # Dedup — don't create a second security PR for the same file
-            # while an earlier one is still open.
-            existing = _ag.drift_history.get_open_event(derived_resource_id, account_label, "security_only")
-            if existing:
-                print(f"  Skipping {derived_resource_id}: open security PR "
-                      f"#{existing['pr_number']} already exists")
-                continue
-
-            # ── Patched content (from tmpdir) ─────────────────────────
+        file_payloads: list[tuple[str, str, str]] = []
+        for tmp_file_path, _fixes_in_file in by_file.items():
+            try:
+                rel = os.path.relpath(tmp_file_path, tmpdir)
+                if rel.startswith(".."):
+                    rel = os.path.basename(tmp_file_path)
+            except ValueError:
+                rel = os.path.basename(tmp_file_path)
+            original_path = os.path.join(tf_dir, rel)
             with open(tmp_file_path, encoding="utf-8") as f:
                 patched_content = f.read()
-
-            # ── Unified diff against the original file ────────────────
-            original_path = os.path.join(tf_dir, basename)
+            rel_posix = rel.replace("\\", "/")
             if os.path.isfile(original_path):
                 with open(original_path, encoding="utf-8") as f:
                     original_content = f.read()
+                if original_content == patched_content:
+                    print(f"  ⏭  {rel_posix}: local already matches patched "
+                          f"content — omitting from PR")
+                    continue
                 diff_lines = list(difflib.unified_diff(
                     original_content.splitlines(keepends=True),
                     patched_content.splitlines(keepends=True),
-                    fromfile=f"a/{basename}",
-                    tofile=f"b/{basename}",
+                    fromfile=f"a/{rel_posix}",
+                    tofile=f"b/{rel_posix}",
                 ))
-                plan_output = "".join(diff_lines)
+                plan_chunk = "".join(diff_lines)
                 repo_path = _ag.gi.to_repo_relative_path(original_path)
             else:
-                plan_output = ("(original file not found — "
-                               "full patched content below)")
+                plan_chunk = f"(original {rel_posix} not found — full patched content)"
                 repo_path = (
                     f"drift-reports/{_ag.gi._safe_label(account_label)}/"
-                    f"security-{basename}"
+                    f"security-{os.path.basename(rel)}"
                 )
+            file_payloads.append((repo_path, patched_content, plan_chunk))
 
-            # ── Determine highest severity among this file's fixes ────
-            # fixes_applied entries carry rule_id but not severity —
-            # resolve from the original issues list.
-            _SEVERITY_RANK_LOOKUP = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
-            rule_severity: dict[str, str] = {}
-            for iss in issues:
-                rid = iss.get("rule_id", "")
-                if rid:
-                    sev = (iss.get("severity") or "UNKNOWN").upper()
-                    cur = rule_severity.get(rid)
-                    if cur is None or _SEVERITY_RANK_LOOKUP.get(sev, 4) < _SEVERITY_RANK_LOOKUP.get(cur, 4):
-                        rule_severity[rid] = sev
-            highest_sev = "LOW"
-            for fix in fixes_in_file:
-                sev = rule_severity.get(fix["rule_id"], "UNKNOWN")
-                rank = _SEVERITY_RANK_LOOKUP.get(sev, 4)
-                if rank <= _SEVERITY_RANK_LOOKUP.get(highest_sev, 4):
-                    highest_sev = sev
-            risk_level = _sev_to_risk.get(highest_sev, "LOW")
+        if not file_payloads:
+            print("  [trivy-only] Verified fixes already present locally — "
+                  "no PR needed.")
+            return {"pr_urls": review_prs, "needs_review": needs_review}
 
-            # ── Markdown summary ──────────────────────────────────────
-            count = len(fixes_in_file)
-            drift_summary = "\n".join(
-                f"- **`{f['rule_id']}`**: {f['description']}"
-                for f in fixes_in_file
-            )
-            pr_title = f"Security fix: {basename} ({count} issue{'s' if count != 1 else ''})"
+        rule_severity: dict[str, str] = {}
+        for iss in issues:
+            rid = iss.get("rule_id", "")
+            if not rid:
+                continue
+            sev = (iss.get("severity") or "UNKNOWN").upper()
+            cur = rule_severity.get(rid)
+            if cur is None or _SEVERITY_RANK_LOOKUP.get(sev, 4) < _SEVERITY_RANK_LOOKUP.get(cur, 4):
+                rule_severity[rid] = sev
+        highest_sev = "LOW"
+        for fix in all_fixes:
+            sev = rule_severity.get(fix["rule_id"], "UNKNOWN")
+            if _SEVERITY_RANK_LOOKUP.get(sev, 4) <= _SEVERITY_RANK_LOOKUP.get(highest_sev, 4):
+                highest_sev = sev
+        risk_level = _sev_to_risk.get(highest_sev, "LOW")
 
-            pr = _ag.gi.create_drift_pr(
-                resource_id=derived_resource_id,
-                pr_title=pr_title,
-                drift_summary=drift_summary,
-                plan_output=plan_output,
-                file_path=repo_path,
-                file_content=patched_content,
-                risk_level=risk_level,
-                account_label=account_label,
-                security=True,
-            )
-            if pr is not None:
-                pr_urls.append({"url": pr.html_url, "type": "security_only"})
-                # Security PRs are file-only (no terraform action) but still
-                # need the Approve/Reject flow — without this row they'd
-                # never appear in the dashboard queue.
-                from drift_reconciler.pending_applies import create_pending_apply, set_security_fixes
-                create_pending_apply(pr.number, account_label, "security_only")
-                # Persist the (resource_address, rule_id) pairs this PR fixes so
-                # Except (real-fix) / Approve (review_only) can write security
-                # exceptions for exactly those findings.
+        count = len(all_fixes)
+        drift_summary = "\n".join(
+            f"- **`{f['rule_id']}`** ({f.get('resource') or '?'}): {f['description']}"
+            for f in all_fixes
+        )
+        plan_output = "\n".join(chunk for _p, _c, chunk in file_payloads)
+        primary_path, primary_content, _ = file_payloads[0]
+        additional = [(p, c) for p, c, _ in file_payloads[1:]]
+        files_label = ", ".join(os.path.basename(p) for p, _c, _d in file_payloads)
+        pr_title = (
+            f"Security fix: {count} issue{'s' if count != 1 else ''} "
+            f"({files_label})"
+        )
+
+        pr_urls: list[dict] = []
+        pr = _ag.gi.create_drift_pr(
+            resource_id=derived_resource_id,
+            pr_title=pr_title,
+            drift_summary=drift_summary,
+            plan_output=plan_output,
+            file_path=primary_path,
+            file_content=primary_content,
+            risk_level=risk_level,
+            account_label=account_label,
+            security=True,
+            additional_files=additional or None,
+        )
+        if pr is not None:
+            pr_urls.append({"url": pr.html_url, "type": "security_only"})
+            create_pending_apply(pr.number, account_label, "security_only")
+            pairs = sorted({
+                (fix.get("resource") or "", fix["rule_id"])
+                for fix in all_fixes
+                if fix.get("rule_id")
+            })
+            if not any(r for r, _ in pairs):
                 pairs = sorted({
-                    (fix.get("resource") or "", fix["rule_id"])
-                    for fix in fixes_in_file
-                    if fix.get("rule_id")
+                    (i.get("resource") or "", fix["rule_id"])
+                    for fix in all_fixes
+                    for i in issues
+                    if i.get("rule_id") == fix.get("rule_id") and i.get("resource")
                 })
-                # Fallback when FixEntry has no resource (older shape).
-                if not any(r for r, _ in pairs):
-                    pairs = sorted({
-                        (i.get("resource") or "", fix["rule_id"])
-                        for fix in fixes_in_file
-                        for i in issues
-                        if i.get("rule_id") == fix.get("rule_id") and i.get("resource")
-                        and (
-                            not i.get("target")
-                            or os.path.basename(i.get("target") or "") == basename
-                        )
-                    })
-                pairs = [(r, rid) for r, rid in pairs if r and rid]
-                if pairs:
-                    ok = set_security_fixes(
-                        pr.number, account_label,
-                        [{"resource_address": r, "rule_id": rid} for r, rid in pairs],
-                    )
-                    print(f"  [trivy-only] recorded {len(pairs)} fix pair(s) on "
-                          f"pending_applies for PR #{pr.number} "
-                          f"({'ok' if ok else 'FAILED'})")
-                else:
-                    print(f"  ⚠ security PR #{pr.number}: no (resource, rule_id) "
-                          f"pairs recorded — Except cannot auto-add exceptions")
+            pairs = [(r, rid) for r, rid in pairs if r and rid]
+            if pairs:
+                ok = set_security_fixes(
+                    pr.number, account_label,
+                    [{"resource_address": r, "rule_id": rid} for r, rid in pairs],
+                )
+                print(f"  [trivy-only] recorded {len(pairs)} fix pair(s) on "
+                      f"pending_applies for PR #{pr.number} "
+                      f"({'ok' if ok else 'FAILED'})")
+            else:
+                print(f"  ⚠ security PR #{pr.number}: no (resource, rule_id) "
+                      f"pairs recorded — Except cannot auto-add exceptions")
 
         return {"pr_urls": pr_urls + review_prs, "needs_review": needs_review}
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-
-

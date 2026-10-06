@@ -64,7 +64,17 @@ class ManualReviewPrTests(unittest.TestCase):
             "upd": scan_runs.update_scan_run,
             "rel": agent.gi.to_repo_relative_path,
         }
-        agent._run_trivy = lambda tmpdir: _fake_trivy_output(tmpdir)
+        self._trivy_calls = 0
+
+        def _trivy(tmpdir):
+            self._trivy_calls += 1
+            # Initial scan finds issues; post-fix verify returns clean
+            # unless a test overrides this helper.
+            if self._trivy_calls == 1:
+                return _fake_trivy_output(tmpdir)
+            return {"Results": []}
+
+        agent._run_trivy = _trivy
         # Simulate resource-count rejection fallthrough: no fixes, one
         # needs_review item (same shape fix_issues appends on REJECTED).
         agent.fix_issues = lambda state: {
@@ -154,19 +164,32 @@ class ManualReviewPrTests(unittest.TestCase):
         self.assertEqual(self.pending, [])
 
     def test_review_pr_coexists_with_fix_pr(self):
-        agent.fix_issues = lambda state: {
-            "fixes_applied": [{"file_path": os.path.join(self.tf_dir, "main.tf"),
-                               "rule_id": "AVD-AWS-0106", "description": "fixed"}],
-            "needs_review": [{
-                "rule_id": "AVD-AWS-0178",
-                "resource": "aws_db_instance.foo",
-                "resolution": "Enable IAM auth",
-                "reason": "no applicable automated fix",
-            }],
-        }
+        def fake_fix(state):
+            path = os.path.join(state["tf_dir"], "main.tf")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write('\n# security patch\n')
+            return {
+                "fixes_applied": [{
+                    "file_path": path,
+                    "rule_id": "AVD-AWS-0106",
+                    "description": "fixed",
+                    "resource": "aws_lambda_function.this",
+                }],
+                "needs_review": [{
+                    "rule_id": "AVD-AWS-0178",
+                    "resource": "aws_db_instance.foo",
+                    "resolution": "Enable IAM auth",
+                    "reason": "no applicable automated fix",
+                }],
+            }
+
+        agent.fix_issues = fake_fix
         result = agent.run_trivy_only_scan(self.tf_dir, "prod-esign", "prod-esign")
         self.assertEqual(len(self.pr_calls), 2)  # fix PR + review PR
         self.assertEqual(len([k for k in self.pr_calls if k.get("review_only")]), 1)
+        fix_prs = [k for k in self.pr_calls if not k.get("review_only")]
+        self.assertEqual(len(fix_prs), 1)
+        self.assertEqual(fix_prs[0]["resource_id"], "trivy-security")
         types = {entry["type"] for entry in result["pr_urls"]}
         self.assertEqual(types, {"security_only", "manual"})
 

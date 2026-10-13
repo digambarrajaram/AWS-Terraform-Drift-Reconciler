@@ -248,7 +248,8 @@ class ApprovalsMixin:
     def _handle_pending_apply_decision(self, path):
         """POST /api/pending-applies/{id}/decision
 
-        Body: ``{"decision": "approved"|"rejected", "approved_by": "..."}``.
+        Body: ``{"decision": "approved"|"rejected"|"excepted"|"cancelled",
+        "approved_by": "..."}``.
         Only valid while the row is still ``awaiting_approval`` — a second
         decision on the same row returns 409.  Flips the row's state and
         records who decided; triggers nothing else."""
@@ -263,8 +264,11 @@ class ApprovalsMixin:
             return
 
         decision = body.get("decision", "")
-        if decision not in ("approved", "rejected", "excepted"):
-            self._json_error(400, "decision must be 'approved', 'rejected', or 'excepted'.")
+        if decision not in ("approved", "rejected", "excepted", "cancelled"):
+            self._json_error(
+                400,
+                "decision must be 'approved', 'rejected', 'excepted', or 'cancelled'.",
+            )
             return
         approved_by = (self.headers.get("X-Operator-Id") or body.get("approved_by") or "").strip()
         if not approved_by:
@@ -592,13 +596,73 @@ class ApprovalsMixin:
             self.wfile.write(data)
             return
 
+        elif decision == "cancelled":
+            # No-action dismiss for drift (and any) awaiting PR: close without
+            # merge and without terraform revert/apply.  Reject still means
+            # "revert AWS"; Cancel means leave AWS and code unchanged.
+            close_pr = import_attr_or_json_error(
+                self, "drift_reconciler.github_integration", "close_pr",
+            )
+            if close_pr is None:
+                _rollback("github_integration import failed")
+                return
+            try:
+                close_pr(scope, pr_number)
+            except RuntimeError as exc:
+                _rollback(f"close failed: {exc}")
+                self._json_error(409, f"GitHub close failed: {exc}")
+                return
+            _dh = import_module_or_json_error(self, "drift_reconciler.drift_history")
+            if _dh is None:
+                return
+            try:
+                # Same closed-unmerged outcome as sync_pr_state: drift remains,
+                # no AWS change — operator can act later / next scan recreates.
+                _dh.mark_reverted(
+                    pr_number, scope,
+                    status="manual_revert_required",
+                    resolution=(
+                        f"PR cancelled from Approvals — no AWS or code change "
+                        f"for PR #{pr_number}; drift remains"
+                    ),
+                    force=True,
+                )
+            except Exception as exc:
+                print(f"  [cancel] drift_history mark failed: {exc}",
+                      file=sys.stderr)
+            try:
+                requests.patch(
+                    f"{table_url}?id=eq.{pending_id}",
+                    headers=headers,
+                    json={
+                        "status": "cancelled",
+                        "result": {
+                            "cancelled": True,
+                            "message": "PR closed without merge; no terraform action",
+                        },
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                print(f"  [cancel] pending status update failed: {exc}",
+                      file=sys.stderr)
+            data = json.dumps({
+                "ok": True, "apply_started": False, "cancelled": True,
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
 
         # ── Spawn the apply/revert job asynchronously ─────────────────
         # Approve → --apply-pr against post-merge main.
         # Reject  → --revert-pr against pre-drift main (PR never merged),
         #           so the apply reverts AWS to match code.
         # (row/pr_number/scope come from the claim above.)
-        if pr_number and scope and decision != "excepted":
+        if pr_number and scope and decision not in ("excepted", "cancelled"):
             # Reuse the pending_applies row id as the log run_id so
             # the log viewer can be pointed at it later if desired.
             apply_run_id = row.get("id") or f"apply-{pr_number}-{int(datetime.now().timestamp())}"

@@ -35,8 +35,17 @@ from drift_reconciler.drift_baseline import plan_field_values_equal
 
 
 # Provider-computed attributes that appear in plan JSON but must not be
-# written into HCL (terraform validate rejects them).
-_READ_ONLY_DRIFT_ATTRS = frozenset({"tags_all", "last_modified"})
+# written into HCL (terraform validate rejects them / they are not config).
+_READ_ONLY_DRIFT_ATTRS = frozenset({
+    "tags_all",
+    "last_modified",
+    # Lambda / API Gateway computed ARNs and publish metadata — show up in
+    # resource_drift after refresh when prior state had nulls, and must never
+    # be literal-patched into .tf (replaces expressions with garbage).
+    "qualified_arn",
+    "qualified_invoke_arn",
+    "invoke_arn",
+})
 
 SECURITY_RESOURCE_TYPES = (
     "aws_security_group",
@@ -444,10 +453,11 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
         if addr:
             planned_by_addr[addr] = entry
 
-    # Field-level union: keep refresh-only diffs from resource_drift and
-    # overlay actionable resource_changes (config↔live). Overwriting the
-    # whole entry used to drop minor native drifts when the same address
-    # also appeared under resource_changes with a different field set.
+    # Field-level union: when a resource has a non-noop resource_changes
+    # entry, merge refresh diffs from resource_drift and overlay planned
+    # config↔live diffs.  resource_drift alone is NOT actionable — Terraform
+    # prints "No changes" when every resource_changes action is no-op, even
+    # if refresh filled computed nulls (Lambda version/qualified_arn, etc.).
     all_addresses = set(native_by_addr) | set(planned_by_addr) | set(deleted_addresses)
     file_index = build_resource_file_index(tf_dir) if tf_dir else {}
 
@@ -490,19 +500,23 @@ def report_drift(plan, tf_dir: str = None, scope: str | None = None) -> dict:
             })
             continue
 
+        # No non-noop planned change → matches `terraform plan` "No changes".
+        # Skip prior-state → refreshed-live noise (computed fills, hash churn).
+        if planned is None:
+            continue
+
         changes_dict: dict = {}
         action_set: set = set()
         if native is not None:
             n_changes, n_actions = _extract_changes_dict(native, swap=False)
             changes_dict.update(n_changes)
             action_set |= n_actions
-        if planned is not None:
-            # resource_changes wins on overlapping fields (config↔live).
-            p_changes, p_actions = _extract_changes_dict(planned, swap=True)
-            changes_dict.update(p_changes)
-            action_set |= p_actions
-            if p_actions == {"create", "delete"}:
-                is_replace = True
+        # resource_changes wins on overlapping fields (config↔live).
+        p_changes, p_actions = _extract_changes_dict(planned, swap=True)
+        changes_dict.update(p_changes)
+        action_set |= p_actions
+        if p_actions == {"create", "delete"}:
+            is_replace = True
 
         # Update/replace with no visible attribute delta (sensitive-only,
         # after_unknown, provider quirks) is still real drift — don't drop it.

@@ -179,9 +179,9 @@ class RejectUnchangedTests(unittest.TestCase):
 
     def test_claim_accepts_excepted_and_rejected(self):
         # Validation only — no network.
-        for decision in ("approved", "rejected", "excepted"):
+        for decision in ("approved", "rejected", "excepted", "cancelled"):
             # Mirror the allow-list in claim_decision.
-            self.assertIn(decision, ("approved", "rejected", "excepted"))
+            self.assertIn(decision, ("approved", "rejected", "excepted", "cancelled"))
 
     def test_claim_rejects_unknown_decision(self):
         real_url, real_key = pending_applies._URL, pending_applies._KEY

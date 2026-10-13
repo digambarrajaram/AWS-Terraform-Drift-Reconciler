@@ -91,6 +91,29 @@ class CodeToRealityPatchTests(unittest.TestCase):
         )
         self.assertEqual(list(filtered), ["layers"])
 
+    def test_filter_drops_lambda_computed_arns(self):
+        filtered = gi.filter_patchable_changes(
+            {
+                "layers": {
+                    "before": [],
+                    "after": ["arn:aws:lambda:us-east-1:1:layer:x:1"],
+                },
+                "qualified_arn": {
+                    "before": None,
+                    "after": "arn:aws:lambda:us-east-1:1:function:hello:11",
+                },
+                "qualified_invoke_arn": {
+                    "before": None,
+                    "after": "arn:aws:apigateway:us-east-1:lambda:path/x",
+                },
+                "invoke_arn": {
+                    "before": None,
+                    "after": "arn:aws:apigateway:us-east-1:lambda:path/y",
+                },
+            },
+        )
+        self.assertEqual(list(filtered), ["layers"])
+
     def test_hcledit_appends_missing_live_only_attribute(self):
         """Live-only drift (e.g. Lambda layers) must append, not no-op set."""
         if not gi.is_hcledit_available():

@@ -130,6 +130,23 @@ class ClaimDecisionTests(unittest.TestCase):
         self.assertEqual(result["http_status"], 404)
         self.assertIn("not found", result["error"].lower())
 
+    def test_cancelled_decision_is_accepted(self):
+        row = {
+            "id": "ccc",
+            "pr_number": 42,
+            "scope": "dev",
+            "status": "cancelled",
+            "pr_type": "fix",
+        }
+        pending_applies.requests.patch = MagicMock(
+            return_value=_Resp(200, [row]),
+        )
+        result = pending_applies.claim_decision("ccc", "cancelled", "dashboard-user")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["row"]["status"], "cancelled")
+        payload = pending_applies.requests.patch.call_args[1]["json"]
+        self.assertEqual(payload["status"], "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()

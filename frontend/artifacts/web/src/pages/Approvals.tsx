@@ -11,7 +11,10 @@ import { LogViewer } from '@/components/shared/LogViewer';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { apiFetch } from '@/api/apiFetch';
 import { useScope } from '@/hooks/useScope';
-import { runningLabel, decisionButtonLabel, decisionToast, isJobDone, statusLabel } from './approval-labels';
+import {
+  runningLabel, decisionButtonLabel, decisionToast, isJobDone, statusLabel,
+  showNoActionCancel,
+} from './approval-labels';
 import { useScanLogs } from '@/hooks/useScanLogs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '@/lib/errorUtils';
@@ -146,7 +149,7 @@ function DetailDrawer({
 }: {
   row: PendingApply | null;
   onClose: () => void;
-  onDecide: (row: PendingApply, decision: 'approved' | 'rejected' | 'excepted') => void;
+  onDecide: (row: PendingApply, decision: 'approved' | 'rejected' | 'excepted' | 'cancelled') => void;
   onCancel: (row: PendingApply) => void;
   deciding: boolean;
   cancelling: boolean;
@@ -408,10 +411,11 @@ function DetailDrawer({
               <p className="text-xs text-muted-foreground">Could not load PR details.</p>
             )}
 
-            {/* ── Accept AWS / Except / Revert AWS ── */}
+            {/* ── Accept AWS / Except / Revert AWS / Cancel ── */}
             {/* Real-fix security: Accept (merge patch) + Except + Revert.
                 Review-only security (no .tf patch): Except + Close only —
-                Accept/Merge would only add exceptions, which is Except's job. */}
+                Accept/Merge would only add exceptions, which is Except's job.
+                Drift fix/batch: Accept + Revert + Cancel (no action). */}
             {current.status === 'awaiting_approval' && (
               <div className="flex items-center gap-2 mt-5 flex-wrap">
                 {!(current.pr_type === 'security_only' && current.review_only) && (
@@ -442,6 +446,16 @@ function DetailDrawer({
                 >
                   <XCircle size={13} /> {decisionButtonLabel('rejected', current.pr_type)}
                 </button>
+                {showNoActionCancel(current.pr_type) && (
+                  <button
+                    type="button"
+                    disabled={deciding}
+                    onClick={() => onDecide(current, 'cancelled')}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs font-medium text-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                  >
+                    <Ban size={13} /> {deciding ? 'Working…' : decisionButtonLabel('cancelled', current.pr_type)}
+                  </button>
+                )}
               </div>
             )}
 
@@ -519,7 +533,10 @@ export default function Approvals() {
     }
   }, [data, selected]);
 
-  const decide = useCallback(async (row: PendingApply, decision: 'approved' | 'rejected' | 'excepted') => {
+  const decide = useCallback(async (
+    row: PendingApply,
+    decision: 'approved' | 'rejected' | 'excepted' | 'cancelled',
+  ) => {
     if (deciding) return;
     setDeciding(true);
     try {
@@ -534,10 +551,11 @@ export default function Approvals() {
           }),
         },
       );
-      if (res.apply_started === false && decision !== 'excepted') {
+      // Except/Cancel are sync (apply_started:false by design).
+      if (res.apply_started === false && decision !== 'excepted' && decision !== 'cancelled') {
         // Defensive: the backend returns non-2xx here now, but don't
         // toast success for a job that never spawned if it ever slips
-        // through as a 200.  Except is sync (apply_started:false by design).
+        // through as a 200.
         toast.error(
           decision === 'approved' ? 'Failed to approve' : 'Failed to reject', {
           description: res.error ?? 'Apply job did not start — no job was spawned.',
@@ -569,7 +587,8 @@ export default function Approvals() {
           ? 'Already handled'
           : (decision === 'approved' ? 'Failed to approve'
             : decision === 'excepted' ? 'Failed to except'
-              : 'Failed to reject'),
+              : decision === 'cancelled' ? 'Failed to cancel'
+                : 'Failed to reject'),
         { description: msg },
       );
       queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
@@ -620,7 +639,8 @@ export default function Approvals() {
 
       <p className="text-xs text-muted-foreground">
         Click a PR to review details. Accept AWS changes updates code and state to match AWS;
-        Revert AWS to code restores original Terraform on AWS.
+        Revert AWS to code restores original Terraform on AWS;
+        Cancel closes the PR with no AWS or code change.
       </p>
 
       {isLoading ? (
@@ -656,6 +676,7 @@ export default function Approvals() {
                   const claimRunning = row.status === 'approved' || row.status === 'rejected';
                   const showApprove = !(row.pr_type === 'security_only' && row.review_only);
                   const showExcept = row.pr_type === 'security_only';
+                  const showCancel = showNoActionCancel(row.pr_type);
                   return (
                     <tr
                       key={row.id}
@@ -717,6 +738,16 @@ export default function Approvals() {
                             >
                               <XCircle size={12} /> {decisionButtonLabel('rejected', row.pr_type, { compact: true })}
                             </button>
+                            {showCancel && (
+                              <button
+                                type="button"
+                                disabled={deciding}
+                                onClick={() => decide(row, 'cancelled')}
+                                className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2.5 py-1 text-xs font-medium text-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                              >
+                                <Ban size={12} /> {decisionButtonLabel('cancelled', row.pr_type, { compact: true })}
+                              </button>
+                            )}
                           </div>
                         )}
                         {claimRunning && (

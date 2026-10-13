@@ -9,7 +9,7 @@
 
 import { applyStatusLabel } from '@/lib/statusLabels';
 
-type ClaimStatus = 'approved' | 'rejected' | 'excepted';
+type ClaimStatus = 'approved' | 'rejected' | 'excepted' | 'cancelled';
 
 const FILE_ONLY_RUNNING: Record<string, Partial<Record<'approved' | 'rejected', string>>> = {
   unmanaged: { approved: 'Merging unmanaged PR…', rejected: 'Closing…' },
@@ -26,6 +26,15 @@ const DRIFT_RUNNING: Record<'approved' | 'rejected', string> = {
   approved: 'Applying drift…',
   rejected: 'Reverting drift…',
 };
+
+const FILE_ONLY_TYPES = new Set(['unmanaged', 'security_only', 'manual']);
+
+/** True when Reject means "revert AWS" — those PRs also need a no-action Cancel. */
+export function showNoActionCancel(prType: string | null | undefined): boolean {
+  if (prType === 'rollback' || prType === 'security_only') return false;
+  if (prType != null && FILE_ONLY_TYPES.has(prType)) return false;
+  return true; // fix, batch, null/unknown terraform drift
+}
 
 /** Running-badge label for a claim state, or '' when status isn't a claim.
  *  ``excepted`` is terminal (Except runs sync in the decision handler —
@@ -60,11 +69,10 @@ export function statusLabel(
   return applyStatusLabel(status, opts);
 }
 
-const FILE_ONLY_TYPES = new Set(['unmanaged', 'security_only', 'manual']);
-
 /** Decision button label — outcome-oriented, not GitHub jargon.
  *  Drift approve: keep AWS, update Terraform + state to match.
  *  Drift reject: keep Terraform, revert AWS (+ state) to match code.
+ *  Drift cancel: close PR, leave AWS and code unchanged.
  *  Rollback approve: merge reverse patch + apply (undo prior fix).
  *  File-only: merge/close (no terraform apply). */
 export function decisionButtonLabel(
@@ -75,6 +83,9 @@ export function decisionButtonLabel(
   const compact = opts?.compact === true;
   if (decision === 'excepted') {
     return compact ? 'Except' : 'Add exception';
+  }
+  if (decision === 'cancelled') {
+    return compact ? 'Cancel' : 'Cancel — no action';
   }
   if (prType === 'rollback') {
     if (decision === 'approved') {
@@ -105,6 +116,9 @@ export function decisionToast(
 ): string {
   if (decision === 'excepted') {
     return `PR #${prNumber} excepted — closed without merge; exception added`;
+  }
+  if (decision === 'cancelled') {
+    return `PR #${prNumber} cancelled — closed with no AWS or code change`;
   }
   if (prType === 'rollback') {
     return decision === 'approved'

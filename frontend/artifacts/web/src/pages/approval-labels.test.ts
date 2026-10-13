@@ -3,7 +3,10 @@
 // Run: node --import tsx --test src/pages/approval-labels.test.ts
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { runningLabel, decisionButtonLabel, decisionToast, isJobDone, statusLabel } from './approval-labels';
+import {
+  runningLabel, decisionButtonLabel, decisionToast, isJobDone, statusLabel,
+  showNoActionCancel,
+} from './approval-labels';
 import { findingStatusLabel } from '@/lib/statusLabels';
 
 describe('runningLabel', () => {
@@ -39,6 +42,7 @@ describe('decisionToast', () => {
     assert.equal(decisionToast(7, 'approved', 'fix'), 'PR #7 approved — updating code + state to match AWS');
     assert.equal(decisionToast(7, 'rejected', 'batch'), 'PR #7 rejected — reverting AWS to match original code');
     assert.equal(decisionToast(7, 'rejected', null), 'PR #7 rejected — reverting AWS to match original code');
+    assert.equal(decisionToast(7, 'cancelled', 'fix'), 'PR #7 cancelled — closed with no AWS or code change');
   });
 
   it('uses merge/exceptions wording for file-only types', () => {
@@ -85,6 +89,26 @@ describe('decisionButtonLabel', () => {
   it('labels except clearly', () => {
     assert.equal(decisionButtonLabel('excepted', 'security_only'), 'Add exception');
     assert.equal(decisionButtonLabel('excepted', 'security_only', { compact: true }), 'Except');
+  });
+
+  it('labels no-action cancel for drift', () => {
+    assert.equal(decisionButtonLabel('cancelled', 'fix'), 'Cancel — no action');
+    assert.equal(decisionButtonLabel('cancelled', 'batch', { compact: true }), 'Cancel');
+  });
+});
+
+describe('showNoActionCancel', () => {
+  it('is true for terraform drift types', () => {
+    assert.equal(showNoActionCancel('fix'), true);
+    assert.equal(showNoActionCancel('batch'), true);
+    assert.equal(showNoActionCancel(null), true);
+  });
+
+  it('is false when Reject already means close/cancel', () => {
+    assert.equal(showNoActionCancel('unmanaged'), false);
+    assert.equal(showNoActionCancel('security_only'), false);
+    assert.equal(showNoActionCancel('manual'), false);
+    assert.equal(showNoActionCancel('rollback'), false);
   });
 });
 describe('isJobDone', () => {

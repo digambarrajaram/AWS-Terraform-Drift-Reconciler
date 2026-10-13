@@ -64,13 +64,13 @@ def decision_claim_miss_error(row: dict | None) -> tuple[int, str, dict]:
 
 
 def claim_decision(pending_id: str, decision: str, approved_by: str) -> dict:
-    """Atomically claim ``awaiting_approval`` → ``approved``|``rejected``|``excepted``.
+    """Atomically claim ``awaiting_approval`` → ``approved``|``rejected``|``excepted``|``cancelled``.
 
     Returns ``{"ok": True, "row": ...}`` on success, or
     ``{"ok": False, "http_status": N, "error": "...", ...}`` on failure.
     """
-    if decision not in ("approved", "rejected", "excepted"):
-        return {"ok": False, "http_status": 400, "error": "decision must be 'approved', 'rejected', or 'excepted'."}
+    if decision not in ("approved", "rejected", "excepted", "cancelled"):
+        return {"ok": False, "http_status": 400, "error": "decision must be 'approved', 'rejected', 'excepted', or 'cancelled'."}
     if not (approved_by or "").strip():
         return {"ok": False, "http_status": 400, "error": "approved_by is required."}
     if not _URL or not _KEY:

@@ -108,8 +108,12 @@ class FormattingDriftScriptTests(unittest.TestCase):
             {"before": "t3.small", "after": "t3.micro"},
         )
 
-    def test_resource_drift_keeps_prior_to_live_orientation(self):
-        """Native resource_drift is already drift convention — do not swap."""
+    def test_resource_drift_only_is_not_actionable(self):
+        """Refresh-only resource_drift with no planned change is not drift.
+
+        Matches ``terraform plan`` "No changes" when resource_changes are
+        all no-op even if prior state → refreshed live filled computed nulls.
+        """
         plan = {
             "resource_drift": [
                 {
@@ -132,9 +136,134 @@ class FormattingDriftScriptTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             report = report_drift(plan, tf_dir=tmp, scope=None)
+        self.assertEqual(report["report_type"], "no_drift")
+        self.assertEqual(report["resources"], [])
+
+    def test_lambda_refresh_computed_fills_are_not_drift(self):
+        """PR #305 style: null→version / qualified_arn from refresh only."""
+        plan = {
+            "resource_drift": [
+                {
+                    "address": "module.app.aws_lambda_alias.live",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {"function_version": None},
+                        "after": {"function_version": "11"},
+                    },
+                },
+                {
+                    "address": "module.app.aws_lambda_function.this",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {
+                            "qualified_arn": None,
+                            "qualified_invoke_arn": None,
+                            "source_code_hash": "K5RX5vkd+E/W3IL44qiX/UbwDIdOt4Kw9b5Yt7xFDX8=",
+                            "version": None,
+                        },
+                        "after": {
+                            "qualified_arn": (
+                                "arn:aws:lambda:us-east-1:1:function:hello:11"
+                            ),
+                            "qualified_invoke_arn": (
+                                "arn:aws:apigateway:us-east-1:lambda:path/invocations"
+                            ),
+                            "source_code_hash": "uEUWUGpE180wyZGkPp1vGts+lBBk/NHDQu8UI9V8edA=",
+                            "version": "11",
+                        },
+                    },
+                },
+            ],
+            "prior_state": {
+                "values": {
+                    "root_module": {
+                        "resources": [],
+                        "child_modules": [{
+                            "address": "module.app",
+                            "resources": [
+                                {"address": "module.app.aws_lambda_alias.live"},
+                                {"address": "module.app.aws_lambda_function.this"},
+                            ],
+                        }],
+                    },
+                },
+            },
+            # Human terraform plan: No changes (all no-op).
+            "resource_changes": [
+                {
+                    "address": "module.app.aws_lambda_alias.live",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["no-op"],
+                        "before": {"function_version": "11"},
+                        "after": {"function_version": "11"},
+                    },
+                },
+                {
+                    "address": "module.app.aws_lambda_function.this",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["no-op"],
+                        "before": {"version": "11"},
+                        "after": {"version": "11"},
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report = report_drift(plan, tf_dir=tmp, scope=None)
+        self.assertEqual(report["report_type"], "no_drift")
         self.assertEqual(
-            report["resources"][0]["changes"]["instance_type"],
-            {"before": "t3.small", "after": "t3.micro"},
+            [r for r in report["resources"] if r.get("changes")],
+            [],
+        )
+
+    def test_native_drift_orientation_preserved_when_planned_update_exists(self):
+        """Native resource_drift is already drift convention — do not swap."""
+        plan = {
+            "resource_drift": [
+                {
+                    "address": "aws_instance.foo",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {"tags": {"Env": "prod"}},
+                        "after": {"tags": {"Env": "prod", "Owner": "ops"}},
+                    },
+                },
+            ],
+            "prior_state": {
+                "values": {
+                    "root_module": {
+                        "resources": [{"address": "aws_instance.foo"}],
+                    },
+                },
+            },
+            "resource_changes": [
+                {
+                    "address": "aws_instance.foo",
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["update"],
+                        "before": {"instance_type": "t3.small"},
+                        "after": {"instance_type": "t3.micro"},
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report = report_drift(plan, tf_dir=tmp, scope=None)
+        changes = report["resources"][0]["changes"]
+        # Native tags keep prior→live orientation (no swap).
+        self.assertEqual(
+            changes["tags"],
+            {"before": {"Env": "prod"}, "after": {"Env": "prod", "Owner": "ops"}},
+        )
+        # Planned instance_type is swapped to before=IaC, after=live.
+        self.assertEqual(
+            changes["instance_type"],
+            {"before": "t3.micro", "after": "t3.small"},
         )
 
     def test_replace_is_not_classified_as_deleted_externally(self):

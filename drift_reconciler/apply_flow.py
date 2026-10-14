@@ -112,6 +112,70 @@ def _revert_on_gate_failure(
 _FILE_ONLY_PR_TYPES = ("unmanaged",)
 
 
+def _recover_failed_approve_apply(
+    tf_dir: str,
+    pr_number: int,
+    scope: str,
+    env_dict: dict | None,
+    reason: str,
+    is_revert: bool,
+    _finish,
+) -> None:
+    """Undo merge-side effects when terraform never completed successfully."""
+    import drift_history as _dh
+
+    err_text = humanize_terraform_error(str(reason))
+    if is_revert:
+        _finish("failed", {"error": err_text})
+        _dh.mark_reverted(
+            pr_number, scope, status="manual_revert_required",
+            resolution=(
+                f"Revert apply failed ({reason}) — verify AWS vs code; "
+                f"manual action may be required"
+            ),
+            force=True,
+        )
+        return
+
+    from dashboard.exceptions_policy import rollback_auto_exceptions_for_pr
+
+    exc_rolled = rollback_auto_exceptions_for_pr(pr_number, scope)
+    if env_dict is None:
+        try:
+            from drift_reconciler.scope_resolution import fetch_environment_row
+            env_dict = fetch_environment_row(scope) or {}
+        except Exception:
+            env_dict = {}
+
+    self_status = _revert_on_gate_failure(
+        tf_dir, pr_number, scope, reason, env_dict,
+    )
+    result = {
+        **self_status.get("result", {}),
+        "error": err_text,
+        "exceptions_rolled_back": exc_rolled,
+    }
+    _finish(self_status["status"], result)
+
+    if self_status["status"] == "reverted_gate_blocked":
+        _dh.reopen_pr_events(
+            pr_number, scope,
+            resolution=(
+                f"Apply failed ({reason}) — merge reverted; "
+                f"re-run security scan to open a new PR"
+            ),
+        )
+    else:
+        _dh.mark_reverted(
+            pr_number, scope, status=self_status["status"],
+            resolution=(
+                f"Apply failed ({reason}) — auto-revert status: "
+                f"{self_status['status']}; manual verification required"
+            ),
+            force=True,
+        )
+
+
 def _pr_requires_terraform(pr_number: int, scope: str) -> bool:
     """Dispatcher for the apply/reject flows: True when this PR goes
     through the terraform gate/apply path.
@@ -160,6 +224,7 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             result=result,
         )
 
+    env_dict: dict | None = None
     try:
         # File-only PRs (unmanaged / review-only security) skip terraform —
         # the PR itself is the record.  Real-fix security goes through
@@ -447,22 +512,15 @@ def _run_apply(tf_dir: str, pr_number: int, scope: str, run_id: str | None = Non
             )
     except subprocess.TimeoutExpired as exc:
         print(f"[apply] timed out: {exc}")
-        _finish("failed", {"error": f"timed out: {exc}"})
-        # The job is terminal — don't leave this PR's drift_events rows
-        # open waiting for a write that will never come.
-        import drift_history as _dh
-        _dh.mark_reverted(
-            pr_number, scope, status="manual_revert_required",
-            resolution=("Apply timed out — verify AWS vs code; "
-                        "manual action may be required"),
+        _recover_failed_approve_apply(
+            tf_dir, pr_number, scope, env_dict,
+            f"timed out: {exc}", is_revert, _finish,
         )
     except Exception as exc:
         print(f"[apply] failed: {exc}")
-        _finish("failed", {"error": humanize_terraform_error(str(exc))})
-        import drift_history as _dh
-        _dh.mark_reverted(
-            pr_number, scope, status="manual_revert_required",
-            resolution=f"Apply failed: {exc} — verify AWS vs code; manual action may be required",
+        _recover_failed_approve_apply(
+            tf_dir, pr_number, scope, env_dict,
+            str(exc), is_revert, _finish,
         )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime
+from urllib.parse import quote
 
 
 def _requests():
@@ -223,3 +224,103 @@ def auto_add_exceptions_on_merge(
     print(f"  [exceptions] auto_add done for PR #{pr_number}: "
           f"{inserted} row(s) inserted", file=sys.stderr)
     return inserted
+
+
+def rollback_auto_exceptions_for_pr(
+    pr_number: int, scope: str, user_id: str | None = None,
+) -> int:
+    """Deactivate security exceptions auto-added for *pr_number*.
+
+    Used when an Except or merge+apply path fails after partial writes, or
+    when a merged security fix could not be applied — stale suppressions
+    must not hide findings on the next scan.
+
+    Matches rows whose ``reason`` references this PR (Except / auto-add
+    wording) and, when ``fixes_jsonb`` is present on the pending row, the
+    (resource_address, rule_id) pairs recorded for that PR.
+    """
+    import requests as _req_mod
+
+    requests = _requests()
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not key:
+        print("  ⚠ exception rollback skipped — Supabase not configured", file=sys.stderr)
+        return 0
+
+    if user_id is None:
+        from drift_reconciler.ownership import owner_user_id_for_scope
+        user_id = owner_user_id_for_scope(scope)
+
+    read_headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    write_headers = {**read_headers, "Content-Type": "application/json"}
+    base = f"{url}/rest/v1/drift_exception_registry"
+
+    pairs: list[tuple[str, str]] = []
+    try:
+        pending_q = (
+            f"{url}/rest/v1/pending_applies"
+            f"?select=fixes_jsonb&pr_number=eq.{pr_number}&scope=eq.{scope}"
+        )
+        if user_id:
+            pending_q += f"&user_id=eq.{user_id}"
+        resp = requests.get(f"{pending_q}&limit=1", headers=read_headers, timeout=10)
+        rows = resp.json() if resp.text and resp.status_code == 200 else []
+        for fix in (rows[0].get("fixes_jsonb") or []) if rows else []:
+            ra = (fix.get("resource_address") or "").strip()
+            rid = (fix.get("rule_id") or "").strip()
+            if ra and rid:
+                pairs.append((ra, rid))
+    except _req_mod.RequestException as exc:
+        print(f"  ⚠ exception rollback: pending_applies read failed: {exc}",
+              file=sys.stderr)
+
+    pr_token = f"PR #{pr_number}"
+    reason_pat = quote(f"*{pr_token}*", safe="")
+    deactivated = 0
+    user_filter = f"user_id=eq.{user_id}&" if user_id else ""
+
+    def _deactivate_pair(ra: str, rid: str) -> None:
+        nonlocal deactivated
+        try:
+            resp = requests.patch(
+                f"{base}?{user_filter}scope=eq.{scope}"
+                f"&exception_type=eq.security"
+                f"&resource_address=eq.{quote(ra, safe='')}"
+                f"&rule_id=eq.{quote(rid, safe='')}"
+                f"&active=eq.true"
+                f"&reason=ilike.{reason_pat}",
+                headers=write_headers,
+                json={"active": False},
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):
+                deactivated += 1
+        except _req_mod.RequestException as exc:
+            print(f"  ⚠ exception rollback PATCH failed for {ra}/{rid}: {exc}",
+                  file=sys.stderr)
+
+    if pairs:
+        for ra, rid in pairs:
+            _deactivate_pair(ra, rid)
+    else:
+        # No fixes_jsonb — best-effort deactivate any security row tied to PR #.
+        try:
+            resp = requests.patch(
+                f"{base}?{user_filter}scope=eq.{scope}"
+                f"&exception_type=eq.security"
+                f"&active=eq.true"
+                f"&reason=ilike.{reason_pat}",
+                headers=write_headers,
+                json={"active": False},
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):
+                deactivated += 1
+        except _req_mod.RequestException as exc:
+            print(f"  ⚠ exception rollback bulk PATCH failed: {exc}", file=sys.stderr)
+
+    if deactivated:
+        print(f"  [exceptions] rolled back {deactivated} exception row(s) "
+              f"for PR #{pr_number}", file=sys.stderr)
+    return deactivated

@@ -12,7 +12,10 @@ import requests
 
 from dashboard.env import _configure_aws_env, _env_for_scope, _tf_dir_for
 from dashboard.handler_imports import import_attr_or_json_error, import_module_or_json_error
-from dashboard.exceptions_policy import auto_add_exceptions_on_merge
+from dashboard.exceptions_policy import (
+    auto_add_exceptions_on_merge,
+    rollback_auto_exceptions_for_pr,
+)
 from dashboard.paths import _REPO_ROOT
 from dashboard.process_runner import _spawn_with_capture
 
@@ -546,6 +549,14 @@ class ApprovalsMixin:
             except Exception as exc:
                 print(f"  [except] auto_add_exceptions_on_merge raised: {exc}",
                       file=sys.stderr)
+                try:
+                    rollback_auto_exceptions_for_pr(
+                        pr_number, scope,
+                        user_id=row.get("user_id") or self.auth_user_id,
+                    )
+                except Exception as rb_exc:
+                    print(f"  [except] exception rollback failed: {rb_exc}",
+                          file=sys.stderr)
                 try:
                     requests.patch(
                         f"{table_url}?id=eq.{pending_id}", headers=headers,

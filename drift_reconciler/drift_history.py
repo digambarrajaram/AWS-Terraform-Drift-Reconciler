@@ -180,6 +180,27 @@ def append_entry(
     })
 
 
+def reopen_pr_events(
+    pr_number: int,
+    account: str,
+    resolution: str,
+) -> None:
+    """Set drift_events for *pr_number* back to ``open`` after a failed apply
+    whose merge was reverted — so the next scan can open a new PR."""
+    ok = _patch(
+        {"pr_number": pr_number, "account": account},
+        {
+            "status": "open",
+            "resolution": resolution,
+            "resolved_at": None,
+        },
+    )
+    if ok:
+        print(f"  [history] PR #{pr_number} reopened for retry")
+    else:
+        print(f"  [history] Failed to reopen PR #{pr_number}")
+
+
 def mark_reverted(
     pr_number: int,
     account: str,

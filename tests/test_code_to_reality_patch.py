@@ -114,6 +114,21 @@ class CodeToRealityPatchTests(unittest.TestCase):
         )
         self.assertEqual(list(filtered), ["layers"])
 
+    def test_filter_drops_lambda_published_version(self):
+        filtered = gi.filter_patchable_changes(
+            {
+                "source_code_hash": {
+                    "before": "aaa",
+                    "after": "bbb",
+                },
+                "version": {
+                    "before": "14",
+                    "after": "15",
+                },
+            },
+        )
+        self.assertEqual(list(filtered), ["source_code_hash"])
+
     def test_hcledit_appends_missing_live_only_attribute(self):
         """Live-only drift (e.g. Lambda layers) must append, not no-op set."""
         if not gi.is_hcledit_available():

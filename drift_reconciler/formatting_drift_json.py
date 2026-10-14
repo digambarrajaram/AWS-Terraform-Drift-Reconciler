@@ -45,6 +45,8 @@ _READ_ONLY_DRIFT_ATTRS = frozenset({
     "qualified_arn",
     "qualified_invoke_arn",
     "invoke_arn",
+    # Published Lambda revision — computed when publish = true; not settable in .tf.
+    "version",
 })
 
 SECURITY_RESOURCE_TYPES = (

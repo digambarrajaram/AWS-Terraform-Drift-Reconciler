@@ -16,6 +16,12 @@ import {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const SEVERITIES: Severity[] = ['HIGH', 'MEDIUM', 'LOW'];
+/** Match migrations/create_severity_routing_rules_table.sql when no DB row exists. */
+const DEFAULT_GLOBAL_CHANNEL: Record<Severity, Channel> = {
+  HIGH:   'pagerduty',
+  MEDIUM: 'slack',
+  LOW:    'slack',
+};
 const CHANNELS: { value: Channel; label: string }[] = [
   { value: 'pagerduty', label: 'PagerDuty (+ Slack if configured)' },
   { value: 'slack',     label: 'Slack only' },
@@ -185,7 +191,7 @@ function RoutingRuleRow({
   // Missing scope override means inherit — NOT "none" (which silences alerts).
   const current: ScopeChannel = isScopeRow
     ? (existingRule?.channel ?? 'inherit')
-    : (existingRule?.channel ?? 'none');
+    : (existingRule?.channel ?? DEFAULT_GLOBAL_CHANNEL[severity]);
   const [channel, setChannel] = useState<ScopeChannel>(current);
   // Sync local state when the rule changes underneath us
   // (e.g. after a save refetches, or after navigation remounts).
@@ -351,7 +357,7 @@ function RoutingRulesSection({
             const globalKey = `${sev}-global`;
             const scopeKey  = `${sev}-${scope}`;
             const globalRule = findRule(sev, null);
-            const globalCh: Channel = globalRule?.channel ?? 'none';
+            const globalCh: Channel = globalRule?.channel ?? DEFAULT_GLOBAL_CHANNEL[sev];
             return (
               <React.Fragment key={sev}>
                 {/* Global default row */}

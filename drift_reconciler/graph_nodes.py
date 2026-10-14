@@ -128,6 +128,35 @@ def trivy_gate(state: State):
     return {"trivy_scanned": True, "drift_findings": findings}
 
 
+_DEFAULT_ROUTING: dict[str, str] = {
+    "HIGH": "pagerduty",
+    "MEDIUM": "slack",
+    "LOW": "slack",
+}
+
+
+def _normalize_routing_rules(rules: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for sev, ch in rules.items():
+        key = str(sev).strip().upper()
+        out[key] = str(ch).strip().lower()
+    return out
+
+
+def _pagerduty_configured() -> bool:
+    import os as _os
+
+    try:
+        from notification_config import get_notification_secrets
+
+        key = (get_notification_secrets().get("pagerduty_routing_key") or "").strip()
+    except Exception:
+        key = ""
+    if not key:
+        key = (_os.environ.get("PAGERDUTY_ROUTING_KEY") or "").strip()
+    return bool(key)
+
+
 def _load_routing_rules() -> dict[str, str]:
     """Return ``{severity: channel}`` from Supabase, with scope-specific
     rules overriding global defaults.  Falls back to hardcoded defaults
@@ -160,17 +189,21 @@ def _load_routing_rules() -> dict[str, str]:
         for r in rows:
             if r.get("scope") == _ag._account_label:
                 rules[r["severity"]] = r["channel"]
-        return rules
+        return _normalize_routing_rules(rules)
     except Exception:
         # Hardcoded fallback — never silently drop alerts.
-        return {"HIGH": "pagerduty", "MEDIUM": "slack", "LOW": "slack"}
+        return dict(_DEFAULT_ROUTING)
 
 
 def _finding_channel(rules: dict[str, str], finding: dict) -> str:
     """Resolve routing channel for a finding (case-insensitive severity)."""
     raw = finding.get("risk_level") or "LOW"
     sev = str(raw).strip().upper()
-    return rules.get(sev) or rules.get(raw) or "none"
+    ch = rules.get(sev) or rules.get(raw)
+    if ch:
+        return str(ch).strip().lower()
+    # Missing row in DB — match migration seed / hardcoded fallback (not silence).
+    return _DEFAULT_ROUTING.get(sev, "slack")
 
 
 def _pd_dedup_key(finding: dict, run_id: str | None = None) -> str:
@@ -221,8 +254,6 @@ def drift_alert(state: State):
         return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
 
     rules = _load_routing_rules()
-    # Normalize keys so DB quirks (mixed case) never silently drop alerts.
-    rules = {str(k).strip().upper(): v for k, v in rules.items()}
     print(f"  [alert_agent] routing rules for {_ag._account_label}: {rules}")
 
     pd_findings = [f for f in active if _finding_channel(rules, f) == "pagerduty"]
@@ -244,9 +275,18 @@ def drift_alert(state: State):
         )
 
     alert_errors: list[str] = []
-    if active and not pd_findings:
+    if active and not pd_findings and _pagerduty_configured():
+        rules_summary = ", ".join(
+            f"{s}→{rules.get(s, _DEFAULT_ROUTING.get(s, 'slack'))}"
+            for s in ("HIGH", "MEDIUM", "LOW")
+        )
+        finding_sevs = sorted(
+            {str(f.get("risk_level") or "LOW").strip().upper() for f in active}
+        )
         alert_errors.append(
             "No findings routed to PagerDuty (Slack-only or silenced). "
+            f"Effective rules ({_ag._account_label}): {rules_summary}. "
+            f"Finding severities this scan: {', '.join(finding_sevs)}. "
             "Send Test always pages and bypasses severity rules — set HIGH/MEDIUM/LOW "
             "→ PagerDuty on Alerts and Save each row."
         )

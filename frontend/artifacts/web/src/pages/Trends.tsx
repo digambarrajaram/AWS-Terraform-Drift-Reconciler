@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { format } from 'date-fns';
 import { errorMessage } from '@/lib/errorUtils';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   AreaChart, Area, ResponsiveContainer, Cell, LabelList,
 } from 'recharts';
 import {
@@ -418,7 +418,7 @@ export default function Trends() {
                   axisLine={false}
                   tickLine={false}
                 />
-                <Tooltip
+                <RechartsTooltip
                   content={<DriftedTooltip />}
                   cursor={{ fill: 'hsl(var(--muted))', radius: 4 }}
                 />
@@ -465,7 +465,7 @@ export default function Trends() {
                   tickLine={false}
                   tickFormatter={(v) => `${v}h`}
                 />
-                <Tooltip
+                <RechartsTooltip
                   content={<MTTRTooltip />}
                   cursor={{ fill: 'hsl(var(--muted))', radius: 4 }}
                 />
@@ -550,7 +550,7 @@ export default function Trends() {
                 axisLine={false}
                 tickLine={false}
               />
-              <Tooltip
+              <RechartsTooltip
                 content={<VolumeTooltip />}
                 cursor={{ stroke: 'hsl(var(--border))', strokeWidth: 1 }}
               />

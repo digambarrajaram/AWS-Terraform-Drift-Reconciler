@@ -1303,12 +1303,20 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
         search = params.get("search", [""])[0]
         if search:
             query["resource_id"] = f"ilike.*{search}*"
-        date_from = params.get("dateFrom", [""])[0]
-        date_to = params.get("dateTo", [""])[0]
-        if date_from:
-            query["created_at.gte"] = date_from
+        date_from = params.get("dateFrom", [""])[0].strip()
+        date_to = params.get("dateTo", [""])[0].strip()
         if date_to:
-            query["created_at.lte"] = f"{date_to}T23:59:59"
+            date_to_end = f"{date_to}T23:59:59"
+        else:
+            date_to_end = ""
+        # PostgREST expects created_at=gte.<iso> (see drift_trends / _serve_trends),
+        # not created_at.gte=<iso> — the latter yields PGRST100 / HTTP 400.
+        if date_from and date_to_end:
+            query["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to_end})"
+        elif date_from:
+            query["created_at"] = f"gte.{date_from}"
+        elif date_to_end:
+            query["created_at"] = f"lte.{date_to_end}"
         headers = {"apikey": key, "Authorization": f"Bearer {key}", "Prefer": "count=exact"}
         try:
             if sort_column == "severity":
@@ -1341,7 +1349,14 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 content_range = resp.headers.get("Content-Range", "*/0")
                 total = int(content_range.rsplit("/", 1)[-1]) if "/" in content_range else len(rows)
             if resp.status_code not in (200, 206):
-                self._json_error(502, f"PR queue query failed ({resp.status_code})")
+                detail = ""
+                try:
+                    body = resp.json()
+                    if isinstance(body, dict) and body.get("message"):
+                        detail = f": {body['message']}"
+                except (ValueError, TypeError):
+                    pass
+                self._json_error(502, f"PR queue query failed ({resp.status_code}){detail}")
                 return
             data = json.dumps({"events": rows, "count": total}).encode("utf-8")
         except (requests.RequestException, ValueError) as exc:

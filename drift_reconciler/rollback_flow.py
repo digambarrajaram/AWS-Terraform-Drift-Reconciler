@@ -205,6 +205,44 @@ def _run_rollback_preview(tf_dir: str, pr_number: int, scope: str, run_id: str) 
                 })
                 continue
 
+            if is_tf_file_baseline(original_changes):
+                print(f"  [rollback-preview] CHECK {resource_id}: __tf_file__ baseline")
+                before = tf_file_before(original_changes)
+                file_entry = original_changes.get(TF_FILE_FIELD) or {}
+                fixed_val = file_entry.get("after")
+                if before is None:
+                    print(f"  [rollback-preview] SKIP {resource_id}: missing before content")
+                    diff.append({
+                        "resource_id": resource_id,
+                        "field": TF_FILE_FIELD,
+                        "original": "(missing)",
+                        "fixed": fixed_val,
+                        "current_live": "SKIPPED: __tf_file__ baseline missing before content",
+                    })
+                    continue
+                try:
+                    with open(file_path, encoding="utf-8") as fh:
+                        current_live = fh.read()
+                except OSError as exc:
+                    print(f"  [rollback-preview] SKIP {resource_id}: cannot read file — {exc}")
+                    diff.append({
+                        "resource_id": resource_id,
+                        "field": TF_FILE_FIELD,
+                        "original": before,
+                        "fixed": fixed_val,
+                        "current_live": f"SKIPPED: {exc}",
+                    })
+                    continue
+                print(f"  [rollback-preview] RESULT {resource_id}: outcome=file_baseline")
+                diff.append({
+                    "resource_id": resource_id,
+                    "field": TF_FILE_FIELD,
+                    "original": before,
+                    "fixed": fixed_val,
+                    "current_live": current_live,
+                })
+                continue
+
             fields = list(original_changes.keys())
             if not fields:
                 print(f"  [rollback-preview] SKIP {resource_id}: no fields in baseline changes")

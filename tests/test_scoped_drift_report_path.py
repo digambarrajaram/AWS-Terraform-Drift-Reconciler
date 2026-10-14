@@ -19,6 +19,14 @@ from github import UnknownObjectException  # noqa: E402
 
 
 class DriftReportPathTests(unittest.TestCase):
+    def test_branch_resource_id_strips_invalid_git_ref_chars(self):
+        rid = 'module.network.aws_subnet.private["b"]'
+        safe = gi._safe_branch_resource_id(rid)
+        self.assertNotIn("[", safe)
+        self.assertNotIn("]", safe)
+        self.assertNotIn('"', safe)
+        self.assertIn("module-network-aws_subnet-private", safe)
+
     def test_path_includes_account_and_resource(self):
         self.assertEqual(
             gi.drift_report_repo_path("dev", "aws_security_group.launch-wizard-1"),

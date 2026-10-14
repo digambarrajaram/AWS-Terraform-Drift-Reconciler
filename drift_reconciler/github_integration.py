@@ -227,6 +227,11 @@ def _safe_label(account_label: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "-", account_label)
 
 
+def _safe_branch_resource_id(resource_id: str) -> str:
+    """Git ref names cannot contain Terraform index syntax (e.g. [\"b\"])."""
+    return _safe_label(resource_id.replace(".", "-"))
+
+
 def drift_report_repo_path(account_label: str, resource_id: str) -> str:
     """Per-scope path for an unmanaged/report-only markdown file.
 
@@ -256,7 +261,7 @@ def is_hcledit_available() -> bool:
 
 
 def close_superseded_prs(repo, resource_id: str, account_label: str, base_branch: str, is_rollback: bool = False):
-    safe_id = resource_id.replace(".", "-")
+    safe_id = _safe_branch_resource_id(resource_id)
     safe_account = _safe_label(account_label)
     prefix = f"drift-fix/{safe_account}/{safe_id}-"
 
@@ -315,7 +320,7 @@ def create_drift_pr(
 
     close_superseded_prs(repo, resource_id, account_label, base_branch, is_rollback=is_rollback)
 
-    safe_id = resource_id.replace(".", "-")
+    safe_id = _safe_branch_resource_id(resource_id)
     head_branch = f"drift-fix/{safe_account}/{safe_id}-{int(datetime.utcnow().timestamp())}"
 
     pr_title = f"[{account_label}] {pr_title}"

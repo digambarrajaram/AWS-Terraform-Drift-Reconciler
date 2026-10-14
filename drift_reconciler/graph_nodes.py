@@ -275,20 +275,33 @@ def drift_alert(state: State):
         )
 
     alert_errors: list[str] = []
-    if active and not pd_findings and _pagerduty_configured():
+    finding_sevs = {
+        str(f.get("risk_level") or "LOW").strip().upper() for f in active
+    }
+    pd_routed_severities = {
+        sev
+        for sev in ("HIGH", "MEDIUM", "LOW")
+        if (rules.get(sev) or _DEFAULT_ROUTING.get(sev, "slack")) == "pagerduty"
+    }
+    # Only warn when this scan has severities configured for PagerDuty but none
+    # were paged (misconfiguration or dispatch failure). LOW→Slack with only
+    # LOW findings is expected — not an error.
+    if (
+        active
+        and not pd_findings
+        and _pagerduty_configured()
+        and finding_sevs & pd_routed_severities
+    ):
         rules_summary = ", ".join(
             f"{s}→{rules.get(s, _DEFAULT_ROUTING.get(s, 'slack'))}"
             for s in ("HIGH", "MEDIUM", "LOW")
         )
-        finding_sevs = sorted(
-            {str(f.get("risk_level") or "LOW").strip().upper() for f in active}
-        )
         alert_errors.append(
-            "No findings routed to PagerDuty (Slack-only or silenced). "
+            "No findings routed to PagerDuty despite matching severity rules. "
             f"Effective rules ({_ag._account_label}): {rules_summary}. "
-            f"Finding severities this scan: {', '.join(finding_sevs)}. "
-            "Send Test always pages and bypasses severity rules — set HIGH/MEDIUM/LOW "
-            "→ PagerDuty on Alerts and Save each row."
+            f"Finding severities this scan: {', '.join(sorted(finding_sevs))}. "
+            "Send Test always pages and bypasses severity rules — check routing "
+            "on Alerts and Save each row."
         )
 
     # PagerDuty → one page per finding.

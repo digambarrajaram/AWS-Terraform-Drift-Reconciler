@@ -80,6 +80,33 @@ class AlertStateSchemaTests(unittest.TestCase):
         finally:
             ag._account_label = prev
 
+    @patch("graph_nodes._pagerduty_configured", return_value=True)
+    @patch("graph_nodes.pga.trigger_pagerduty_alert", return_value={"status": "success"})
+    @patch("graph_nodes.slack.notify_all", return_value=1)
+    @patch("graph_nodes._load_routing_rules", return_value={
+        "HIGH": "pagerduty", "MEDIUM": "pagerduty", "LOW": "slack",
+    })
+    def test_low_slack_only_no_false_pagerduty_error(self, _rules, mock_slack, mock_pd, _pd_cfg):
+        import agent as ag
+        from graph_nodes import drift_alert
+
+        prev = ag._account_label
+        ag._account_label = "prod-setup"
+        try:
+            out = drift_alert({
+                "drift_detected": True,
+                "drift_findings": [
+                    {"resource_id": "aws_subnet.a", "risk_level": "LOW", "status": "updated"},
+                ],
+                "run_id": None,
+            })
+            self.assertEqual(out["alerts_sent"]["pagerduty"], 0)
+            self.assertEqual(out["alerts_sent"]["slack"], 1)
+            mock_pd.assert_not_called()
+            self.assertNotIn("errors", out["alerts_sent"])
+        finally:
+            ag._account_label = prev
+
     @patch("graph_nodes.pga.trigger_pagerduty_alert", return_value={"status": "success"})
     @patch("graph_nodes.slack.notify_all", return_value=1)
     @patch("graph_nodes._load_routing_rules", return_value={

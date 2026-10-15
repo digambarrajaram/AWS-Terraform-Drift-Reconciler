@@ -142,7 +142,7 @@ function StatTile({ label, value, icon, accent, hint, hintDetail }: TileProps) {
         {icon}
       </div>
       <div className="min-w-0 flex-1">
-        <p className="text-[11px] text-muted-foreground leading-none mb-1">{label}</p>
+        <p className="text-[11px] text-muted-foreground leading-tight mb-1 whitespace-nowrap">{label}</p>
         <p className="text-xl font-semibold text-foreground leading-none tabular-nums">{value}</p>
         {hint && hintDetail ? (
           <TooltipProvider delayDuration={200}>
@@ -190,15 +190,21 @@ function otherBreakdown(s: DriftSummary): string | undefined {
 }
 
 const TRENDS_TILE_GRID =
-  'grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 auto-rows-fr';
+  'grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 auto-rows-fr items-stretch';
 
 function pendingHint(p: PendingApprovalsSummary | undefined): string | undefined {
   if (!p || p.total === 0) return undefined;
   const parts: string[] = [];
-  if (p.unmanaged > 0) parts.push(`${p.unmanaged} unmanaged`);
-  if (p.security > 0) parts.push(`${p.security} security`);
+  if (p.unmanaged > 0) parts.push(`${p.unmanaged} unm.`);
+  if (p.security > 0) parts.push(`${p.security} sec.`);
   if (p.other > 0) parts.push(`${p.other} other`);
-  return parts.join(' · ');
+  return `${p.total} on Approvals · ${parts.join(' · ')}`;
+}
+
+function openTileValue(open: number, pending?: PendingApprovalsSummary): string {
+  const base = open.toLocaleString();
+  if (!pending || pending.total === 0) return base;
+  return `${base} (+${pending.total.toLocaleString()} pending)`;
 }
 
 function StatTiles({
@@ -243,8 +249,9 @@ function StatTiles({
         accent="bg-primary/10 text-primary"
       />
       <StatTile
-        label="Unique Resources"
+        label="Unique res."
         value={s.uniqueResources.toLocaleString()}
+        hint="Distinct resource IDs in period"
         icon={<Layers size={16} />}
         accent="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
       />
@@ -257,7 +264,7 @@ function StatTiles({
       />
       <StatTile
         label="Open"
-        value={s.open.toLocaleString()}
+        value={openTileValue(s.open, pending)}
         hint={pendingHint(pending) ?? 'Fix/batch findings only'}
         hintDetail={
           pending && pending.total > 0
@@ -276,9 +283,9 @@ function StatTiles({
         accent="bg-zinc-100 text-zinc-600 dark:bg-zinc-900/30 dark:text-zinc-400"
       />
       <StatTile
-        label="Rollback type"
+        label="Rollback PRs"
         value={s.rollback.toLocaleString()}
-        hint="Subset of total (overlaps status buckets)"
+        hint="pr_type=rollback (subset)"
         icon={<GitPullRequest size={16} />}
         accent="bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
       />
@@ -406,8 +413,10 @@ export default function Trends() {
         ? row.avg_hours
         : null,
   }));
-  const mttrResolvedCount = mttrData.reduce((n, r) => n + r.count, 0);
-  const mttrEmpty = !mttr.isLoading && mttrResolvedCount === 0;
+  const mttrHasChartBars = mttrChartData.some(
+    (r) => r.count > 0 && r.chart_hours != null && r.chart_hours > 0,
+  );
+  const mttrEmpty = !mttr.isLoading && !mttrHasChartBars;
 
   const volumeData = fillVolumeDays(volume.data ?? [], days);
 

@@ -551,9 +551,9 @@ function FilterBar({
           onChange={(e) => onFilters({ dateFrom: e.target.value })}
           className={`${selectCls} text-xs`}
         />
-        {filters.dateFrom && (
-          <span className="text-[11px] text-foreground tabular-nums">{formatFilterDate(filters.dateFrom)}</span>
-        )}
+        <span className="text-[11px] text-muted-foreground tabular-nums min-w-[6.5rem]">
+          {filters.dateFrom ? formatFilterDate(filters.dateFrom) : 'MMM d, yyyy'}
+        </span>
         <span className="text-[11px] text-muted-foreground">to</span>
         <input
           type="date"
@@ -564,9 +564,9 @@ function FilterBar({
           onChange={(e) => onFilters({ dateTo: e.target.value })}
           className={`${selectCls} text-xs`}
         />
-        {filters.dateTo && (
-          <span className="text-[11px] text-foreground tabular-nums">{formatFilterDate(filters.dateTo)}</span>
-        )}
+        <span className="text-[11px] text-muted-foreground tabular-nums min-w-[6.5rem]">
+          {filters.dateTo ? formatFilterDate(filters.dateTo) : 'MMM d, yyyy'}
+        </span>
         {(filters.dateFrom || filters.dateTo) && (
           <button type="button"
             onClick={() => onFilters({ dateFrom: '', dateTo: '' })}
@@ -673,7 +673,7 @@ export default function Explorer() {
   // Clear expanded cards on page/view change
   useEffect(() => { setExpanded(new Set()); }, [page, view]);
 
-  const { data, error, isLoading, isRefetching } = useDriftEvents(scope, filters, sort, page);
+  const { data, error, isLoading, isUpdating } = useDriftEvents(scope, filters, sort, page);
   const events     = data?.events ?? [];
   const total      = data?.count  ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -763,6 +763,11 @@ export default function Explorer() {
         </div>
       </div>
 
+      <p className="text-xs text-muted-foreground">
+        One row per <strong className="font-medium text-foreground">drift finding</strong> (resource).
+        Batch and multi-resource PRs can share a PR number across several rows — that is expected.
+      </p>
+
       {/* Filter bar */}
       <FilterBar
         filters={filters}
@@ -787,14 +792,22 @@ export default function Explorer() {
               from={from}
               to={to}
               pageSize={PAGE_SIZE}
-              isRefetching={isRefetching}
+              isRefetching={isUpdating}
               onPage={setPage}
               noun="event"
             />
           )}
         <div className="rounded-xl border border-border overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[760px]">
+            <table className="w-full text-sm min-w-[900px] table-fixed">
+              <colgroup>
+                <col className="w-[42%]" />
+                <col className="w-[12%]" />
+                <col className="w-[14%]" />
+                <col className="w-[14%]" />
+                <col className="w-[12%]" />
+                <col className="w-[6%]" />
+              </colgroup>
               <thead>
                 <tr className="border-b border-border bg-muted/40">
                   <SortTh col="resource_id" label="Resource"  sort={sort} onSort={handleSort} />
@@ -826,7 +839,7 @@ export default function Explorer() {
                         selected?.id === ev.id ? 'bg-accent' : 'hover:bg-muted/50',
                       ].join(' ')}
                     >
-                      <td className="px-4 py-3 font-mono text-xs max-w-[240px]">
+                      <td className="px-4 py-3 font-mono text-xs">
                         <ResourceCell resourceId={ev.resource_id} prType={ev.pr_type} />
                       </td>
                       <td className="px-4 py-3">
@@ -865,7 +878,7 @@ export default function Explorer() {
                 from={from}
                 to={to}
                 pageSize={PAGE_SIZE}
-                isRefetching={isRefetching}
+                isRefetching={isUpdating}
                 onPage={setPage}
                 noun="event"
               />
@@ -927,7 +940,7 @@ export default function Explorer() {
               from={from}
               to={to}
               pageSize={PAGE_SIZE}
-              isRefetching={isRefetching}
+              isRefetching={isUpdating}
               onPage={setPage}
               noun="event"
             />

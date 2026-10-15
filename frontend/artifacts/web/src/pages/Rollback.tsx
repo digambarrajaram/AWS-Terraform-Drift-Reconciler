@@ -29,6 +29,7 @@ import {
   type RollbackRun, type PreviewDiffRow,
 } from '@/hooks/useRollbackData';
 import type { DriftEvent } from '@/types';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,14 @@ function EligiblePRList({
 }) {
   return (
     <div>
-      <h2 className="mb-3 text-sm font-semibold">Eligible PRs</h2>
+      <div className="mb-3 flex items-baseline justify-between gap-2 flex-wrap">
+        <h2 className="text-sm font-semibold">Eligible PRs</h2>
+        {!loading && (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {events.length} row{events.length !== 1 ? 's' : ''} (matches Overview rollback count)
+          </span>
+        )}
+      </div>
       <div className="rounded-xl border border-border overflow-hidden">
         {loading ? (
           <div className="p-4 space-y-2">
@@ -614,7 +622,7 @@ export default function Rollback() {
   const canExecute = errorCount === 0 && (ctx?.diff?.length ?? 0) > 0;
 
   return (
-    <div className="p-6 space-y-6 max-w-5xl">
+    <div className={`p-6 space-y-6 ${PAGE_MAX_WIDTH}`}>
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">Rollback</h1>

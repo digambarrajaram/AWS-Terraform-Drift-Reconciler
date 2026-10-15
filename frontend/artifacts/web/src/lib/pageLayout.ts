@@ -1,2 +1,2 @@
-/** Shared max width for main app pages (keeps Scan, Explorer, Trends, etc. aligned). */
-export const PAGE_MAX_WIDTH = 'max-w-5xl mx-auto w-full';
+/** Full-width page shell — same layout as Environments (no centered max-width gutter). */
+export const PAGE_MAX_WIDTH = 'w-full';

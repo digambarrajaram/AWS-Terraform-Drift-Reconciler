@@ -1,0 +1,5 @@
+{$TLS_DOMAIN:localhost} {
+	encode gzip
+	reverse_proxy drift:8080
+	tls internal
+}

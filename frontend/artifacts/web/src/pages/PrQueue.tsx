@@ -426,7 +426,7 @@ export default function PrQueue() {
     sort.column, sort.ascending,
   ]);
 
-  const { data, error, isLoading, isRefetching } = useDriftEvents(scope, filters, sort, page);
+  const { data, error, isLoading, isUpdating } = useDriftEvents(scope, filters, sort, page);
   const events = data?.events ?? [];
   const total  = data?.count  ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -459,7 +459,7 @@ export default function PrQueue() {
         {!isLoading && (
           <span className="text-xs text-muted-foreground">
             {total.toLocaleString()} result{total !== 1 ? 's' : ''}
-            {isRefetching && ' · updating…'}
+            {isUpdating && ' · updating…'}
           </span>
         )}
       </div>
@@ -484,7 +484,7 @@ export default function PrQueue() {
           from={from}
           to={to}
           pageSize={PAGE_SIZE}
-          isRefetching={isRefetching}
+          isRefetching={isUpdating}
           onPage={setPage}
           noun="finding"
         />
@@ -597,7 +597,7 @@ export default function PrQueue() {
               from={from}
               to={to}
               pageSize={PAGE_SIZE}
-              isRefetching={isRefetching}
+              isRefetching={isUpdating}
               onPage={setPage}
               noun="finding"
             />

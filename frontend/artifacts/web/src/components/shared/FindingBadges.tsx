@@ -104,17 +104,15 @@ export function ResourceCell({
 }) {
   const isScan = prType === 'security_only' || prType === 'manual';
   return (
-    <span className="flex items-center gap-1.5 min-w-0" title={resourceId}>
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden>
-        {isScan ? (
-          <ShieldCheck
-            size={12}
-            className="text-teal-600 dark:text-teal-400"
-            aria-label="Security scan finding"
-          />
-        ) : null}
-      </span>
-      <span className={`block truncate ${isScan ? 'text-teal-900 dark:text-teal-200' : ''}`}>
+    <span className="flex items-center gap-1.5 min-w-0 max-w-full" title={resourceId}>
+      {isScan ? (
+        <ShieldCheck
+          size={12}
+          className="shrink-0 text-teal-600 dark:text-teal-400"
+          aria-label="Security scan finding"
+        />
+      ) : null}
+      <span className={`min-w-0 truncate ${isScan ? 'text-teal-900 dark:text-teal-200' : ''}`}>
         {resourceId}
       </span>
     </span>

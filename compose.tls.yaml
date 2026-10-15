@@ -1,0 +1,30 @@
+# Optional TLS front door for the dashboard (PagerDuty/Slack saves require a secure context).
+#
+#   docker compose -f compose.tls.yaml up --build
+#
+# Then open https://localhost (trust Caddy's local CA, or set TLS_DOMAIN for a real cert).
+services:
+  drift:
+    build: .
+    environment:
+      - PUBLIC_APP_URL=https://${TLS_DOMAIN:-localhost}
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "${TLS_HTTP_PORT:-80}:80"
+      - "${TLS_HTTPS_PORT:-443}:443"
+    environment:
+      - TLS_DOMAIN=${TLS_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - drift
+
+volumes:
+  caddy_data:
+  caddy_config:

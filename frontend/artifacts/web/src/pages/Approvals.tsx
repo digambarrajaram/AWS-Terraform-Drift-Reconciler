@@ -19,6 +19,8 @@ import { useScanLogs } from '@/hooks/useScanLogs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '@/lib/errorUtils';
 import { pendingAppliesRefetchInterval } from '@/lib/pendingAppliesPoll';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
+import { useQueryUpdating } from '@/hooks/useQueryUpdating';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -519,7 +521,7 @@ export default function Approvals() {
   const [deciding, setDeciding] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
-  const { data, isLoading, error, isRefetching } = useQuery<PendingApply[]>({
+  const query = useQuery<PendingApply[]>({
     queryKey: ['pendingApplies', scope],
     enabled: !!scope,
     // Poll fast while any row's job is still running (approved/rejected
@@ -530,6 +532,8 @@ export default function Approvals() {
       pendingAppliesRefetchInterval(query.state.data as PendingApply[] | undefined),
     queryFn: () => apiFetch<PendingApply[]>(`/pending-applies?status=all${scope ? `&scope=${encodeURIComponent(scope)}` : ''}`),
   });
+  const { data, isLoading, error, isFetching } = query;
+  const isUpdating = useQueryUpdating(isFetching, isLoading);
 
   // Keep the open drawer in sync with list polls.  Without this, a
   // successful Approve leaves `selected.status` stuck on awaiting_approval
@@ -637,7 +641,7 @@ export default function Approvals() {
   const rows = data ?? [];
 
   return (
-    <div className="p-6 space-y-4 max-w-5xl">
+    <div className={`p-6 space-y-4 ${PAGE_MAX_WIDTH}`}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <ClipboardCheck size={18} className="text-muted-foreground" />
@@ -646,7 +650,7 @@ export default function Approvals() {
         {!isLoading && (
           <span className="text-xs text-muted-foreground">
             {rows.length} record{rows.length !== 1 ? 's' : ''}
-            {isRefetching && ' · updating…'}
+            {isUpdating && ' · updating…'}
           </span>
         )}
       </div>

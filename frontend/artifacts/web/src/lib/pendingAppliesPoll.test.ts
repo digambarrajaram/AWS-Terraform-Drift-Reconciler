@@ -27,4 +27,12 @@ describe('pendingAppliesPoll', () => {
       30_000,
     );
   });
+
+  it('does not fast-poll claimed rows without a timestamp', () => {
+    assert.equal(isPendingApplyJobInFlight({ status: 'approved' }), false);
+    assert.equal(
+      pendingAppliesRefetchInterval([{ status: 'rejected' }]),
+      30_000,
+    );
+  });
 });

@@ -3,6 +3,7 @@ import { keepPreviousData } from '@tanstack/react-query';
 import { apiFetch } from '@/api/apiFetch';
 import { normalizeDriftEvent } from '@/lib/drift';
 import type { DriftEvent } from '@/types';
+import { useQueryUpdating } from '@/hooks/useQueryUpdating';
 
 export type SortColumn = 'created_at' | 'severity' | 'resource_id';
 
@@ -31,7 +32,7 @@ export function useDriftEvents(
 ) {
   const enabled = !!scope;
 
-  return useQuery<{ events: DriftEvent[]; count: number }>({
+  const query = useQuery<{ events: DriftEvent[]; count: number }>({
     // Decompose filter/sort objects into primitives so the queryKey is immune
     // to object-reference changes — a new {status: 'open'} value means the
     // same cached query as an existing {status: 'open'} value.
@@ -44,6 +45,7 @@ export function useDriftEvents(
     ],
     enabled,
     staleTime: 30_000,
+    refetchInterval: false,
     placeholderData: keepPreviousData,
     queryFn: async () => {
       const query = new URLSearchParams({
@@ -58,6 +60,10 @@ export function useDriftEvents(
       return { events: result.events.map(normalizeDriftEvent), count: result.count };
     },
   });
+
+  const isUpdating = useQueryUpdating(query.isFetching, query.isLoading);
+
+  return { ...query, isUpdating };
 }
 
 export { PAGE_SIZE };

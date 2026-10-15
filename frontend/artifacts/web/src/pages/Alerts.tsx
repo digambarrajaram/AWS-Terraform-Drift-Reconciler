@@ -12,6 +12,9 @@ import {
   useRoutingRules, useSaveRoutingRule, useClearRoutingOverride,
   type Severity, type Channel, type ScopeChannel, type RoutingRule,
 } from '@/hooks/useAlerts';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
+import { credentialsBlockedOnThisOrigin } from '@/lib/secureContext';
+import { useEnvironments } from '@/hooks/useEnvironments';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -412,14 +415,16 @@ function RoutingRulesSection({
 
 export default function Alerts() {
   const { scope } = useScope();
+  const { activeEnvironments } = useEnvironments();
   const settings  = useNotificationSettings();
   const routing   = useRoutingRules(scope);
 
   const ns = settings.data;
-  const blockPlainHttp = typeof window !== 'undefined' && window.location.protocol === 'http:';
+  const blockPlainHttp = credentialsBlockedOnThisOrigin();
+  const scopeLabel = activeEnvironments.find((e) => e.slug === scope)?.slug ?? scope ?? '';
 
   return (
-    <div className="p-6 space-y-8 max-w-3xl">
+    <div className={`p-6 space-y-8 ${PAGE_MAX_WIDTH}`}>
       <h1 className="text-xl font-semibold">Alerts</h1>
 
       {/* ── Credentials ───────────────────────────────────────────────── */}
@@ -445,8 +450,9 @@ export default function Alerts() {
               <div className="flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
                 <AlertTriangle size={13} className="shrink-0" />
                 <span>
-                  This page is served over <strong>HTTP</strong>. Saving PagerDuty or Slack credentials
-                  is disabled — use HTTPS in production so secrets are not sent in cleartext.
+                  This page is not in a <strong>secure context</strong> (use HTTPS).
+                  Saving PagerDuty or Slack credentials is disabled — put TLS in front of the dashboard
+                  (see <code className="font-mono">compose.tls.yaml</code>) so secrets are not sent in cleartext.
                 </span>
               </div>
             )}
@@ -519,7 +525,7 @@ export default function Alerts() {
 
         <RoutingRulesSection
           scope={scope}
-          scopeLabel={scope ?? ''}
+          scopeLabel={scopeLabel}
           rules={routing.data ?? []}
           loading={routing.isLoading}
           error={routing.error as Error | null}

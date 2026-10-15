@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { LogViewer } from '@/components/shared/LogViewer';
 import { apiFetch, ApiError } from '@/api/apiFetch';
 import { useScope } from '@/hooks/useScope';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
 import { useScanLogs } from '@/hooks/useScanLogs';
 import {
   useScanRunHistory, useScanRun, useInvalidateScanRuns, type ScanRun,
@@ -562,7 +563,7 @@ export default function Scan() {
   const showLog     = activeRunId != null;
 
   return (
-    <div className="p-6 space-y-6 max-w-5xl">
+    <div className={`p-6 space-y-6 ${PAGE_MAX_WIDTH}`}>
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Scan</h1>
         {activeRunId && (

@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { formatDistanceToNow } from 'date-fns';
+import { format, formatDistanceToNow } from 'date-fns';
 import {
   AlertTriangle, RotateCcw, DollarSign, Clock,
   Inbox, ServerCrash, Globe,
@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useScope } from '@/hooks/useScope';
 import { useOverviewData } from '@/hooks/useOverviewData';
 import { useEnvironments } from '@/hooks/useEnvironments';
+import { useExceptions } from '@/hooks/useExceptions';
 import { Link, useLocation } from 'react-router-dom';
 import { errorMessage, isRetryable } from '@/lib/errorUtils';
 import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
@@ -50,7 +51,7 @@ function StatCard({
   children?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-5 shadow-sm h-full flex flex-col">
+    <div className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-col min-h-[7.5rem]">
       <div className="mb-3 flex items-center gap-2 text-muted-foreground">
         <Icon size={14} />
         <span className="text-xs font-medium uppercase tracking-wider">{label}</span>
@@ -124,6 +125,9 @@ export default function Overview() {
     severitySummary, openCount, lastScanDrift, rollbackCount, lastScan,
     costImpact, costResourceCount,
   } = useOverviewData(scope);
+  const { data: exceptionsData } = useExceptions(scope);
+  const unmanagedExcCount = exceptionsData?.unmanaged_exceptions?.length ?? 0;
+  const securityExcCount = exceptionsData?.security_exceptions?.length ?? 0;
 
   const isLoading =
     envsLoading ||
@@ -167,6 +171,9 @@ export default function Overview() {
   const costResources = costResourceCount.data ?? 0;
   const activeEnv = activeEnvironments.find((e) => e.slug === scope);
   const rollbackEligible = rollbackCount.data ?? 0;
+  const lastScanAtLabel = lastScan.data
+    ? format(new Date(lastScan.data), 'MMM d, yyyy HH:mm')
+    : null;
 
   // No environments at all
   if (!envsLoading && activeEnvironments.length === 0) {
@@ -263,13 +270,17 @@ export default function Overview() {
                       </div>
                     )}
                     <p className="text-xs text-muted-foreground leading-snug">
+                      {lastScanAtLabel
+                        ? `From latest completed config-drift scan (${lastScanAtLabel}). `
+                        : ''}
                       {unresolvedOpen === 0 && currentDrift > 0
-                        ? 'Detected in last config drift scan — no open tickets'
+                        ? 'Findings above — no open tickets.'
                         : unresolvedOpen > 0 && currentDrift === 0 && !driftSkipped
-                          ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} — last config drift scan: none (unmanaged/security tickets still count)`
+                          ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} — scan found no config drift (unmanaged/security still count).`
                           : unresolvedOpen > 0
-                            ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} (status=open on findings)`
-                            : 'No open tickets'}
+                            ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} (status=open).`
+                            : 'No open tickets.'}
+                      {' '}Scan history may show older runs with drift until you re-scan.
                     </p>
                   </>
                 )}
@@ -342,7 +353,11 @@ export default function Overview() {
             }
             loading={isLoading}
             error={lastScan.error}
-          />
+          >
+            {!isLoading && !lastScan.error && lastScanAtLabel && (
+              <p className="mt-1 text-xs text-muted-foreground tabular-nums">{lastScanAtLabel}</p>
+            )}
+          </StatCard>
         </div>
       )}
 
@@ -355,7 +370,16 @@ export default function Overview() {
               { to: '/explorer', label: 'Explorer' },
               { to: '/pr-queue', label: 'PR queue' },
               { to: '/trends', label: 'Trends' },
-              { to: '/rollback', label: 'Rollback' },
+              {
+                to: '/rollback',
+                label: rollbackEligible > 0 ? `Rollback (${rollbackEligible})` : 'Rollback',
+              },
+              {
+                to: '/exceptions',
+                label: (unmanagedExcCount + securityExcCount) > 0
+                  ? `Exceptions (${unmanagedExcCount} unm. · ${securityExcCount} sec.)`
+                  : 'Exceptions',
+              },
             ].map(({ to, label }) => (
               <Link
                 key={to}

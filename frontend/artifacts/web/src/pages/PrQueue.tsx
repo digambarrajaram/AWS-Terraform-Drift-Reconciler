@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { format, formatDistanceToNow } from 'date-fns';
+import {
+  formatAbsoluteTime, formatRelativeTime, useRelativeNow,
+} from '@/lib/relativeTime';
 import {
   Search, ChevronUp, ChevronDown, ChevronsUpDown,
-  ExternalLink, ChevronLeft, ChevronRight, Inbox,
+  ExternalLink, Inbox,
   CheckCircle, XCircle, ShieldCheck, ShieldX,
 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -20,6 +22,8 @@ import {
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
 import { displayRegion } from '@/lib/drift';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
+import { TablePagination } from '@/components/shared/TablePagination';
 
 // ── Badges ─────────────────────────────────────────────────────────────────
 
@@ -112,10 +116,17 @@ function buildPrUrl(
   return `${clean}/pull/${prNumber}`;
 }
 
-function safeDate(iso: string, relative = false): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '—';
-  return relative ? formatDistanceToNow(date, { addSuffix: true }) : format(date, 'MMM d, yyyy, HH:mm');
+function safeDate(iso: string, relative = false, now?: number): string {
+  if (relative && now != null) return formatRelativeTime(iso, now);
+  return formatAbsoluteTime(iso);
+}
+
+function tableTimestamp(iso: string, now: number) {
+  return (
+    <span title={formatRelativeTime(iso, now)}>
+      {formatAbsoluteTime(iso)}
+    </span>
+  );
 }
 
 function DetailDrawer({ event, onClose, repoUrl, githubRepo, envRegion }: {
@@ -397,6 +408,7 @@ export default function PrQueue() {
   const [page,        setPage]        = useState(0);
   const [searchInput, setSearchInput] = useState('');
   const [selected,    setSelected]    = useState<DriftEvent | null>(null);
+  const relativeNow = useRelativeNow();
 
   // Debounce search input → filters.search
   useEffect(() => {
@@ -414,7 +426,7 @@ export default function PrQueue() {
     sort.column, sort.ascending,
   ]);
 
-  const { data, error, isLoading, isFetching } = useDriftEvents(scope, filters, sort, page);
+  const { data, error, isLoading, isRefetching } = useDriftEvents(scope, filters, sort, page);
   const events = data?.events ?? [];
   const total  = data?.count  ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -441,16 +453,21 @@ export default function PrQueue() {
   );
 
   return (
-    <div className="p-6 space-y-4 max-w-7xl">
+    <div className={`p-6 space-y-4 ${PAGE_MAX_WIDTH}`}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">PR Queue</h1>
         {!isLoading && (
           <span className="text-xs text-muted-foreground">
             {total.toLocaleString()} result{total !== 1 ? 's' : ''}
-            {isFetching && ' · updating…'}
+            {isRefetching && ' · updating…'}
           </span>
         )}
       </div>
+
+      <p className="text-xs text-muted-foreground">
+        One row per <strong className="font-medium text-foreground">drift finding</strong> (resource).
+        Batch and multi-resource PRs can share a PR number across several rows — that is expected.
+      </p>
 
       <FilterBar
         filters={filters}
@@ -458,6 +475,20 @@ export default function PrQueue() {
         searchInput={searchInput}
         onSearchInput={setSearchInput}
       />
+
+      {!isLoading && total > 0 && (
+        <TablePagination
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          from={from}
+          to={to}
+          pageSize={PAGE_SIZE}
+          isRefetching={isRefetching}
+          onPage={setPage}
+          noun="finding"
+        />
+      )}
 
       <div className="rounded-xl border border-border overflow-hidden">
         <div className="overflow-x-auto">
@@ -523,9 +554,7 @@ export default function PrQueue() {
 
                     {/* Created */}
                     <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                      <span title={safeDate(ev.created_at)}>
-                        {safeDate(ev.created_at, true)}
-                      </span>
+                      {tableTimestamp(ev.created_at, relativeNow)}
                     </td>
 
                     {/* PR link */}
@@ -560,31 +589,18 @@ export default function PrQueue() {
 
         {/* Pagination */}
         {!isLoading && total > 0 && (
-          <div className="flex items-center justify-between border-t border-border bg-muted/20 px-4 py-2.5">
-            <span className="text-xs text-muted-foreground">
-              {from}–{to} of {total.toLocaleString()}
-            </span>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                disabled={page === 0}
-                onClick={() => setPage((p) => p - 1)}
-                className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-              >
-                <ChevronLeft size={13} /> Prev
-              </button>
-              <span className="px-2 text-xs text-muted-foreground">
-                {page + 1} / {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages - 1}
-                onClick={() => setPage((p) => p + 1)}
-                className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-              >
-                Next <ChevronRight size={13} />
-              </button>
-            </div>
+          <div className="border-t border-border bg-muted/20 px-4 py-2.5">
+            <TablePagination
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              from={from}
+              to={to}
+              pageSize={PAGE_SIZE}
+              isRefetching={isRefetching}
+              onPage={setPage}
+              noun="finding"
+            />
           </div>
         )}
       </div>

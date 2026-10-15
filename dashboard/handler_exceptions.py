@@ -29,15 +29,12 @@ class ExceptionsMixin:
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         headers = {"apikey": key, "Authorization": f"Bearer {key}"}
         base = f"{url}/rest/v1/drift_exception_registry"
-        user_filter = (
-            f"&user_id=eq.{self.auth_user_id}"
-            if getattr(self, "auth_user_id", None) else ""
-        )
 
         def _fetch(exception_type):
+            # Scope is already ownership-validated; rows may use owner user_id or null.
             resp = requests.get(
                 f"{base}?select=*&scope=eq.{scope_raw}&exception_type=eq.{exception_type}"
-                f"{user_filter}&active=eq.true&order=created_at.desc",
+                f"&active=eq.true&order=created_at.desc",
                 headers=headers, timeout=10,
             )
             if resp.status_code != 200:

@@ -67,6 +67,7 @@ function CredentialRow({
   masked,
   scope,
   backendAvailable,
+  blockPlainHttp,
 }: {
   label:            string;
   field:            string;
@@ -75,6 +76,7 @@ function CredentialRow({
   masked:           string | null;
   scope:            string | null;
   backendAvailable: boolean;
+  blockPlainHttp:   boolean;
 }) {
   const [value,    setValue]    = useState('');
   const [testing,  setTesting]  = useState(false);
@@ -84,6 +86,10 @@ function CredentialRow({
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (blockPlainHttp) {
+      toast.error('Use HTTPS to save notification credentials');
+      return;
+    }
     if (!value.trim()) return;
     try {
       await save.mutateAsync({ field, value: value.trim() });
@@ -125,7 +131,7 @@ function CredentialRow({
         <button
           type="button"
           onClick={handleTest}
-          disabled={!configured || testing || !backendAvailable}
+          disabled={!configured || testing || !backendAvailable || blockPlainHttp}
           title={!backendAvailable ? 'Backend not connected' : undefined}
           className="flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
         >
@@ -151,14 +157,14 @@ function CredentialRow({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           autoComplete="off"
-          disabled={!backendAvailable}
+          disabled={!backendAvailable || blockPlainHttp}
           className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-w-0 disabled:opacity-50"
         />
         <button
           type="submit"
-          disabled={!value.trim() || save.isPending || !backendAvailable}
-          title={!backendAvailable ? 'Backend not connected' : undefined}
-          className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity whitespace-nowrap"
+          disabled={!value.trim() || save.isPending || !backendAvailable || blockPlainHttp}
+          title={!backendAvailable ? 'Backend not connected' : !value.trim() ? 'Enter a value to save' : undefined}
+          className="flex items-center gap-1.5 rounded-md border border-transparent bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:border-border disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100 transition-colors whitespace-nowrap"
         >
           {save.isPending ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
           Save
@@ -188,10 +194,11 @@ function RoutingRuleRow({
   saving:        boolean;
 }) {
   const isScopeRow = scopeValue !== null;
-  // Missing scope override means inherit — NOT "none" (which silences alerts).
+  const stored = existingRule?.channel ?? null;
+  // Missing scope override, or a row that duplicates global → show Inherit global.
   const current: ScopeChannel = isScopeRow
-    ? (existingRule?.channel ?? 'inherit')
-    : (existingRule?.channel ?? DEFAULT_GLOBAL_CHANNEL[severity]);
+    ? (!stored || stored === globalChannel ? 'inherit' : stored)
+    : (stored ?? DEFAULT_GLOBAL_CHANNEL[severity]);
   const [channel, setChannel] = useState<ScopeChannel>(current);
   // Sync local state when the rule changes underneath us
   // (e.g. after a save refetches, or after navigation remounts).
@@ -250,15 +257,19 @@ function RoutingRuleRow({
         )}
       </td>
       <td className="px-4 py-3">
-        <button
-          type="button"
-          disabled={!dirty || saving}
-          onClick={() => onSave(severity, channel, scopeValue)}
-          className="flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40 disabled:pointer-events-none transition-opacity"
-        >
-          {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
-          Save
-        </button>
+        {dirty ? (
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => onSave(severity, channel, scopeValue)}
+            className="flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
+          >
+            {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+            Save
+          </button>
+        ) : (
+          <span className="text-[11px] text-muted-foreground">No changes</span>
+        )}
       </td>
     </tr>
   );
@@ -391,7 +402,7 @@ function RoutingRulesSection({
       {/* Legend */}
       <div className="border-t border-border bg-muted/20 px-4 py-2.5 flex flex-wrap gap-4 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1"><Globe size={11} /> Global default — applies to all scopes unless overridden</span>
-        <span className="flex items-center gap-1"><SlidersHorizontal size={11} /> Scope override — takes precedence for <strong className="text-foreground">{scopeLabel}</strong></span>
+        <span className="flex items-center gap-1"><SlidersHorizontal size={11} /> Scope row — choose <strong className="text-foreground">Inherit global</strong> first to clear a redundant override</span>
       </div>
     </div>
   );
@@ -405,6 +416,7 @@ export default function Alerts() {
   const routing   = useRoutingRules(scope);
 
   const ns = settings.data;
+  const blockPlainHttp = typeof window !== 'undefined' && window.location.protocol === 'http:';
 
   return (
     <div className="p-6 space-y-8 max-w-3xl">
@@ -429,6 +441,15 @@ export default function Alerts() {
           </div>
         ) : (
           <div className="space-y-3">
+            {blockPlainHttp && (
+              <div className="flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
+                <AlertTriangle size={13} className="shrink-0" />
+                <span>
+                  This page is served over <strong>HTTP</strong>. Saving PagerDuty or Slack credentials
+                  is disabled — use HTTPS in production so secrets are not sent in cleartext.
+                </span>
+              </div>
+            )}
             {!ns?.backendAvailable && (
               <div className="flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
                 <AlertTriangle size={13} className="shrink-0" />
@@ -447,6 +468,7 @@ export default function Alerts() {
               masked={ns?.pagerduty_masked ?? null}
               scope={scope}
               backendAvailable={ns?.backendAvailable ?? false}
+              blockPlainHttp={blockPlainHttp}
             />
             <CredentialRow
               label="Slack Webhook URL"
@@ -456,6 +478,7 @@ export default function Alerts() {
               masked={ns?.slack_masked ?? null}
               scope={scope}
               backendAvailable={ns?.backendAvailable ?? false}
+              blockPlainHttp={blockPlainHttp}
             />
           </div>
         )}
@@ -475,16 +498,24 @@ export default function Alerts() {
           )}
         </div>
 
-        <p className="text-xs text-muted-foreground">
-          Each severity has a global default channel and, if a scope is selected, an
-          optional scope-specific override. Use <strong className="text-foreground">Inherit global</strong> on
-          a scope row unless you intentionally want a different channel.
-          <strong className="text-foreground"> PagerDuty</strong> pages PagerDuty and also posts
-          to Slack when a webhook is configured.
-          <strong className="text-foreground"> None</strong> silences that severity for the scope.
-          After saving credentials, use <strong className="text-foreground">Send Test</strong> —
-          if Test fails, drift scans will not notify either. Click Save on each row you change.
-        </p>
+        <ul className="text-xs text-muted-foreground space-y-1.5 list-disc pl-4 leading-relaxed">
+          <li>Global defaults apply to every scope unless a scope row overrides them.</li>
+          <li>
+            On scope rows, pick <strong className="text-foreground">Inherit global</strong> to clear
+            a redundant override.
+          </li>
+          <li>
+            <strong className="text-foreground">PagerDuty</strong> pages on-call and mirrors to Slack
+            when a webhook is configured.
+          </li>
+          <li>
+            <strong className="text-foreground">None</strong> silences that severity for the scope only.
+          </li>
+          <li>
+            After credentials are saved, run <strong className="text-foreground">Send Test</strong> — failed
+            tests mean scans will not notify either.
+          </li>
+        </ul>
 
         <RoutingRulesSection
           scope={scope}

@@ -18,6 +18,7 @@ import {
 import { useScanLogs } from '@/hooks/useScanLogs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '@/lib/errorUtils';
+import { pendingAppliesRefetchInterval } from '@/lib/pendingAppliesPoll';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,8 @@ interface PendingApply {
   applied_at: string | null;
   result: unknown;
   created_at: string;
+  /** drift_events.status for the same PR — surfaces reverted vs apply row mismatch */
+  finding_status?: string | null;
 }
 
 interface ApplyPlanPreview {
@@ -78,11 +81,26 @@ function displayStatus(
   status: PendingApply['status'],
   prType: PendingApply['pr_type'],
   mergedAt?: string | null,
+  findingStatus?: string | null,
 ): { label: string; style: string } {
   const running = runningLabel(status, prType);
-  return running
-    ? { label: running, style: RUNNING_STYLE }
-    : { label: statusLabel(status, { mergedAt }), style: STATUS_STYLE[status] };
+  const findingReverted =
+    (findingStatus ?? '').toLowerCase() === 'reverted'
+    && (status === 'applied' || status === 'approved')
+    && !mergedAt;
+  if (running) {
+    return { label: running, style: RUNNING_STYLE };
+  }
+  if (findingReverted) {
+    return {
+      label: statusLabel(status, { mergedAt, findingStatus }),
+      style: STATUS_STYLE.reverted,
+    };
+  }
+  return {
+    label: statusLabel(status, { mergedAt, findingStatus }),
+    style: STATUS_STYLE[status],
+  };
 }
 
 const STATUS_STYLE: Record<PendingApply['status'], string> = {
@@ -254,8 +272,8 @@ function DetailDrawer({
             <SheetHeader className="mb-4">
               <SheetTitle className="text-base break-all flex items-center gap-2">
                 PR #{row.pr_number}
-                <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${displayStatus(current.status, current.pr_type, current.merged_at).style}`}>
-                  {displayStatus(current.status, current.pr_type, current.merged_at).label}
+                <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${displayStatus(current.status, current.pr_type, current.merged_at, current.finding_status).style}`}>
+                  {displayStatus(current.status, current.pr_type, current.merged_at, current.finding_status).label}
                 </span>
               </SheetTitle>
             </SheetHeader>
@@ -501,7 +519,7 @@ export default function Approvals() {
   const [deciding, setDeciding] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
-  const { data, isLoading, error, isFetching } = useQuery<PendingApply[]>({
+  const { data, isLoading, error, isRefetching } = useQuery<PendingApply[]>({
     queryKey: ['pendingApplies', scope],
     enabled: !!scope,
     // Poll fast while any row's job is still running (approved/rejected
@@ -509,11 +527,7 @@ export default function Approvals() {
     // backend writes the final status (applied/failed/…) itself, so the
     // displayed status only flips when the job confirms.
     refetchInterval: (query) =>
-      (query.state.data as PendingApply[] | undefined)?.some(
-        (r) => r.status === 'approved' || r.status === 'rejected',
-      )
-        ? 3000
-        : 30_000,
+      pendingAppliesRefetchInterval(query.state.data as PendingApply[] | undefined),
     queryFn: () => apiFetch<PendingApply[]>(`/pending-applies?status=all${scope ? `&scope=${encodeURIComponent(scope)}` : ''}`),
   });
 
@@ -632,7 +646,7 @@ export default function Approvals() {
         {!isLoading && (
           <span className="text-xs text-muted-foreground">
             {rows.length} record{rows.length !== 1 ? 's' : ''}
-            {isFetching && ' · updating…'}
+            {isRefetching && ' · updating…'}
           </span>
         )}
       </div>
@@ -641,6 +655,9 @@ export default function Approvals() {
         Click a PR to review details. Accept AWS changes updates code and state to match AWS;
         Revert AWS to code restores original Terraform on AWS;
         Cancel closes the PR with no AWS or code change.
+        Counts here are <strong className="font-medium text-foreground">approval jobs</strong> (pending_applies) —
+        Explorer and PR Queue list every <strong className="font-medium text-foreground">drift finding</strong>, so totals differ.
+        Rollback eligibility comes from resolved drift events and may include PRs with no row here.
       </p>
 
       {isLoading ? (
@@ -671,7 +688,9 @@ export default function Approvals() {
               </thead>
               <tbody className="divide-y divide-border">
                 {rows.map((row) => {
-                  const shown = displayStatus(row.status, row.pr_type, row.merged_at);
+                  const shown = displayStatus(
+                    row.status, row.pr_type, row.merged_at, row.finding_status,
+                  );
                   const awaiting = row.status === 'awaiting_approval';
                   const claimRunning = row.status === 'approved' || row.status === 'rejected';
                   const showApprove = !(row.pr_type === 'security_only' && row.review_only);

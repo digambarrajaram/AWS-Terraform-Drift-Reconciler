@@ -42,6 +42,7 @@ type Phase =
 interface ActiveCtx {
   prNumber:       number;
   resourceId:     string;
+  severity:       string;
   previewRunId:   string | null;
   executeRunId:   string | null;
   diff:           PreviewDiffRow[] | null;
@@ -118,7 +119,7 @@ function EligiblePRList({
           <div className="flex flex-col items-center gap-3 py-12 text-center">
             <Inbox size={32} className="text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">
-              No eligible PRs for rollback — applied fixes have already been rolled back, none have baselines yet, or security findings were only excepted (not applied to infra).
+              No eligible PRs — resolved fix/batch/rollback PRs need a stored baseline, must not already be rolled back, and security-only fixes are excluded.
             </p>
           </div>
         ) : (
@@ -513,6 +514,7 @@ export default function Rollback() {
     setCtx({
       prNumber:      ev.pr_number,
       resourceId:    ev.resource_id,
+      severity:      ev.severity ?? 'LOW',
       previewRunId:  null,
       executeRunId:  null,
       diff:          null,
@@ -826,6 +828,11 @@ export default function Rollback() {
             <AlertDialogDescription>
               This will create a new reversing PR on GitHub that patches the infrastructure
               back to the pre-drift state. This action cannot be undone from this UI.
+              {(ctx?.severity === 'HIGH' || ctx?.severity === 'CRITICAL') && (
+                <span className="mt-2 block text-red-700 dark:text-red-400 font-medium">
+                  This fix was classified {ctx.severity}. Rolling back may re-introduce a serious misconfiguration.
+                </span>
+              )}
               {staleCount > 0 && (
                 <span className="mt-2 block text-amber-700 dark:text-amber-400">
                   ⚠ {staleCount} field{staleCount !== 1 ? 's have' : ' has'} drifted further —

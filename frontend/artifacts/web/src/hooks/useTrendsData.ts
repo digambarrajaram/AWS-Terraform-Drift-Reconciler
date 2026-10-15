@@ -5,7 +5,7 @@ import { apiFetch } from '@/api/apiFetch';
 
 export interface MostDriftedRow { resource_id: string; drift_count: number; }
 
-export interface MTTRRow { severity: string; avg_hours: number; count: number; }
+export interface MTTRRow { severity: string; avg_hours: number | null; count: number; }
 
 export interface VolumeRow { day: string; count: number; }
 
@@ -23,6 +23,13 @@ export interface DriftSummary {
   rollback: number;
 }
 
+export interface PendingApprovalsSummary {
+  total: number;
+  unmanaged: number;
+  security: number;
+  other: number;
+}
+
 // ── Shared helpers ─────────────────────────────────────────────────────────
 
 interface TrendsPayload {
@@ -30,6 +37,7 @@ interface TrendsPayload {
   mttr: MTTRRow[];
   volume: VolumeRow[];
   summary: DriftSummary;
+  pending_approvals?: PendingApprovalsSummary;
 }
 
 function useTrendsData(scope: string | null, days: number) {
@@ -68,4 +76,9 @@ export function useDriftVolumeDaily(scope: string | null, days: number) {
 export function useDriftSummary(scope: string | null, days: number) {
   const query = useTrendsData(scope, days);
   return { ...query, data: query.data?.summary };
+}
+
+export function usePendingApprovalsSummary(scope: string | null, days: number) {
+  const query = useTrendsData(scope, days);
+  return { ...query, data: query.data?.pending_approvals };
 }

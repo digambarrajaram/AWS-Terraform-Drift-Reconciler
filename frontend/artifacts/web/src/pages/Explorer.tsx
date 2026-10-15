@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react';
-import { format, formatDistanceToNow } from 'date-fns';
+import { useState, useEffect, type ReactNode } from 'react';
+import { format, parseISO } from 'date-fns';
+import {
+  formatAbsoluteTime, formatRelativeTime, useRelativeNow,
+} from '@/lib/relativeTime';
 import {
   Search, ChevronUp, ChevronDown, ChevronsUpDown,
-  ChevronLeft, ChevronRight, Inbox, LayoutList, LayoutGrid,
+  Inbox, LayoutList, LayoutGrid,
   ShieldCheck, ShieldX, DollarSign, ChevronDown as ExpandIcon,
   ExternalLink, CalendarRange, RotateCcw,
 } from 'lucide-react';
@@ -22,6 +25,8 @@ import {
 } from '@/hooks/useDriftEvents';
 import type { DriftEvent } from '@/types';
 import { displayRegion } from '@/lib/drift';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
+import { TablePagination } from '@/components/shared/TablePagination';
 
 // ── Badge maps ──────────────────────────────────────────────────────────────
 
@@ -96,10 +101,28 @@ function normalizeFields(fields: unknown): string[] {
   return [];
 }
 
-function safeDate(value: string, relative = false): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '—';
-  return relative ? formatDistanceToNow(date, { addSuffix: true }) : format(date, 'MMM d, yyyy, HH:mm');
+function safeDate(value: string, relative = false, now?: number): string {
+  if (relative && now != null) return formatRelativeTime(value, now);
+  return formatAbsoluteTime(value);
+}
+
+function tableTimestamp(iso: string, now: number): ReactNode {
+  return (
+    <span title={formatRelativeTime(iso, now)}>
+      {formatAbsoluteTime(iso)}
+    </span>
+  );
+}
+
+function formatFilterDate(isoDate: string): string {
+  if (!isoDate) return '';
+  try {
+    const d = parseISO(isoDate);
+    if (Number.isNaN(d.getTime())) return isoDate;
+    return format(d, 'MMM d, yyyy');
+  } catch {
+    return isoDate;
+  }
 }
 
 function buildPrUrl(repoUrl: string | null, githubRepo: string | undefined, prNumber: number | null): string | null {
@@ -108,7 +131,9 @@ function buildPrUrl(repoUrl: string | null, githubRepo: string | undefined, prNu
   return base ? `${base.replace(/\.git$/, '').replace(/\/+$/, '')}/pull/${prNumber}` : null;
 }
 
-function EventDetail({ e, envRegion }: { e: DriftEvent; envRegion?: string | null }) {
+function EventDetail({ e, envRegion }: {
+  e: DriftEvent; envRegion?: string | null;
+}) {
   const fields = normalizeFields(e.fields_changed);
   const region = displayRegion(e.region, envRegion);
   return (
@@ -203,12 +228,13 @@ function EventDetail({ e, envRegion }: { e: DriftEvent; envRegion?: string | nul
   );
 }
 
-function DetailDrawer({ event, onClose, repoUrl, githubRepo, envRegion }: {
+function DetailDrawer({ event, onClose, repoUrl, githubRepo, envRegion, relativeNow }: {
   event: DriftEvent | null;
   onClose: () => void;
   repoUrl: string | null;
   githubRepo?: string;
   envRegion?: string | null;
+  relativeNow: number;
 }) {
   return (
     <Sheet open={!!event} onOpenChange={(v) => !v && onClose()}>
@@ -265,9 +291,10 @@ function ChangesDiff({ changes }: { changes: NonNullable<DriftEvent['changes_jso
 }
 
 function DriftCard({
-  event, expanded, onToggle, envRegion,
+  event, expanded, onToggle, envRegion, relativeNow,
 }: {
-  event: DriftEvent; expanded: boolean; onToggle: () => void; envRegion?: string | null;
+  event: DriftEvent; expanded: boolean; onToggle: () => void;
+  envRegion?: string | null; relativeNow: number;
 }) {
   const fields     = normalizeFields(event.fields_changed);
   const hasCost    = event.cost_impact?.monthly_estimate_usd != null;
@@ -304,7 +331,7 @@ function DriftCard({
           {region !== '—' && <> · {region}</>}
           {' · '}
           <span title={safeDate(event.created_at)}>
-            {safeDate(event.created_at, true)}
+            {safeDate(event.created_at, true, relativeNow)}
           </span>
         </p>
 
@@ -517,19 +544,29 @@ function FilterBar({
         </span>
         <input
           type="date"
+          lang="en-US"
+          aria-label="From date"
           value={filters.dateFrom}
           max={filters.dateTo || undefined}
           onChange={(e) => onFilters({ dateFrom: e.target.value })}
           className={`${selectCls} text-xs`}
         />
+        {filters.dateFrom && (
+          <span className="text-[11px] text-foreground tabular-nums">{formatFilterDate(filters.dateFrom)}</span>
+        )}
         <span className="text-[11px] text-muted-foreground">to</span>
         <input
           type="date"
+          lang="en-US"
+          aria-label="To date"
           value={filters.dateTo}
           min={filters.dateFrom || undefined}
           onChange={(e) => onFilters({ dateTo: e.target.value })}
           className={`${selectCls} text-xs`}
         />
+        {filters.dateTo && (
+          <span className="text-[11px] text-foreground tabular-nums">{formatFilterDate(filters.dateTo)}</span>
+        )}
         {(filters.dateFrom || filters.dateTo) && (
           <button type="button"
             onClick={() => onFilters({ dateFrom: '', dateTo: '' })}
@@ -594,39 +631,6 @@ function EmptyState({ filtered }: { filtered: boolean }) {
   );
 }
 
-// ── Pagination bar ──────────────────────────────────────────────────────────
-
-function Pagination({
-  page, totalPages, total, from, to, isFetching, onPage,
-}: {
-  page: number; totalPages: number; total: number;
-  from: number; to: number; isFetching: boolean;
-  onPage: (p: number) => void;
-}) {
-  if (total === 0) return null;
-  return (
-    <div className="flex items-center justify-between flex-wrap gap-2">
-      <span className="text-xs text-muted-foreground">
-        {from}–{to} of {total.toLocaleString()} event{total !== 1 ? 's' : ''}
-        {isFetching && ' · updating…'}
-      </span>
-      <div className="flex items-center gap-1">
-        <button type="button" disabled={page === 0}
-          onClick={() => onPage(page - 1)}
-          className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40 transition-colors">
-          <ChevronLeft size={13} /> Prev
-        </button>
-        <span className="px-2 text-xs text-muted-foreground">{page + 1} / {totalPages}</span>
-        <button type="button" disabled={page >= totalPages - 1}
-          onClick={() => onPage(page + 1)}
-          className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40 transition-colors">
-          Next <ChevronRight size={13} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function Explorer() {
@@ -644,6 +648,7 @@ export default function Explorer() {
   const [view,        setView]        = useState<'table' | 'cards'>('table');
   const [selected,    setSelected]    = useState<DriftEvent | null>(null);
   const [expanded,    setExpanded]    = useState<Set<number>>(new Set());
+  const relativeNow = useRelativeNow();
 
   // Debounce search → filters.search
   useEffect(() => {
@@ -668,7 +673,7 @@ export default function Explorer() {
   // Clear expanded cards on page/view change
   useEffect(() => { setExpanded(new Set()); }, [page, view]);
 
-  const { data, error, isLoading, isFetching } = useDriftEvents(scope, filters, sort, page);
+  const { data, error, isLoading, isRefetching } = useDriftEvents(scope, filters, sort, page);
   const events     = data?.events ?? [];
   const total      = data?.count  ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -716,14 +721,15 @@ export default function Explorer() {
   }
 
   return (
-    <div className="p-6 space-y-4 max-w-7xl">
+    <div className={`p-6 space-y-4 ${PAGE_MAX_WIDTH}`}>
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold">Explorer</h1>
           {!isLoading && (
-            <span className="text-xs text-muted-foreground">
-              {total.toLocaleString()} result{total !== 1 ? 's' : ''}
+            <span className="text-xs text-muted-foreground" title="All drift_events rows for this scope (every finding lifecycle state)">
+              {total.toLocaleString()} finding{total !== 1 ? 's' : ''}
+              <span className="hidden sm:inline"> · Approvals counts approval jobs only</span>
             </span>
           )}
         </div>
@@ -772,6 +778,20 @@ export default function Explorer() {
 
       {/* ── TABLE VIEW ──────────────────────────────────────────────────── */}
       {view === 'table' && (
+        <div className="space-y-3">
+          {!isLoading && total > 0 && (
+            <TablePagination
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              from={from}
+              to={to}
+              pageSize={PAGE_SIZE}
+              isRefetching={isRefetching}
+              onPage={setPage}
+              noun="event"
+            />
+          )}
         <div className="rounded-xl border border-border overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[760px]">
@@ -819,9 +839,7 @@ export default function Explorer() {
                         <FindingStatusBadge status={ev.status} />
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                        <span title={safeDate(ev.created_at)}>
-                          {safeDate(ev.created_at, true)}
-                        </span>
+                        {tableTimestamp(ev.created_at, relativeNow)}
                       </td>
                       <td className="px-4 py-3 text-xs">
                         {ev.pr_number
@@ -840,13 +858,20 @@ export default function Explorer() {
           {/* Table pagination */}
           {!isLoading && total > 0 && (
             <div className="border-t border-border bg-muted/20 px-4 py-2.5">
-              <Pagination
-                page={page} totalPages={totalPages} total={total}
-                from={from} to={to} isFetching={isFetching}
+              <TablePagination
+                page={page}
+                totalPages={totalPages}
+                total={total}
+                from={from}
+                to={to}
+                pageSize={PAGE_SIZE}
+                isRefetching={isRefetching}
                 onPage={setPage}
+                noun="event"
               />
             </div>
           )}
+        </div>
         </div>
       )}
 
@@ -887,17 +912,24 @@ export default function Explorer() {
                   expanded={expanded.has(ev.id)}
                   onToggle={() => toggleExpand(ev.id)}
                   envRegion={envRegion}
+                  relativeNow={relativeNow}
                 />
               ))}
             </div>
           )}
 
           {/* Card pagination */}
-          {!isLoading && (
-            <Pagination
-              page={page} totalPages={totalPages} total={total}
-              from={from} to={to} isFetching={isFetching}
+          {!isLoading && total > 0 && (
+            <TablePagination
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              from={from}
+              to={to}
+              pageSize={PAGE_SIZE}
+              isRefetching={isRefetching}
               onPage={setPage}
+              noun="event"
             />
           )}
         </div>
@@ -910,6 +942,7 @@ export default function Explorer() {
         repoUrl={repoUrl}
         githubRepo={config?.githubRepo}
         envRegion={envRegion}
+        relativeNow={relativeNow}
       />
     </div>
   );

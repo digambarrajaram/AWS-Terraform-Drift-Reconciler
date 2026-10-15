@@ -64,7 +64,7 @@ export function isJobDone(status: string | null | undefined): boolean {
  */
 export function statusLabel(
   status: string,
-  opts?: { mergedAt?: string | null },
+  opts?: { mergedAt?: string | null; findingStatus?: string | null },
 ): string {
   return applyStatusLabel(status, opts);
 }

@@ -31,8 +31,16 @@ export function findingStatusLabel(status: string): string {
 /** pending_applies.status — Approvals queue */
 export function applyStatusLabel(
   status: string,
-  opts?: { mergedAt?: string | null },
+  opts?: { mergedAt?: string | null; findingStatus?: string | null },
 ): string {
+  const finding = (opts?.findingStatus ?? '').toLowerCase();
+  if (
+    finding === 'reverted'
+    && (status === 'applied' || status === 'approved')
+    && !opts?.mergedAt
+  ) {
+    return 'Reverted (drift finding)';
+  }
   if (status === 'applied' && !opts?.mergedAt) {
     return 'Accepted, not merged';
   }

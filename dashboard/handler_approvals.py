@@ -48,8 +48,6 @@ class ApprovalsMixin:
             filters.append(f"status=eq.{status}")
         if scope:
             filters.append(f"scope=eq.{scope}")
-        if getattr(self, "auth_user_id", None):
-            filters.append(f"user_id=eq.{self.auth_user_id}")
         query = f"{url}/rest/v1/pending_applies"
         if filters:
             query += "?" + "&".join(filters)
@@ -64,6 +62,60 @@ class ApprovalsMixin:
         except requests.RequestException as exc:
             self._json_error(502, f"Supabase unreachable: {exc}")
             return
+
+        # Cross-check drift_events so Approvals does not show "Accepted, not
+        # merged" when the finding row is already reverted (PR Queue/Explorer).
+        if scope and rows:
+            pr_numbers = sorted({
+                int(row["pr_number"])
+                for row in rows
+                if isinstance(row, dict) and row.get("pr_number") is not None
+            })
+            if pr_numbers:
+                in_list = ",".join(str(n) for n in pr_numbers)
+                try:
+                    finding_resp = requests.get(
+                        f"{url}/rest/v1/drift_events"
+                        f"?select=pr_number,status&account=eq.{scope}"
+                        f"&pr_number=in.({in_list})",
+                        headers=headers, timeout=10,
+                    )
+                    if finding_resp.status_code == 200:
+                        # One PR can map to multiple drift_events — prefer the
+                        # most actionable status for Approvals display.
+                        _rank = {
+                            "open": 0,
+                            "manual_revert_required": 1,
+                            "reverted": 2,
+                            "suppressed": 3,
+                            "resolved": 4,
+                        }
+
+                        def _pick_status(current, new):
+                            if not new:
+                                return current
+                            if not current:
+                                return new
+                            return (
+                                current
+                                if _rank.get(current, 99) <= _rank.get(new, 99)
+                                else new
+                            )
+
+                        by_pr: dict = {}
+                        for ev in (finding_resp.json() or []):
+                            if not isinstance(ev, dict):
+                                continue
+                            prn = ev.get("pr_number")
+                            st = ev.get("status")
+                            if prn is None or not st:
+                                continue
+                            by_pr[prn] = _pick_status(by_pr.get(prn), st)
+                        for row in rows:
+                            if isinstance(row, dict):
+                                row["finding_status"] = by_pr.get(row.get("pr_number"))
+                except requests.RequestException:
+                    pass
 
         data = json.dumps(rows).encode("utf-8")
         self.send_response(200)
@@ -83,7 +135,7 @@ class ApprovalsMixin:
         headers = {"apikey": key, "Authorization": f"Bearer {key}"}
         try:
             resp = requests.get(
-                f"{url}/rest/v1/pending_applies?select=*&id=eq.{pending_id}" + (f"&user_id=eq.{self.auth_user_id}" if getattr(self, "auth_user_id", None) else "") + "&limit=1",
+                f"{url}/rest/v1/pending_applies?select=*&id=eq.{pending_id}&limit=1",
                 headers=headers, timeout=10,
             )
             rows = resp.json() if resp.text and resp.status_code == 200 else []

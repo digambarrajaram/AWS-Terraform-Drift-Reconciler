@@ -8,7 +8,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useScope } from '@/hooks/useScope';
 import { useOverviewData } from '@/hooks/useOverviewData';
 import { useEnvironments } from '@/hooks/useEnvironments';
+import { Link, useLocation } from 'react-router-dom';
 import { errorMessage, isRetryable } from '@/lib/errorUtils';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -115,6 +117,7 @@ function NoEventsState() {
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Overview() {
+  const { search } = useLocation();
   const { scope } = useScope();
   const { activeEnvironments, isLoading: envsLoading } = useEnvironments();
   const {
@@ -162,11 +165,13 @@ export default function Overview() {
 
   const costTotal = costImpact.data ?? 0;
   const costResources = costResourceCount.data ?? 0;
+  const activeEnv = activeEnvironments.find((e) => e.slug === scope);
+  const rollbackEligible = rollbackCount.data ?? 0;
 
   // No environments at all
   if (!envsLoading && activeEnvironments.length === 0) {
     return (
-      <div className="p-6">
+      <div className={`p-6 ${PAGE_MAX_WIDTH}`}>
         <h1 className="text-xl font-semibold text-foreground">Overview</h1>
         <NoEnvironmentsState />
       </div>
@@ -184,11 +189,20 @@ export default function Overview() {
     unresolvedOpen === 0;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className={`p-6 space-y-6 ${PAGE_MAX_WIDTH}`}>
       <div>
         <h1 className="text-xl font-semibold text-foreground">Overview</h1>
         {scope && (
-          <p className="mt-0.5 text-sm text-muted-foreground">Scope: {scope}</p>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {activeEnv ? (
+              <>
+                <span className="text-foreground font-medium">{activeEnv.name}</span>
+                <span className="font-mono text-xs ml-1.5">({activeEnv.slug})</span>
+              </>
+            ) : (
+              <>Scope: <span className="font-mono text-xs">{scope}</span></>
+            )}
+          </p>
         )}
       </div>
 
@@ -248,10 +262,14 @@ export default function Overview() {
                         })}
                       </div>
                     )}
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-xs text-muted-foreground leading-snug">
                       {unresolvedOpen === 0 && currentDrift > 0
-                        ? 'Detected in last scan — no open tickets'
-                        : `${unresolvedOpen} unresolved ticket${unresolvedOpen === 1 ? '' : 's'}`}
+                        ? 'Detected in last config drift scan — no open tickets'
+                        : unresolvedOpen > 0 && currentDrift === 0 && !driftSkipped
+                          ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} — last config drift scan: none (unmanaged/security tickets still count)`
+                          : unresolvedOpen > 0
+                            ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} (status=open on findings)`
+                            : 'No open tickets'}
                     </p>
                   </>
                 )}
@@ -263,10 +281,22 @@ export default function Overview() {
           <StatCard
             icon={RotateCcw}
             label="Eligible for Rollback"
-            value={isLoading ? undefined : (rollbackCount.data ?? 0)}
             loading={isLoading}
             error={rollbackCount.error}
-          />
+          >
+            {!isLoading && !rollbackCount.error && (
+              <div className="space-y-1">
+                <p className="text-2xl font-semibold tabular-nums text-card-foreground">
+                  {rollbackEligible}
+                </p>
+                <p className="text-xs text-muted-foreground leading-snug">
+                  {rollbackEligible === 0
+                    ? 'No resolved fix/batch PRs with a rollback baseline on the Rollback page'
+                    : 'Resolved PRs with a stored baseline — open Rollback to preview or execute'}
+                </p>
+              </div>
+            )}
+          </StatCard>
 
           {/* ── Monthly cost impact ────────────────────────────────────── */}
           <StatCard
@@ -277,7 +307,15 @@ export default function Overview() {
           >
             {!isLoading && !costImpact.error && (
               costResources === 0 ? (
-                <p className="text-sm text-muted-foreground">No cost data</p>
+                <div className="space-y-1">
+                  <p className="text-2xl font-semibold tabular-nums text-muted-foreground">—</p>
+                  <p className="text-xs text-muted-foreground leading-snug">
+                    No priced resources in open drift findings. Cost appears when drift events include
+                    monthly estimates (see{' '}
+                    <Link to="/exceptions" className="text-primary hover:underline">Exceptions</Link>
+                    ).
+                  </p>
+                </div>
               ) : (
                 <div className="space-y-1">
                   <p className="text-2xl font-semibold tabular-nums text-card-foreground">
@@ -306,6 +344,29 @@ export default function Overview() {
             error={lastScan.error}
           />
         </div>
+      )}
+
+      {!isEmpty && !isLoading && (
+        <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+          <h2 className="text-sm font-semibold text-card-foreground mb-3">Quick links</h2>
+          <div className="flex flex-wrap gap-2">
+            {[
+              { to: '/scan', label: 'Run scan' },
+              { to: '/explorer', label: 'Explorer' },
+              { to: '/pr-queue', label: 'PR queue' },
+              { to: '/trends', label: 'Trends' },
+              { to: '/rollback', label: 'Rollback' },
+            ].map(({ to, label }) => (
+              <Link
+                key={to}
+                to={{ pathname: to, search }}
+                className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
+              >
+                {label}
+              </Link>
+            ))}
+          </div>
+        </section>
       )}
     </div>
   );

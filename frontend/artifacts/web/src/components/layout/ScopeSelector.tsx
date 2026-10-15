@@ -38,6 +38,7 @@ export default function ScopeSelector() {
                 ? 'bg-background text-foreground shadow-sm'
                 : 'text-muted-foreground hover:text-foreground',
             ].join(' ')}
+            title={`Slug: ${env.slug}`}
           >
             {env.name}
           </button>
@@ -54,8 +55,8 @@ export default function ScopeSelector() {
       className="rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
     >
       {activeEnvironments.map((env) => (
-        <option key={env.slug} value={env.slug}>
-          {env.name}
+        <option key={env.slug} value={env.slug} title={env.slug}>
+          {env.name} ({env.slug})
         </option>
       ))}
     </select>

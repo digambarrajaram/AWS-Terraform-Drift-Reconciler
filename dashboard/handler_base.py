@@ -131,6 +131,12 @@ def _trends_summary_from_rows(rows: list) -> dict:
     }
 
 
+def _rollback_has_baseline(row: dict) -> bool:
+    """True when changes_jsonb has at least one reversible field entry."""
+    changes = row.get("changes_jsonb")
+    return isinstance(changes, dict) and len(changes) > 0
+
+
 def _fetch_eligible_rollback_events(
     base: str,
     headers: dict,
@@ -138,23 +144,27 @@ def _fetch_eligible_rollback_events(
     *,
     select: str = "*",
 ) -> tuple[list | None, str | None]:
-    """Resolved fix/batch/security/rollback PRs that can still be rolled back.
+    """Resolved fix/batch/rollback PRs that can still be rolled back.
 
-    Includes ``security_only`` PRs that were **applied to infra** (so a
-    broken hardening can be reverted).  Excludes excepted security PRs —
-    those never changed AWS.  Also requires a baseline and excludes PRs
-    already referenced by ``rolled_back_from_pr``.
+    Excludes ``security_only`` (reverting hardening is unsafe from the UI).
+    Requires a non-empty ``changes_jsonb`` baseline and excludes PRs already
+    referenced by ``rolled_back_from_pr``.
 
     Used by Overview and ``/api/rollback-data``.
 
     Returns ``(rows, None)`` on success or ``(None, error)`` on failure.
     """
+    select_fields = {
+        part.strip() for part in select.split(",") if part.strip()
+    }
+    select_fields |= {"pr_number", "changes_jsonb", "pr_type", "resolution"}
+    select_clause = ",".join(sorted(select_fields))
     try:
         eligible_resp = requests.get(
             f"{base}/rest/v1/drift_events"
-            f"?select={select}&account=eq.{scope}"
+            f"?select={select_clause}&account=eq.{scope}"
             f"&status=eq.resolved"
-            f"&pr_type=in.(fix,batch,rollback,security_only)"
+            f"&pr_type=in.(fix,batch,rollback)"
             f"&pr_number=not.is.null"
             f"&changes_jsonb=not.is.null"
             f"&order=created_at.desc",
@@ -198,18 +208,87 @@ def _fetch_eligible_rollback_events(
         prn = row.get("pr_number")
         if prn in rolled_set or prn in excepted_set:
             return True
-        # Belt-and-suspenders when select includes resolution/pr_type.
-        if row.get("pr_type") == "security_only":
-            res = (row.get("resolution") or "").strip().lower()
-            if res.startswith("excepted"):
-                return True
         return False
 
     rows = [
         row for row in (eligible_resp.json() or [])
-        if not _exclude(row)
+        if not _exclude(row) and _rollback_has_baseline(row)
     ]
+    if select != "*":
+        keys = [part.strip() for part in select.split(",") if part.strip()]
+        rows = [{key: row.get(key) for key in keys} for row in rows]
     return rows, None
+
+
+def _overview_scan_context(scan_rows: list) -> tuple[str | None, dict]:
+    """Last completed run timestamp + drift card from the latest config-drift scan."""
+    if not scan_rows:
+        return None, _last_scan_drift_summary(None)
+    latest = scan_rows[0]
+    last_scan = latest.get("completed_at") or latest.get("started_at")
+    drift_row = latest
+    for row in scan_rows:
+        summary = row.get("result_summary")
+        if not isinstance(summary, dict):
+            continue
+        if summary.get("mode") == "trivy_only":
+            continue
+        if isinstance(summary.get("drift"), dict):
+            drift_row = row
+            break
+    return last_scan, _last_scan_drift_summary(drift_row.get("result_summary"))
+
+
+def _mttr_fill_severities(rows: list) -> list:
+    """Always return HIGH/MEDIUM/LOW so the chart does not hide empty severities."""
+    by_sev: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sev = str(row.get("severity") or "").upper()
+        if sev in ("HIGH", "MEDIUM", "LOW"):
+            by_sev[sev] = row
+    filled = []
+    for sev in ("HIGH", "MEDIUM", "LOW"):
+        if sev in by_sev:
+            filled.append(by_sev[sev])
+        else:
+            filled.append({"severity": sev, "avg_hours": None, "count": 0})
+    return filled
+
+
+def _trends_pending_approval_counts(
+    base: str, headers: dict, scope: str,
+) -> dict:
+    """Awaiting-approval rows on pending_applies (not drift_events open)."""
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/pending_applies"
+            f"?select=pr_type&scope=eq.{scope}&status=eq.awaiting_approval",
+            headers=headers, timeout=10,
+        )
+    except requests.RequestException:
+        return {"total": 0, "unmanaged": 0, "security": 0, "other": 0}
+    if resp.status_code != 200:
+        return {"total": 0, "unmanaged": 0, "security": 0, "other": 0}
+    unmanaged = security = other = 0
+    for row in resp.json() or []:
+        if not isinstance(row, dict):
+            continue
+        pr_type = (row.get("pr_type") or "").strip().lower()
+        if pr_type == "unmanaged":
+            unmanaged += 1
+        elif pr_type == "security_only":
+            security += 1
+        else:
+            other += 1
+    total = unmanaged + security + other
+    return {
+        "total": total,
+        "unmanaged": unmanaged,
+        "security": security,
+        "other": other,
+    }
 
 
 def _last_scan_drift_summary(result_summary) -> dict:
@@ -1124,10 +1203,13 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             eligible_rows, eligible_err = _fetch_eligible_rollback_events(
                 base, headers, scope, select="pr_number",
             )
+            auth_uid = getattr(self, "auth_user_id", None)
+            scan_user = f"&user_id=eq.{auth_uid}" if auth_uid else ""
             scan_resp = requests.get(
                 f"{base}/rest/v1/scan_runs"
-                f"?select=completed_at,result_summary&scope=eq.{scope}&status=eq.complete"
-                f"&completed_at=not.is.null&order=completed_at.desc&limit=1",
+                f"?select=completed_at,started_at,result_summary&scope=eq.{scope}"
+                f"&status=eq.complete&completed_at=not.is.null"
+                f"&order=completed_at.desc&limit=15{scan_user}",
                 headers=headers, timeout=10,
             )
             if (
@@ -1172,7 +1254,7 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
             rollback_count = len(eligible_rows)
 
             scan_rows = scan_resp.json() or []
-            scan_row = scan_rows[0] if scan_rows else {}
+            last_scan_at, last_scan_drift = _overview_scan_context(scan_rows)
             open_severity = severity_resp.json() or []
             try:
                 open_count = sum(int(row.get("count") or 0) for row in open_severity)
@@ -1184,11 +1266,9 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 "severity": open_severity,
                 "open_count": open_count,
                 "rollback_count": rollback_count,
-                "last_scan": scan_row.get("completed_at"),
-                # Primary "current drift" signal — matches Scan History.
-                "last_scan_drift": _last_scan_drift_summary(
-                    scan_row.get("result_summary"),
-                ),
+                "last_scan": last_scan_at,
+                # Primary config-drift signal — latest drift scan, not trivy-only.
+                "last_scan_drift": last_scan_drift,
                 "cost_impact": round(cost, 2),
                 "cost_resource_count": resource_count,
             }
@@ -1504,9 +1584,12 @@ class HandlerBase(http.server.SimpleHTTPRequestHandler):
                 return
             data = json.dumps({
                 "most_drifted": rpc_results["get_most_drifted"],
-                "mttr": rpc_results["get_mttr_by_severity"],
+                "mttr": _mttr_fill_severities(rpc_results["get_mttr_by_severity"]),
                 "volume": rpc_results["get_drift_volume_daily"],
                 "summary": _trends_summary_from_rows(summary_resp.json() or []),
+                "pending_approvals": _trends_pending_approval_counts(
+                    base, headers, scope,
+                ),
             }).encode("utf-8")
         except (requests.RequestException, ValueError) as exc:
             self._json_error(502, f"Supabase unreachable: {exc}")

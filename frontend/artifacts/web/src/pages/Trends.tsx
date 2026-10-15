@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { format } from 'date-fns';
+import { eachDayOfInterval, format, subDays } from 'date-fns';
 import { errorMessage } from '@/lib/errorUtils';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
@@ -20,8 +20,12 @@ import {
 import { useScope } from '@/hooks/useScope';
 import {
   useMostDrifted, useMTTRBySeverity, useDriftVolumeDaily, useDriftSummary,
+  usePendingApprovalsSummary,
   type MostDriftedRow, type MTTRRow, type VolumeRow, type DriftSummary,
+  type PendingApprovalsSummary,
 } from '@/hooks/useTrendsData';
+import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
+import { shortenResourceId } from '@/lib/resourceId';
 
 // ── Palette ────────────────────────────────────────────────────────────────
 
@@ -188,7 +192,23 @@ function otherBreakdown(s: DriftSummary): string | undefined {
 const TRENDS_TILE_GRID =
   'grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 auto-rows-fr';
 
-function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefined; loading: boolean; error?: Error | null }) {
+function pendingHint(p: PendingApprovalsSummary | undefined): string | undefined {
+  if (!p || p.total === 0) return undefined;
+  const parts: string[] = [];
+  if (p.unmanaged > 0) parts.push(`${p.unmanaged} unmanaged`);
+  if (p.security > 0) parts.push(`${p.security} security`);
+  if (p.other > 0) parts.push(`${p.other} other`);
+  return parts.join(' · ');
+}
+
+function StatTiles({
+  summary, pending, loading, error,
+}: {
+  summary: DriftSummary | undefined;
+  pending?: PendingApprovalsSummary;
+  loading: boolean;
+  error?: Error | null;
+}) {
   if (loading) {
     return (
       <div className={TRENDS_TILE_GRID}>
@@ -238,14 +258,19 @@ function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefi
       <StatTile
         label="Open"
         value={s.open.toLocaleString()}
-        hint="Finding status = open"
+        hint={pendingHint(pending) ?? 'Fix/batch findings only'}
+        hintDetail={
+          pending && pending.total > 0
+            ? `${pending.total} awaiting approval on Approvals (unmanaged/security/fix) — not included in Open`
+            : 'Drift finding status=open (excludes unmanaged & security_only)'
+        }
         icon={<Clock size={16} />}
         accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
       />
       <StatTile
-        label="Other"
+        label="Non-open"
         value={other.toLocaleString()}
-        hint="Reverted, suppressed, other"
+        hint="Reverted · suppressed · manual"
         hintDetail={otherBreakdown({ ...s, other })}
         icon={<AlertTriangle size={16} />}
         accent="bg-zinc-100 text-zinc-600 dark:bg-zinc-900/30 dark:text-zinc-400"
@@ -264,13 +289,13 @@ function StatTiles({ summary, loading, error }: { summary: DriftSummary | undefi
 // ── Custom tooltips ────────────────────────────────────────────────────────
 
 function VolumeTooltip({ active, payload, label }: {
-  active?: boolean; payload?: { value: number }[]; label?: number;
+  active?: boolean; payload?: { value: number }[]; label?: string;
 }) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
       <p className="text-muted-foreground mb-1">
-        {label ? safeDate(label, 'MMM d, yyyy, HH:mm') : ''}
+        {label ? safeDate(label, 'MMM d, yyyy') : ''}
       </p>
       <p className="font-semibold text-foreground">{payload[0].value} events</p>
     </div>
@@ -289,7 +314,10 @@ function MTTRTooltip({ active, payload }: {
         {d.severity}
       </p>
       <p className="text-foreground">
-        Avg time to resolve: <strong>{Number(d.avg_hours).toFixed(1)} h</strong>
+        Avg time to resolve:{' '}
+        <strong>
+          {d.count === 0 || d.avg_hours == null ? '—' : `${Number(d.avg_hours).toFixed(1)} h`}
+        </strong>
       </p>
       <p className="text-muted-foreground">{d.count} event{d.count !== 1 ? 's' : ''}</p>
     </div>
@@ -311,11 +339,23 @@ function DriftedTooltip({ active, payload }: {
 
 // ── Axis tick helpers ──────────────────────────────────────────────────────
 
-function truncate(s: string, n: number) {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
-}
-
 const TICK_STYLE = { fontSize: 11, fill: 'hsl(var(--muted-foreground))' };
+
+type MTTRChartRow = MTTRRow & { chart_hours: number | null };
+
+/** Zero-fill missing days so the volume chart shows every date in the range. */
+function fillVolumeDays(rows: VolumeRow[], days: number): VolumeRow[] {
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  const start = subDays(end, Math.max(0, days - 1));
+  const byDay = new Map(
+    rows.map((r) => [r.day.slice(0, 10), Number(r.count) || 0]),
+  );
+  return eachDayOfInterval({ start, end }).map((d) => {
+    const key = format(d, 'yyyy-MM-dd');
+    return { day: key, count: byDay.get(key) ?? 0 };
+  });
+}
 
 function VolumeTick({ x, y, payload }: { x?: number; y?: number; payload?: { value: string } }) {
   if (!payload?.value) return null;
@@ -332,7 +372,8 @@ function ResourceTick({ x, y, payload }: { x?: number; y?: number; payload?: { v
   if (!payload?.value) return null;
   return (
     <text x={x! - 6} y={y! + 4} textAnchor="end" style={TICK_STYLE}>
-      {truncate(payload.value, 28)}
+      <title>{payload.value}</title>
+      {shortenResourceId(payload.value, 40)}
     </text>
   );
 }
@@ -347,6 +388,7 @@ export default function Trends() {
   const mttr        = useMTTRBySeverity(scope, days);
   const volume      = useDriftVolumeDaily(scope, days);
   const summary     = useDriftSummary(scope, days);
+  const pending     = usePendingApprovalsSummary(scope, days);
 
   // ── Most drifted — horizontal bar chart ────────────────────────────────
   // Reverse so highest bar is at top
@@ -357,17 +399,29 @@ export default function Trends() {
   const mttrData = [...(mttr.data ?? [])].sort(
     (a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity),
   );
+  const mttrChartData: MTTRChartRow[] = mttrData.map((row) => ({
+    ...row,
+    chart_hours:
+      row.count > 0 && row.avg_hours != null && !Number.isNaN(row.avg_hours)
+        ? row.avg_hours
+        : null,
+  }));
+  const mttrResolvedCount = mttrData.reduce((n, r) => n + r.count, 0);
+  const mttrEmpty = !mttr.isLoading && mttrResolvedCount === 0;
 
-  // ── Volume — sorted chronologically, with epoch timestamps for
-  //     time-scaled x-axis spacing so gaps (e.g. Jul 21 → Jul 29) are
-  //     visually wider than consecutive days.
-  const volumeData = [...(volume.data ?? [])]
-    .map((d) => ({ ...d, ts: new Date(d.day).getTime() }))
-    .filter((d) => Number.isFinite(d.ts) && Number.isFinite(Number(d.count)))
-    .sort((a, b) => a.ts - b.ts);
+  const volumeData = fillVolumeDays(volume.data ?? [], days);
+
+  const mostDriftedChartHeight = Math.max(288, mostDriftedData.length * 34);
+  const mostDriftedLabelWidth = Math.min(
+    280,
+    Math.max(
+      160,
+      ...mostDriftedData.map((r) => shortenResourceId(r.resource_id, 40).length * 6.2),
+    ),
+  );
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl">
+    <div className={`p-6 space-y-6 ${PAGE_MAX_WIDTH}`}>
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-2">
@@ -378,7 +432,12 @@ export default function Trends() {
       </div>
 
       {/* Stat tiles */}
-      <StatTiles summary={summary.data} loading={summary.isLoading} error={summary.error as Error | null} />
+      <StatTiles
+        summary={summary.data}
+        pending={pending.data}
+        loading={summary.isLoading}
+        error={summary.error as Error | null}
+      />
 
       {/* Two-column charts */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -391,12 +450,12 @@ export default function Trends() {
           error={mostDrifted.error as Error | null}
           empty={!mostDrifted.isLoading && (mostDrifted.data?.length ?? 0) === 0}
         >
-          <div className="h-72">
+          <div style={{ height: mostDriftedChartHeight }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={mostDriftedData}
                 layout="vertical"
-                margin={{ top: 4, right: 24, bottom: 4, left: 180 }}
+                margin={{ top: 4, right: 24, bottom: 4, left: 8 }}
               >
                 <CartesianGrid
                   horizontal={false}
@@ -413,7 +472,8 @@ export default function Trends() {
                 <YAxis
                   type="category"
                   dataKey="resource_id"
-                  width={176}
+                  width={mostDriftedLabelWidth}
+                  interval={0}
                   tick={<ResourceTick />}
                   axisLine={false}
                   tickLine={false}
@@ -437,16 +497,17 @@ export default function Trends() {
         {/* MTTR by Severity */}
         <ChartCard
           title="Mean Time to Resolve by Severity"
-          subtitle="Only resolved fix/batch PRs with resolved_at set — excludes rollbacks and Other statuses (counts on bars ≠ Resolved tile)"
+          subtitle="Resolved fix/batch PRs with resolved_at in this period. No resolved events → empty chart (not zero-hour bars)."
           loading={mttr.isLoading}
           error={mttr.error as Error | null}
-          empty={!mttr.isLoading && (mttr.data?.length ?? 0) === 0}
+          empty={mttrEmpty}
         >
+          {mttrEmpty ? null : (
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
-                data={mttrData}
-                margin={{ top: 4, right: 24, bottom: 4, left: 8 }}
+                data={mttrChartData}
+                margin={{ top: 20, right: 24, bottom: 4, left: 8 }}
               >
                 <CartesianGrid
                   vertical={false}
@@ -470,29 +531,36 @@ export default function Trends() {
                   cursor={{ fill: 'hsl(var(--muted))', radius: 4 }}
                 />
                 <Bar
-                  dataKey="avg_hours"
+                  dataKey="chart_hours"
                   name="Avg hours"
                   radius={[4, 4, 0, 0]}
                   maxBarSize={52}
                 >
-                  {mttrData.map((entry) => (
+                  {mttrChartData.map((entry) => (
                     <Cell
                       key={entry.severity}
                       fill={SEV_COLOR[entry.severity] ?? '#6b7280'}
                     />
                   ))}
                   <LabelList
-                    dataKey="avg_hours"
+                    dataKey="chart_hours"
                     position="top"
                     style={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                    formatter={(v: number) => `${v.toFixed(1)}h`}
+                    formatter={(v: number) =>
+                      v == null || Number.isNaN(v) || v <= 0 ? '' : `${v.toFixed(1)}h`}
                   />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
+          )}
+          {!mttrEmpty && mttrData.some((r) => r.count > 0 && (r.avg_hours ?? 0) <= 0) && (
+            <p className="text-[11px] text-muted-foreground text-center">
+              Resolved events in this period had near-zero time to resolve (same-day fixes).
+            </p>
+          )}
           {/* Legend */}
-          {mttrData.length > 0 && (
+          {!mttrEmpty && mttrData.length > 0 && (
             <div className="flex gap-4 justify-center pt-1">
               {mttrData.map((row) => (
                 <div key={row.severity} className="flex items-center gap-1.5">
@@ -501,7 +569,10 @@ export default function Trends() {
                     style={{ background: SEV_COLOR[row.severity] ?? '#6b7280' }}
                   />
                   <span className="text-[11px] text-muted-foreground">
-                    {row.severity} · {row.count}
+                    {row.severity}
+                    {row.count > 0 && row.avg_hours != null
+                      ? ` · ${row.avg_hours.toFixed(1)}h (${row.count})`
+                      : ' · no resolved events'}
                   </span>
                 </div>
               ))}
@@ -535,14 +606,12 @@ export default function Trends() {
                 stroke="hsl(var(--border))"
               />
               <XAxis
-                dataKey="ts"
-                type="number"
-                domain={['dataMin', 'dataMax']}
-                scale="time"
-                tickFormatter={(ts) => format(new Date(ts), 'MMM d')}
-                tick={TICK_STYLE}
+                dataKey="day"
+                tick={<VolumeTick />}
                 axisLine={false}
                 tickLine={false}
+                interval={days <= 31 ? 0 : 'preserveStartEnd'}
+                minTickGap={days <= 31 ? 0 : 28}
               />
               <YAxis
                 allowDecimals={false}

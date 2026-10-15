@@ -441,6 +441,10 @@ function DriftTab({
           <div className="flex flex-col items-center gap-3 py-14 text-center">
             <Inbox size={32} className="text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">No drift exceptions</p>
+            <p className="text-xs text-muted-foreground/80 max-w-md">
+              Suppressions you add here (or via Except on Approvals) — not the same as drift events on Trends.
+              Use Add Exception to ignore a resource on future scans.
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -1044,6 +1048,9 @@ export default function Exceptions() {
   return (
     <div className="p-6 space-y-4 max-w-6xl">
       <h1 className="text-xl font-semibold">Exceptions</h1>
+      <p className="text-xs text-muted-foreground">
+        Registry of suppressions per scope. Drift events on Trends and Explorer are separate until you except them.
+      </p>
 
       {isLoading ? (
         <div className="space-y-2">

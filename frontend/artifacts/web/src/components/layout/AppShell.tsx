@@ -27,10 +27,10 @@ const NAV_ITEMS = [
   { label: 'Approvals',    to: '/approvals',    icon: ClipboardCheck  },
   { label: 'Rollback',     to: '/rollback',     icon: RotateCcw       },
   { label: 'Trends',       to: '/trends',       icon: TrendingUp      },
+  { label: 'Explorer',     to: '/explorer',     icon: Compass         },
   { label: 'Exceptions',   to: '/exceptions',   icon: AlertTriangle   },
   { label: 'Alerts',       to: '/alerts',       icon: Bell            },
   { label: 'Environments', to: '/environments', icon: Globe           },
-  { label: 'Explorer',     to: '/explorer',     icon: Compass         },
 ];
 
 /**

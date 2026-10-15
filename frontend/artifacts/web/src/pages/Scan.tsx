@@ -57,6 +57,34 @@ function fmtDate(iso: string) {
   catch { return '—'; }
 }
 
+type ScanFindingBlock = {
+  found?: boolean;
+  count?: number;
+  skipped?: boolean;
+  reason?: string;
+};
+
+/** Drift / unmanaged table cells: 0 = checked clean, — = skipped, n/a = stage not run. */
+function formatScanFindingCell(
+  block: ScanFindingBlock | null | undefined,
+  notRunLabel: string,
+): { text: string; muted: boolean; title?: string } {
+  if (!block) {
+    return { text: 'n/a', muted: true, title: notRunLabel };
+  }
+  if (block.skipped) {
+    return {
+      text: '—',
+      muted: true,
+      title: block.reason ?? 'Check skipped',
+    };
+  }
+  if (block.found) {
+    return { text: String(block.count ?? 0), muted: false };
+  }
+  return { text: '0', muted: true, title: 'Checked — none found' };
+}
+
 function stageLabel(run: ScanRun): string {
   if (!run.current_stage) return '—';
   const type = run.scan_type ?? run.result_summary?.mode;
@@ -345,7 +373,7 @@ function ScanHistory({ runs, activeRunId, onSelect, loading }: {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/40 text-left">
-                <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">Started</th>
+                <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">Completed</th>
                 <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">Status</th>
                 <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">Stage</th>
                 <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">Mode</th>
@@ -370,8 +398,9 @@ function ScanHistory({ runs, activeRunId, onSelect, loading }: {
                       isActive ? 'bg-accent' : 'hover:bg-muted/50',
                     ].join(' ')}
                   >
-                    <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">
-                      {fmtDate(run.started_at)}
+                    <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap"
+                        title={run.completed_at ? `Completed ${fmtDate(run.completed_at)}` : undefined}>
+                      {fmtDate(run.completed_at ?? run.started_at)}
                     </td>
                     <td className="px-4 py-2.5">
                       <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style.cls}`}>
@@ -385,14 +414,40 @@ function ScanHistory({ runs, activeRunId, onSelect, loading }: {
                       {run.scan_type ?? run.result_summary?.mode ?? '—'}
                     </td>
                     <td className="px-4 py-2.5 text-xs">
-                      {run.result_summary?.drift?.found
-                        ? <span className="text-amber-600 dark:text-amber-400 font-medium">{run.result_summary.drift.count}</span>
-                        : <span className="text-muted-foreground">—</span>}
+                      {(() => {
+                        const cell = formatScanFindingCell(
+                          run.result_summary?.drift,
+                          'Configuration drift was not part of this scan mode',
+                        );
+                        return (
+                          <span
+                            className={cell.muted
+                              ? 'text-muted-foreground'
+                              : 'text-amber-600 dark:text-amber-400 font-medium'}
+                            title={cell.title}
+                          >
+                            {cell.text}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-2.5 text-xs">
-                      {run.result_summary?.unmanaged?.found
-                        ? <span className="text-amber-600 dark:text-amber-400 font-medium">{run.result_summary.unmanaged.count}</span>
-                        : <span className="text-muted-foreground">—</span>}
+                      {(() => {
+                        const cell = formatScanFindingCell(
+                          run.result_summary?.unmanaged,
+                          'Unmanaged scan was not part of this scan mode',
+                        );
+                        return (
+                          <span
+                            className={cell.muted
+                              ? 'text-muted-foreground'
+                              : 'text-amber-600 dark:text-amber-400 font-medium'}
+                            title={cell.title}
+                          >
+                            {cell.text}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-2.5 text-muted-foreground">
                       <ChevronRight size={14} className={isActive ? 'text-foreground' : ''} />

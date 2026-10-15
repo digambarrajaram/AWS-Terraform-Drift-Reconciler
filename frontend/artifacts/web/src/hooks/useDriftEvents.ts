@@ -43,6 +43,7 @@ export function useDriftEvents(
       page,
     ],
     enabled,
+    staleTime: 30_000,
     placeholderData: keepPreviousData,
     queryFn: async () => {
       const query = new URLSearchParams({

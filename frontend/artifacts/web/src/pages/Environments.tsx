@@ -610,7 +610,7 @@ export default function Environments() {
   }
 
   return (
-    <div className="p-6 space-y-5 max-w-5xl">
+    <div className="p-6 space-y-5 w-full">
       {/* Header */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <h1 className="text-xl font-semibold">Environments</h1>

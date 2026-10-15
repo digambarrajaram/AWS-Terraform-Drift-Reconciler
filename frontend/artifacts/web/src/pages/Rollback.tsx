@@ -127,7 +127,7 @@ function EligiblePRList({
           <div className="flex flex-col items-center gap-3 py-12 text-center">
             <Inbox size={32} className="text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">
-              No eligible PRs — resolved fix/batch/rollback PRs need a stored baseline, must not already be rolled back, and security-only fixes are excluded.
+              No eligible PRs — resolved fix/batch/security/rollback PRs need a stored baseline, must not already be rolled back, and excepted security PRs are excluded.
             </p>
           </div>
         ) : (

@@ -133,8 +133,9 @@ def _trends_summary_from_rows(rows: list) -> dict:
 
 def _rollback_has_baseline(row: dict) -> bool:
     """True when changes_jsonb has at least one reversible field entry."""
-    changes = row.get("changes_jsonb")
-    return isinstance(changes, dict) and len(changes) > 0
+    from drift_reconciler.drift_baseline import infer_baseline_from_row
+
+    return bool(infer_baseline_from_row(row))
 
 
 def _fetch_eligible_rollback_events(
@@ -144,11 +145,12 @@ def _fetch_eligible_rollback_events(
     *,
     select: str = "*",
 ) -> tuple[list | None, str | None]:
-    """Resolved fix/batch/rollback PRs that can still be rolled back.
+    """Resolved fix/batch/security/rollback PRs that can still be rolled back.
 
-    Excludes ``security_only`` (reverting hardening is unsafe from the UI).
-    Requires a non-empty ``changes_jsonb`` baseline and excludes PRs already
-    referenced by ``rolled_back_from_pr``.
+    Includes ``security_only`` PRs that were **applied to infra** (so a
+    broken hardening can be reverted).  Excludes excepted security PRs —
+    those never changed AWS.  Requires a non-empty baseline and excludes PRs
+    already referenced by ``rolled_back_from_pr``.
 
     Used by Overview and ``/api/rollback-data``.
 
@@ -164,7 +166,7 @@ def _fetch_eligible_rollback_events(
             f"{base}/rest/v1/drift_events"
             f"?select={select_clause}&account=eq.{scope}"
             f"&status=eq.resolved"
-            f"&pr_type=in.(fix,batch,rollback)"
+            f"&pr_type=in.(fix,batch,rollback,security_only)"
             f"&pr_number=not.is.null"
             f"&changes_jsonb=not.is.null"
             f"&order=created_at.desc",
@@ -208,6 +210,10 @@ def _fetch_eligible_rollback_events(
         prn = row.get("pr_number")
         if prn in rolled_set or prn in excepted_set:
             return True
+        if row.get("pr_type") == "security_only":
+            res = (row.get("resolution") or "").strip().lower()
+            if res.startswith("excepted"):
+                return True
         return False
 
     rows = [

@@ -21,6 +21,7 @@ import { errorMessage } from '@/lib/errorUtils';
 import { pendingAppliesRefetchInterval } from '@/lib/pendingAppliesPoll';
 import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
 import { useQueryUpdating } from '@/hooks/useQueryUpdating';
+import { overviewKeys } from '@/hooks/useOverviewData';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -175,6 +176,8 @@ function DetailDrawer({
   cancelling: boolean;
 }) {
   const open = !!row;
+  const queryClient = useQueryClient();
+  const rollbackRefreshRef = useRef<string | null>(null);
 
   const { data: details, isLoading: detailsLoading } = useQuery<PrDetails>({
     queryKey: ['prDetails', row?.id],
@@ -262,6 +265,19 @@ function DetailDrawer({
     : row;
   const jobRunning = !!(current && ['approved', 'rejected'].includes(current.status));
   const jobDone = !!(current && isJobDone(current.status));
+
+  // After Accept apply finishes, drift_events flip to resolved — refresh Rollback
+  // and Overview counts so the PR appears without a full page reload.
+  useEffect(() => {
+    if (!current || !jobDone || current.status !== 'applied') return;
+    const key = `${current.id}:applied`;
+    if (rollbackRefreshRef.current === key) return;
+    rollbackRefreshRef.current = key;
+    queryClient.invalidateQueries({ queryKey: ['eligiblePRs', current.scope] });
+    queryClient.invalidateQueries({ queryKey: ['rollbackHistory', current.scope] });
+    queryClient.invalidateQueries({ queryKey: overviewKeys.all(current.scope) });
+    queryClient.invalidateQueries({ queryKey: ['driftEvents', current.scope] });
+  }, [current, jobDone, queryClient]);
 
   // Guard after ALL hooks (Rules of Hooks) — only the JSX return is skipped.
   if (!current) return null;

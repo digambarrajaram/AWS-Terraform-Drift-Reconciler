@@ -181,8 +181,7 @@ class OverviewEndpointTests(unittest.TestCase):
         # Eligible for Rollback = resolved fix-family, not open∪resolved Accepted.
         rollback_url = next(u for u in urls if "drift_events" in u and "pr_number" in u)
         self.assertIn("status=eq.resolved", rollback_url)
-        self.assertIn("pr_type=in.(fix,batch,rollback)", rollback_url)
-        self.assertNotIn("security_only", rollback_url)
+        self.assertIn("pr_type=in.(fix,batch,rollback,security_only)", rollback_url)
         self.assertIn("changes_jsonb=not.is.null", rollback_url)
         self.assertIn("pr_number=not.is.null", rollback_url)
         self.assertNotIn("status=in.(open,resolved)", rollback_url)
@@ -277,16 +276,43 @@ class EligibleRollbackHelperTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(rows, [{"pr_number": 1}])
         self.assertIn("status=eq.resolved", urls[0])
-        self.assertIn("pr_type=in.(fix,batch,rollback)", urls[0])
+        self.assertIn("pr_type=in.(fix,batch,rollback,security_only)", urls[0])
 
-    def test_excludes_security_only_and_empty_baseline(self):
-        """Security PRs and empty changes_jsonb are not rollback-eligible."""
+    def test_excludes_excepted_security_prs(self):
+        """Excepted security PRs never applied to infra — not rollback-eligible."""
+        def fake_get(url, **_k):
+            if "rolled_back_from_pr" in url and "select=rolled_back_from_pr" in url:
+                return _Resp([])
+            if "pending_applies" in url:
+                return _Resp([{"pr_number": 55}])
+            return _Resp([
+                {"pr_number": 40, "pr_type": "security_only",
+                 "changes_jsonb": {"__tf_file__": {"before": "a", "after": "b"}},
+                 "resolution": "PR merged via dashboard — code updated to match live AWS state"},
+                {"pr_number": 50, "pr_type": "security_only",
+                 "changes_jsonb": {"__tf_file__": {"before": "a", "after": "b"}},
+                 "resolution": "Excepted via dashboard — security finding suppressed"},
+                {"pr_number": 60, "pr_type": "fix",
+                 "changes_jsonb": {"field": {"before": 1, "after": 2}}},
+            ])
+
+        serve.requests.get = fake_get
+        rows, err = _fetch_eligible_rollback_events(
+            "https://supabase.invalid",
+            {"apikey": "k", "Authorization": "Bearer k"},
+            "scope-a",
+        )
+        self.assertIsNone(err)
+        self.assertEqual(sorted(r["pr_number"] for r in rows), [40, 60])
+
+    def test_excludes_empty_baseline(self):
+        """Empty changes_jsonb is not rollback-eligible."""
         def fake_get(url, **_k):
             if "rolled_back_from_pr" in url and "select=rolled_back_from_pr" in url:
                 return _Resp([])
             if "pending_applies" in url:
                 return _Resp([])
-            if "pr_type=in.(fix,batch,rollback)" not in url:
+            if "pr_type=in.(fix,batch,rollback,security_only)" not in url:
                 return _Resp([])
             return _Resp([
                 {"pr_number": 60, "pr_type": "fix",
@@ -302,6 +328,28 @@ class EligibleRollbackHelperTests(unittest.TestCase):
         )
         self.assertIsNone(err)
         self.assertEqual([r["pr_number"] for r in rows], [60])
+
+    def test_legacy_string_encoded_changes_jsonb(self):
+        """Double-encoded jsonb strings still count as a rollback baseline."""
+        def fake_get(url, **_k):
+            if "rolled_back_from_pr" in url and "select=rolled_back_from_pr" in url:
+                return _Resp([])
+            if "pending_applies" in url:
+                return _Resp([])
+            return _Resp([
+                {"pr_number": 80, "pr_type": "fix",
+                 "changes_jsonb": '{"field": {"before": 1, "after": 2}}'},
+            ])
+
+        serve.requests.get = fake_get
+        rows, err = _fetch_eligible_rollback_events(
+            "https://supabase.invalid",
+            {"apikey": "k", "Authorization": "Bearer k"},
+            "scope-a",
+            select="pr_number",
+        )
+        self.assertIsNone(err)
+        self.assertEqual(rows, [{"pr_number": 80}])
 
     def test_overview_scan_context_skips_trivy_for_drift_card(self):
         last_at, drift = _overview_scan_context([

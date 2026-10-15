@@ -37,9 +37,9 @@ export interface RollbackRun {
 // ── useEligiblePRs ─────────────────────────────────────────────────────────
 
 /**
- * Resolved fix/batch/rollback PRs with a stored baseline. Security PRs are
- * excluded (unsafe to revert hardening from the UI). Already-rolled-back PRs
- * are excluded.
+ * Resolved fix/batch/security/rollback PRs with a stored baseline. Excepted
+ * security PRs (never applied) are excluded on the server. Already-rolled-back
+ * PRs are excluded.
  */
 export function useEligiblePRs(scope: string | null) {
   return useQuery<DriftEvent[]>({

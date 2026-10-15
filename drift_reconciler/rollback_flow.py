@@ -11,6 +11,7 @@ from drift_baseline import (
     DELETED_EXTERNALLY_FIELD,
     TF_FILE_FIELD,
     deleted_externally_baseline,
+    format_rollback_plan_output,
     is_deleted_externally_baseline,
     is_tf_file_baseline,
     tf_file_before,
@@ -476,10 +477,9 @@ def _do_run_rollback(tf_dir: str, pr_number: int, run_id: str | None) -> None:
                 "reversed_changes": reversed_changes,
                 "risk_level": "LOW",
                 "drift_summary": f"Rollback of PR #{pr_number}: reverting {resource_id} to pre-fix state.",
-                "plan_output": json.dumps(
-                    {"reversed_changes": {f: {"before": v["before"], "after": v["after"]}
-                                          for f, v in reversed_changes.items()}},
-                    indent=2,
+                "plan_output": format_rollback_plan_output(
+                    reversed_changes,
+                    file_path=rel_path or file_path,
                 ),
             }
         )

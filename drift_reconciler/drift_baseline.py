@@ -1,7 +1,9 @@
 """Rollback baselines for drift events (including deleted_externally)."""
 from __future__ import annotations
 
+import difflib
 import json
+import os
 
 # Synthetic plan field — never written to HCL (filtered from patches).
 DELETED_EXTERNALLY_FIELD = "__deleted_externally__"
@@ -72,6 +74,56 @@ def tf_file_before(changes: dict | None) -> str | None:
     val = (changes or {}).get(TF_FILE_FIELD) or {}
     before = val.get("before")
     return before if isinstance(before, str) else None
+
+
+def _plan_display_value(val) -> str:
+    if val is None:
+        return "(none)"
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, indent=2)
+    return str(val)
+
+
+def format_rollback_plan_output(
+    reversed_changes: dict,
+    *,
+    file_path: str | None = None,
+) -> str:
+    """Human-readable rollback plan for PR bodies (not stored baselines)."""
+    if is_tf_file_baseline(reversed_changes):
+        entry = reversed_changes.get(TF_FILE_FIELD) or {}
+        before = entry.get("before") if isinstance(entry.get("before"), str) else ""
+        after = entry.get("after") if isinstance(entry.get("after"), str) else ""
+        label = os.path.basename((file_path or "file.tf").replace("\\", "/"))
+        diff_lines = list(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=f"a/{label}",
+                tofile=f"b/{label}",
+            )
+        )
+        if not diff_lines:
+            return f"Whole-file rollback ({label}): no diff — already matches target."
+        return (
+            f"Whole-file rollback ({label}):\n\n"
+            + "".join(diff_lines)
+        )
+
+    if is_deleted_externally_baseline(reversed_changes):
+        return (
+            "Restore resource that was deleted outside Terraform "
+            "(rollback of deleted_externally fix)."
+        )
+
+    lines: list[str] = ["Field rollback:"]
+    for field, vals in reversed_changes.items():
+        before = (vals or {}).get("before")
+        after = (vals or {}).get("after")
+        lines.append(f"\n{field}:")
+        lines.append(f"  - before: {_plan_display_value(before)}")
+        lines.append(f"  + after:  {_plan_display_value(after)}")
+    return "\n".join(lines)
 
 
 def changes_for_history(finding: dict) -> dict | None:

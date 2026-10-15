@@ -506,10 +506,13 @@ def drift_pr_from_finding(state: State):
             return None
         rtype, rname = rid.split(".", 1)
         for exc in except_rows:
-            if exc.get("resource_type") != rtype:
-                continue
-            pattern = exc.get("resource_id_pattern") or ""
-            if pattern and pattern in rname:
+            if _ag.unmanaged_scanner.unmanaged_exception_suppresses(
+                exc,
+                resource_type=rtype,
+                resource_label=rname,
+                region=_ag._region,
+                cost_impact=finding.get("cost_impact"),
+            ):
                 return exc
         return None
 

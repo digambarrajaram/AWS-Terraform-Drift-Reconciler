@@ -8,6 +8,7 @@ Usage (standalone test):
 import argparse
 from datetime import datetime, timezone, date
 import json
+import math
 import os
 import re
 import subprocess
@@ -197,6 +198,70 @@ def _unmanaged_exception_not_expired(value: Any) -> bool:
         return date.fromisoformat(str(value)[:10]) > date.today()
     except ValueError:
         return True
+
+
+def _parse_max_monthly_cost_usd(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0 or not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _monthly_estimate_from_cost_impact(cost_impact: Any) -> float | None:
+    if not isinstance(cost_impact, dict):
+        return None
+    estimate = cost_impact.get("monthly_estimate_usd")
+    if isinstance(estimate, bool):
+        return None
+    if isinstance(estimate, (int, float)):
+        result = float(estimate)
+    elif isinstance(estimate, str):
+        try:
+            result = float(estimate)
+        except ValueError:
+            return None
+    else:
+        return None
+    if result < 0 or not math.isfinite(result):
+        return None
+    return result
+
+
+def unmanaged_exception_suppresses(
+    exc: dict[str, Any],
+    *,
+    resource_type: str,
+    resource_label: str,
+    region: str | None = None,
+    live: dict[str, Any] | None = None,
+    cost_impact: dict | None = None,
+) -> bool:
+    """Return True when *exc* should suppress this unmanaged resource.
+
+    When ``max_monthly_cost_usd`` is set, suppression applies only when the
+    estimated monthly cost is *below* the cap.  Unknown cost (no estimate)
+    never suppresses — the resource may still be above the threshold.
+    """
+    if exc.get("resource_type") != resource_type:
+        return False
+    pattern = exc.get("resource_id_pattern", "")
+    if not pattern or pattern not in resource_label:
+        return False
+    max_cost = _parse_max_monthly_cost_usd(exc.get("max_monthly_cost_usd"))
+    if max_cost is None:
+        return True
+    monthly = _monthly_estimate_from_cost_impact(cost_impact)
+    if monthly is None and live is not None and region:
+        est = _build_cost_impact(live, region)
+        monthly = _monthly_estimate_from_cost_impact(est)
+    if monthly is None:
+        return False
+    return monthly < max_cost
 
 
 def format_exception_attribution(exc: dict[str, Any]) -> str:
@@ -531,22 +596,15 @@ def diff_unmanaged(
         resource_label = live.get("raw_name") or live.get("id")
         matched_exc: dict[str, Any] | None = None
         for exc in exceptions:
-            if exc.get("resource_type") != live["type"]:
-                continue
-            pattern = exc.get("resource_id_pattern", "")
-            if not pattern or pattern not in resource_label:
-                continue
-            # If a cost cap is set, only suppress when the estimated
-            # monthly spend is below the threshold — an expensive
-            # resource still alerts even if it matches the pattern.
-            max_cost = exc.get("max_monthly_cost_usd")
-            if max_cost is not None:
-                est = _build_cost_impact(live, region)
-                monthly = est["monthly_estimate_usd"] if est else 0
-                if monthly >= max_cost:
-                    continue  # too expensive to suppress
-            matched_exc = exc
-            break
+            if unmanaged_exception_suppresses(
+                exc,
+                resource_type=live["type"],
+                resource_label=resource_label,
+                region=region,
+                live=live,
+            ):
+                matched_exc = exc
+                break
         if matched_exc is not None:
             rid = _make_resource_id(live["type"], live.get("raw_name", ""), live["id"])
             print_exception_skip(rid, matched_exc)

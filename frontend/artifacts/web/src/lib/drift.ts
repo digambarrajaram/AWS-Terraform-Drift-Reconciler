@@ -17,6 +17,33 @@ function parseJson<T>(v: unknown): T | null {
   }
 }
 
+/** Mirrors dashboard ``_monthly_estimate_usd`` — safe for UI totals and badges. */
+export function monthlyEstimateUsd(costImpact: unknown): number | null {
+  let value = costImpact;
+  if (typeof value === 'string') {
+    const parsed = parseJson<Record<string, unknown>>(value);
+    if (!parsed) return null;
+    value = parsed;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const raw = (value as { monthly_estimate_usd?: unknown }).monthly_estimate_usd;
+  if (typeof raw === 'boolean') return null;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+function normalizeCostImpact(
+  costImpact: DriftEvent['cost_impact'],
+): DriftEvent['cost_impact'] {
+  const parsed =
+    parseJson<NonNullable<DriftEvent['cost_impact']>>(costImpact) ?? costImpact;
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  const monthly = monthlyEstimateUsd(parsed);
+  if (monthly == null) return parsed;
+  return { ...parsed, monthly_estimate_usd: monthly };
+}
+
 export function normalizeDriftEvent(e: DriftEvent): DriftEvent {
   return {
     ...e,
@@ -26,9 +53,7 @@ export function normalizeDriftEvent(e: DriftEvent): DriftEvent {
     fields_changed:
       parseJson<NonNullable<DriftEvent['fields_changed']>>(e.fields_changed) ??
       e.fields_changed,
-    cost_impact:
-      parseJson<NonNullable<DriftEvent['cost_impact']>>(e.cost_impact) ??
-      e.cost_impact,
+    cost_impact: normalizeCostImpact(e.cost_impact),
   };
 }
 

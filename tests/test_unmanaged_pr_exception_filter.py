@@ -99,6 +99,35 @@ class ExceptionFilterTests(unittest.TestCase):
         agent.drift_pr_from_finding(state)
         self.assertEqual(len(self.created), 1)
 
+    def test_cost_cap_above_threshold_still_creates_pr(self):
+        """PR filter must honor max_monthly_cost_usd like the scanner diff."""
+        agent.unmanaged_scanner._load_exceptions = lambda scope: [
+            {
+                "resource_type": "aws_instance",
+                "resource_id_pattern": "prod-web",
+                "max_monthly_cost_usd": 50.0,
+            },
+        ]
+        finding = self._finding()
+        finding["cost_impact"] = {"monthly_estimate_usd": 120.0}
+        state = {"drift_detected": True, "drift_findings": [finding]}
+        agent.drift_pr_from_finding(state)
+        self.assertEqual(len(self.created), 1)
+
+    def test_cost_cap_below_threshold_skips_pr(self):
+        agent.unmanaged_scanner._load_exceptions = lambda scope: [
+            {
+                "resource_type": "aws_instance",
+                "resource_id_pattern": "prod-web",
+                "max_monthly_cost_usd": 50.0,
+            },
+        ]
+        finding = self._finding()
+        finding["cost_impact"] = {"monthly_estimate_usd": 10.0}
+        state = {"drift_detected": True, "drift_findings": [finding]}
+        agent.drift_pr_from_finding(state)
+        self.assertEqual(self.created, [])
+
 
 if __name__ == "__main__":
     unittest.main()

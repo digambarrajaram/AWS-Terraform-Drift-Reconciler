@@ -318,10 +318,10 @@ export default function Overview() {
                 <div className="space-y-1">
                   <p className="text-2xl font-semibold tabular-nums text-muted-foreground">—</p>
                   <p className="text-xs text-muted-foreground leading-snug">
-                    No priced resources in open drift findings. Cost appears when drift events include
-                    monthly estimates (see{' '}
-                    <Link to="/exceptions" className="text-primary hover:underline">Exceptions</Link>
-                    ).
+                    No priced open findings for this scope. Estimates apply to unmanaged resources
+                    (EC2, NAT gateway, etc.) after a scan — see{' '}
+                    <Link to="/explorer" className="text-primary hover:underline">Explorer</Link>
+                    . Exception cost caps only affect suppression, not pricing.
                   </p>
                 </div>
               ) : (

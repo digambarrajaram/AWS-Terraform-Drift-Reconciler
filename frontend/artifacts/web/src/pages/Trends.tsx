@@ -192,19 +192,41 @@ function otherBreakdown(s: DriftSummary): string | undefined {
 const TRENDS_TILE_GRID =
   'grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 auto-rows-fr items-stretch';
 
-function pendingHint(p: PendingApprovalsSummary | undefined): string | undefined {
-  if (!p || p.total === 0) return undefined;
-  const parts: string[] = [];
-  if (p.unmanaged > 0) parts.push(`${p.unmanaged} unm.`);
-  if (p.security > 0) parts.push(`${p.security} sec.`);
-  if (p.other > 0) parts.push(`${p.other} other`);
-  return `${p.total} on Approvals · ${parts.join(' · ')}`;
+function openTileValue(open: number, pending?: PendingApprovalsSummary): string {
+  const pendingTotal = pending?.total ?? 0;
+  const combined = open + pendingTotal;
+  if (pendingTotal === 0) return open.toLocaleString();
+  // Primary number includes awaiting Approvals so Open is not stuck at 0
+  // while unmanaged/security exceptions are still pending.
+  return combined.toLocaleString();
 }
 
-function openTileValue(open: number, pending?: PendingApprovalsSummary): string {
-  const base = open.toLocaleString();
-  if (!pending || pending.total === 0) return base;
-  return `${base} (+${pending.total.toLocaleString()} pending)`;
+function openTileHint(open: number, pending?: PendingApprovalsSummary): string {
+  const pendingTotal = pending?.total ?? 0;
+  if (pendingTotal === 0) return 'Fix/batch findings only';
+  const parts: string[] = [];
+  if (open > 0) parts.push(`${open} open findings`);
+  parts.push(`${pendingTotal} awaiting approval`);
+  return parts.join(' · ');
+}
+
+function openTileDetail(open: number, pending?: PendingApprovalsSummary): string | undefined {
+  const pendingTotal = pending?.total ?? 0;
+  if (pendingTotal === 0) {
+    return 'Drift finding status=open (excludes unmanaged & security_only)';
+  }
+  const bits = [
+    `${open} open fix/batch findings`,
+    `${pendingTotal} awaiting on Approvals`,
+  ];
+  if (pending) {
+    const sub: string[] = [];
+    if (pending.unmanaged > 0) sub.push(`${pending.unmanaged} unmanaged`);
+    if (pending.security > 0) sub.push(`${pending.security} security`);
+    if (pending.other > 0) sub.push(`${pending.other} other`);
+    if (sub.length) bits.push(`(${sub.join(', ')})`);
+  }
+  return bits.join(' · ');
 }
 
 function StatTiles({
@@ -265,12 +287,8 @@ function StatTiles({
       <StatTile
         label="Open"
         value={openTileValue(s.open, pending)}
-        hint={pendingHint(pending) ?? 'Fix/batch findings only'}
-        hintDetail={
-          pending && pending.total > 0
-            ? `${pending.total} awaiting approval on Approvals (unmanaged/security/fix) — not included in Open`
-            : 'Drift finding status=open (excludes unmanaged & security_only)'
-        }
+        hint={openTileHint(s.open, pending)}
+        hintDetail={openTileDetail(s.open, pending)}
         icon={<Clock size={16} />}
         accent="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
       />
@@ -364,6 +382,13 @@ function fillVolumeDays(rows: VolumeRow[], days: number): VolumeRow[] {
   });
 }
 
+function volumeTickInterval(days: number): number | 'preserveStartEnd' {
+  // Aim for ~8–10 labels so Sep 16–Oct 15 does not collide.
+  if (days <= 7) return 0;
+  if (days <= 30) return 3; // every 4th day
+  return 6; // every 7th day for 90d
+}
+
 function VolumeTick({ x, y, payload }: { x?: number; y?: number; payload?: { value: string } }) {
   if (!payload?.value) return null;
   const date = new Date(payload.value);
@@ -377,10 +402,11 @@ function VolumeTick({ x, y, payload }: { x?: number; y?: number; payload?: { val
 
 function ResourceTick({ x, y, payload }: { x?: number; y?: number; payload?: { value: string } }) {
   if (!payload?.value) return null;
+  const short = shortenResourceId(payload.value, 36);
   return (
     <text x={x! - 6} y={y! + 4} textAnchor="end" style={TICK_STYLE}>
       <title>{payload.value}</title>
-      {shortenResourceId(payload.value, 40)}
+      {short}
     </text>
   );
 }
@@ -422,10 +448,10 @@ export default function Trends() {
 
   const mostDriftedChartHeight = Math.max(288, mostDriftedData.length * 34);
   const mostDriftedLabelWidth = Math.min(
-    280,
+    300,
     Math.max(
-      160,
-      ...mostDriftedData.map((r) => shortenResourceId(r.resource_id, 40).length * 6.2),
+      180,
+      ...mostDriftedData.map((r) => shortenResourceId(r.resource_id, 36).length * 6.5),
     ),
   );
 
@@ -619,11 +645,12 @@ export default function Trends() {
                 tick={<VolumeTick />}
                 axisLine={false}
                 tickLine={false}
-                interval={days <= 31 ? 0 : 'preserveStartEnd'}
-                minTickGap={days <= 31 ? 0 : 28}
+                interval={volumeTickInterval(days)}
+                minTickGap={28}
               />
               <YAxis
                 allowDecimals={false}
+                domain={[0, 'auto']}
                 tick={TICK_STYLE}
                 axisLine={false}
                 tickLine={false}
@@ -633,7 +660,7 @@ export default function Trends() {
                 cursor={{ stroke: 'hsl(var(--border))', strokeWidth: 1 }}
               />
               <Area
-                type="monotone"
+                type="linear"
                 dataKey="count"
                 name="Events"
                 stroke={CHART_BLUE}

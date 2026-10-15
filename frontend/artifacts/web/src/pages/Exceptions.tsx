@@ -101,21 +101,26 @@ function FormError({ msg }: { msg: string }) {
 
 /** Truncated text with hover title + click-to-expand for full value. */
 function ExpandableText({
-  value, mono = false,
+  value, mono = false, nowrap = false,
 }: {
-  value: string; mono?: boolean;
+  value: string; mono?: boolean; nowrap?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   if (!value) return <span className="text-muted-foreground">—</span>;
   return (
     <button
       type="button"
-      onClick={() => setExpanded((v) => !v)}
+      onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
       title={expanded ? 'Click to collapse' : value}
       aria-expanded={expanded}
-      className={`w-full text-left hover:text-foreground/80 ${
+      aria-label={expanded ? 'Collapse text' : `Expand: ${value}`}
+      className={`min-w-0 max-w-full text-left underline decoration-dotted decoration-muted-foreground/40 underline-offset-2 hover:text-foreground/80 ${
         mono ? 'font-mono' : ''
-      } ${expanded ? 'break-words whitespace-pre-wrap' : 'block truncate'}`}
+      } ${expanded
+        ? 'break-words whitespace-pre-wrap'
+        : nowrap
+          ? 'block truncate whitespace-nowrap'
+          : 'block truncate'}`}
     >
       {value}
     </button>
@@ -441,9 +446,10 @@ function DriftTab({
         {rows.length === 0 ? (
           <div className="flex flex-col items-center gap-3 py-14 text-center">
             <Inbox size={32} className="text-muted-foreground/40" />
-            <p className="text-sm text-muted-foreground">No drift exceptions</p>
+            <p className="text-sm text-muted-foreground">No config-drift suppressions</p>
             <p className="text-xs text-muted-foreground/80 max-w-md">
-              No drift suppressions for this scope. Use <strong className="font-medium text-foreground">Add Exception</strong> to ignore a resource on future scans.
+              This tab is a <strong className="font-medium text-foreground">suppression registry</strong>, not a list of drift events.
+              Trends and Explorer show events; add a suppression here to ignore a resource address on future scans.
             </p>
           </div>
         ) : (
@@ -466,10 +472,12 @@ function DriftTab({
                         <ExpandableText value={row.resource_address} mono />
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{row.drift_type ?? '—'}</td>
-                      <td className="px-4 py-3 max-w-[260px]">
+                      <td className="px-4 py-3 max-w-[280px]">
                         <ExpandableText value={row.reason} />
                       </td>
-                      <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
+                      <td className="px-4 py-3 max-w-[140px]">
+                        <ExpandableText value={row.approved_by ?? ''} nowrap />
+                      </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <ExpiresCell expires={row.expires} />
                       </td>
@@ -708,13 +716,15 @@ function UnmanagedTab({
                   return (
                     <tr key={String(row.id)} className={`transition-colors hover:bg-muted/30 ${dim ? 'opacity-60' : ''}`}>
                       <td className="px-4 py-3 font-mono text-foreground">{row.resource_type}</td>
-                      <td className="px-4 py-3 max-w-[180px]">
+                      <td className="px-4 py-3 max-w-[200px]">
                         <ExpandableText value={row.resource_id_pattern} mono />
                       </td>
-                      <td className="px-4 py-3 max-w-[260px]">
+                      <td className="px-4 py-3 max-w-[280px]">
                         <ExpandableText value={row.reason} />
                       </td>
-                      <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
+                      <td className="px-4 py-3 max-w-[140px]">
+                        <ExpandableText value={row.approved_by ?? ''} nowrap />
+                      </td>
                       <td className="px-4 py-3 text-muted-foreground">
                         {row.max_monthly_cost_usd != null
                           ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(row.max_monthly_cost_usd)
@@ -968,10 +978,12 @@ function SecurityTab({
                         <ExpandableText value={row.resource_address} mono />
                       </td>
                       <td className="px-4 py-3 font-mono text-foreground">{row.rule_id}</td>
-                      <td className="px-4 py-3 max-w-[260px]">
+                      <td className="px-4 py-3 max-w-[280px]">
                         <ExpandableText value={row.reason} />
                       </td>
-                      <td className="px-4 py-3 text-muted-foreground">{row.approved_by ?? '—'}</td>
+                      <td className="px-4 py-3 max-w-[140px]">
+                        <ExpandableText value={row.approved_by ?? ''} nowrap />
+                      </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <ExpiresCell expires={row.expires} />
                       </td>
@@ -1045,11 +1057,19 @@ export default function Exceptions() {
   const unmanagedRows = data?.unmanaged_exceptions ?? [];
   const securityRows  = data?.security_exceptions  ?? [];
 
+  // Prefer a populated tab so an empty Drift registry is not mistaken for "no drift".
+  const defaultTab =
+    driftRows.length > 0 ? 'drift'
+      : unmanagedRows.length > 0 ? 'unmanaged'
+        : securityRows.length > 0 ? 'security'
+          : 'drift';
+
   return (
     <div className={`p-6 space-y-4 ${PAGE_MAX_WIDTH}`}>
       <h1 className="text-xl font-semibold">Exceptions</h1>
       <p className="text-xs text-muted-foreground">
-        Registry of suppressions per scope. Drift events on Trends and Explorer are separate until you except them.
+        Suppression registry per scope — not the same as Trends/Explorer events.
+        Create a row here to ignore matching resources on future scans.
       </p>
 
       {isLoading ? (
@@ -1062,10 +1082,10 @@ export default function Exceptions() {
           Failed to load exceptions: {errorMessage(error)}
         </div>
       ) : (
-        <Tabs defaultValue="drift">
+        <Tabs defaultValue={defaultTab}>
           <TabsList>
             <TabsTrigger value="drift">
-              Drift
+              Drift suppressions
               {driftRows.length > 0 && (
                 <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                   {driftRows.length}

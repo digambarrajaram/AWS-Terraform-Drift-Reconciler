@@ -63,6 +63,22 @@ class ApprovalsMixin:
             self._json_error(502, f"Supabase unreachable: {exc}")
             return
 
+        # One row per PR+scope (newest first). Duplicate pending_applies can
+        # exist when user_id was NULL — Postgres unique indexes treat NULLs
+        # as distinct — so collapse here for the Approvals UI.
+        if isinstance(rows, list) and rows:
+            seen_pr_scope: set[tuple] = set()
+            deduped: list = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                key = (row.get("pr_number"), row.get("scope"))
+                if key in seen_pr_scope:
+                    continue
+                seen_pr_scope.add(key)
+                deduped.append(row)
+            rows = deduped
+
         # Cross-check drift_events so Approvals does not show "Accepted, not
         # merged" when the finding row is already reverted (PR Queue/Explorer).
         if scope and rows:

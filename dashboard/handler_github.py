@@ -235,14 +235,12 @@ class GitHubMixin:
         headers_body = {"apikey": key, "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json", "Prefer": "return=representation"}
         try:
-            existing_q = (
-                f"{url_base}/rest/v1/pending_applies"
-                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}"
-            )
-            if owner_user_id:
-                existing_q += f"&user_id=eq.{owner_user_id}"
+            # Match any existing row for this PR+scope — including rows with
+            # NULL user_id (Postgres UNIQUE treats NULLs as distinct, so the
+            # DB index alone cannot prevent duplicate #PR rows).
             existing = requests.get(
-                f"{existing_q}&limit=1",
+                f"{url_base}/rest/v1/pending_applies"
+                f"?select=id&pr_number=eq.{pr_number}&scope=eq.{scope}&limit=1",
                 headers=headers_body, timeout=10,
             )
             if existing.status_code == 200 and existing.json():

@@ -551,9 +551,11 @@ function FilterBar({
           onChange={(e) => onFilters({ dateFrom: e.target.value })}
           className={`${selectCls} text-xs`}
         />
-        <span className="text-[11px] text-muted-foreground tabular-nums min-w-[6.5rem]">
-          {filters.dateFrom ? formatFilterDate(filters.dateFrom) : 'MMM d, yyyy'}
-        </span>
+        {filters.dateFrom ? (
+          <span className="text-[11px] text-muted-foreground tabular-nums">
+            {formatFilterDate(filters.dateFrom)}
+          </span>
+        ) : null}
         <span className="text-[11px] text-muted-foreground">to</span>
         <input
           type="date"
@@ -564,9 +566,11 @@ function FilterBar({
           onChange={(e) => onFilters({ dateTo: e.target.value })}
           className={`${selectCls} text-xs`}
         />
-        <span className="text-[11px] text-muted-foreground tabular-nums min-w-[6.5rem]">
-          {filters.dateTo ? formatFilterDate(filters.dateTo) : 'MMM d, yyyy'}
-        </span>
+        {filters.dateTo ? (
+          <span className="text-[11px] text-muted-foreground tabular-nums">
+            {formatFilterDate(filters.dateTo)}
+          </span>
+        ) : null}
         {(filters.dateFrom || filters.dateTo) && (
           <button type="button"
             onClick={() => onFilters({ dateFrom: '', dateTo: '' })}
@@ -727,9 +731,12 @@ export default function Explorer() {
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold">Explorer</h1>
           {!isLoading && (
-            <span className="text-xs text-muted-foreground" title="All drift_events rows for this scope (every finding lifecycle state)">
+            <span
+              className="text-xs text-muted-foreground"
+              title="Each row is one drift finding. Batch/security PRs create many findings but one Approvals row."
+            >
               {total.toLocaleString()} finding{total !== 1 ? 's' : ''}
-              <span className="hidden sm:inline"> · Approvals counts approval jobs only</span>
+              <span className="hidden sm:inline"> · not the same as Approvals (1 row per PR)</span>
             </span>
           )}
         </div>

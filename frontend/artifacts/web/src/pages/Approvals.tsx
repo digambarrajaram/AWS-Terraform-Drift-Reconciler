@@ -520,9 +520,14 @@ export default function Approvals() {
   const [selected, setSelected] = useState<PendingApply | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // Default to actionable queue so counts track Trends "Open" pending,
+  // not the full historical job log (which never matches Explorer findings).
+  const [statusFilter, setStatusFilter] = useState<'awaiting_approval' | 'all'>(
+    'awaiting_approval',
+  );
 
   const query = useQuery<PendingApply[]>({
-    queryKey: ['pendingApplies', scope],
+    queryKey: ['pendingApplies', scope, statusFilter],
     enabled: !!scope,
     // Poll fast while any row's job is still running (approved/rejected
     // claim state); slow back down once everything is terminal.  The
@@ -530,7 +535,9 @@ export default function Approvals() {
     // displayed status only flips when the job confirms.
     refetchInterval: (query) =>
       pendingAppliesRefetchInterval(query.state.data as PendingApply[] | undefined),
-    queryFn: () => apiFetch<PendingApply[]>(`/pending-applies?status=all${scope ? `&scope=${encodeURIComponent(scope)}` : ''}`),
+    queryFn: () => apiFetch<PendingApply[]>(
+      `/pending-applies?status=${statusFilter}${scope ? `&scope=${encodeURIComponent(scope)}` : ''}`,
+    ),
   });
   const { data, isLoading, error, isFetching } = query;
   const isUpdating = useQueryUpdating(isFetching, isLoading);
@@ -587,11 +594,11 @@ export default function Approvals() {
       // only comes from the backend for Merge/Reject jobs.
       const claimed = { ...row, status: decision as PendingApply['status'] };
       setSelected((prev) => (prev?.id === row.id ? claimed : prev));
-      queryClient.setQueryData<PendingApply[]>(['pendingApplies', scope], (rows) =>
-        rows?.map((r) => (r.id === row.id ? { ...r, status: decision } : r)) ?? rows,
+      queryClient.setQueryData<PendingApply[]>(
+        ['pendingApplies', scope, statusFilter],
+        (rows) => rows?.map((r) => (r.id === row.id ? { ...r, status: decision } : r)) ?? rows,
       );
       queryClient.invalidateQueries({ queryKey: ['pendingApplies'] });
-      queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
       // Refetch the drawer's live row immediately — otherwise the log
       // poller waits for the 3s refetchInterval before it even starts.
       queryClient.invalidateQueries({ queryKey: ['pendingApply', row.id] });
@@ -609,11 +616,11 @@ export default function Approvals() {
                 : 'Failed to reject'),
         { description: msg },
       );
-      queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
+      queryClient.invalidateQueries({ queryKey: ['pendingApplies'] });
     } finally {
       setDeciding(false);
     }
-  }, [queryClient, scope, deciding]);
+  }, [queryClient, scope, deciding, statusFilter]);
 
   // Mirror Scan.tsx Cancel Scan: POST …/cancel → status=cancelled + kill
   // the spawned apply/revert subprocess registered under the pending id.
@@ -625,10 +632,11 @@ export default function Approvals() {
       toast.success(`PR #${row.pr_number} decision cancelled`);
       const cancelled = { ...row, status: 'cancelled' as const };
       setSelected((prev) => (prev?.id === row.id ? cancelled : prev));
-      queryClient.setQueryData<PendingApply[]>(['pendingApplies', scope], (rows) =>
-        rows?.map((r) => (r.id === row.id ? cancelled : r)) ?? rows,
+      queryClient.setQueryData<PendingApply[]>(
+        ['pendingApplies', scope, statusFilter],
+        (rows) => rows?.map((r) => (r.id === row.id ? cancelled : r)) ?? rows,
       );
-      queryClient.invalidateQueries({ queryKey: ['pendingApplies', scope] });
+      queryClient.invalidateQueries({ queryKey: ['pendingApplies'] });
     } catch (err) {
       toast.error('Failed to cancel', {
         description: err instanceof Error ? err.message : String(err),
@@ -636,9 +644,10 @@ export default function Approvals() {
     } finally {
       setCancelling(false);
     }
-  }, [cancelling, queryClient, scope]);
+  }, [cancelling, queryClient, scope, statusFilter]);
 
   const rows = data ?? [];
+  const awaitingCount = rows.filter((r) => r.status === 'awaiting_approval').length;
 
   return (
     <div className={`p-6 space-y-4 ${PAGE_MAX_WIDTH}`}>
@@ -647,21 +656,48 @@ export default function Approvals() {
           <ClipboardCheck size={18} className="text-muted-foreground" />
           <h1 className="text-xl font-semibold">Approvals</h1>
         </div>
-        {!isLoading && (
-          <span className="text-xs text-muted-foreground">
-            {rows.length} record{rows.length !== 1 ? 's' : ''}
-            {isUpdating && ' · updating…'}
-          </span>
-        )}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5 gap-0.5">
+            <button
+              type="button"
+              onClick={() => setStatusFilter('awaiting_approval')}
+              className={[
+                'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                statusFilter === 'awaiting_approval'
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              ].join(' ')}
+            >
+              Awaiting
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('all')}
+              className={[
+                'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                statusFilter === 'all'
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              ].join(' ')}
+            >
+              History
+            </button>
+          </div>
+          {!isLoading && (
+            <span className="text-xs text-muted-foreground">
+              {statusFilter === 'awaiting_approval'
+                ? `${rows.length} awaiting`
+                : `${rows.length} PR${rows.length !== 1 ? 's' : ''} · ${awaitingCount} awaiting`}
+              {isUpdating && ' · updating…'}
+            </span>
+          )}
+        </div>
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Click a PR to review details. Accept AWS changes updates code and state to match AWS;
-        Revert AWS to code restores original Terraform on AWS;
-        Cancel closes the PR with no AWS or code change.
-        Counts here are <strong className="font-medium text-foreground">approval jobs</strong> (pending_applies) —
-        Explorer and PR Queue list every <strong className="font-medium text-foreground">drift finding</strong>, so totals differ.
-        Rollback eligibility comes from resolved drift events and may include PRs with no row here.
+        One row per PR (duplicate job rows are collapsed). Awaiting matches Trends Open pending;
+        Explorer lists every finding (batch PRs = many findings, one approval).
+        Accept AWS changes updates code/state; Revert restores Terraform on AWS; Cancel closes the PR only.
       </p>
 
       {isLoading ? (
@@ -676,8 +712,16 @@ export default function Approvals() {
       ) : rows.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border py-16 text-center">
           <Inbox size={36} className="text-muted-foreground/40" />
-          <p className="text-sm text-muted-foreground">No pending applies for this scope</p>
-          <p className="text-xs text-muted-foreground/70">New drift-fix PRs appear here as soon as a scan creates them.</p>
+          <p className="text-sm text-muted-foreground">
+            {statusFilter === 'awaiting_approval'
+              ? 'No approvals awaiting decision'
+              : 'No approval jobs for this scope'}
+          </p>
+          <p className="text-xs text-muted-foreground/70">
+            {statusFilter === 'awaiting_approval'
+              ? 'Switch to History for past decisions, or run a scan to create new PRs.'
+              : 'New drift-fix PRs appear here as soon as a scan creates them.'}
+          </p>
         </div>
       ) : (
         <div className="rounded-xl border border-border overflow-hidden">

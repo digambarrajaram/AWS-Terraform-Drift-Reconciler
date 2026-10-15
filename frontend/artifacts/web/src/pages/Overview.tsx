@@ -51,7 +51,7 @@ function StatCard({
   children?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-col min-h-[7.5rem]">
+    <div className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-col">
       <div className="mb-3 flex items-center gap-2 text-muted-foreground">
         <Icon size={14} />
         <span className="text-xs font-medium uppercase tracking-wider">{label}</span>
@@ -172,6 +172,9 @@ export default function Overview() {
   const activeEnv = activeEnvironments.find((e) => e.slug === scope);
   const rollbackEligible = rollbackCount.data ?? 0;
   const lastScanAtLabel = lastScan.data
+    ? format(new Date(lastScan.data), 'MMM d, HH:mm')
+    : null;
+  const lastScanAtFull = lastScan.data
     ? format(new Date(lastScan.data), 'MMM d, yyyy HH:mm')
     : null;
 
@@ -224,7 +227,7 @@ export default function Overview() {
       {isEmpty ? (
         <NoEventsState />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 items-stretch">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 items-start">
           {/* ── Current drift from last scan (matches Scan History) ───── */}
           <StatCard
             icon={AlertTriangle}
@@ -270,17 +273,11 @@ export default function Overview() {
                       </div>
                     )}
                     <p className="text-xs text-muted-foreground leading-snug">
-                      {lastScanAtLabel
-                        ? `From latest completed config-drift scan (${lastScanAtLabel}). `
-                        : ''}
-                      {unresolvedOpen === 0 && currentDrift > 0
-                        ? 'Findings above — no open tickets.'
-                        : unresolvedOpen > 0 && currentDrift === 0 && !driftSkipped
-                          ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} — scan found no config drift (unmanaged/security still count).`
-                          : unresolvedOpen > 0
-                            ? `${unresolvedOpen} open ticket${unresolvedOpen === 1 ? '' : 's'} (status=open).`
-                            : 'No open tickets.'}
-                      {' '}Scan history may show older runs with drift until you re-scan.
+                      {currentDrift} config drift
+                      {lastScanAtLabel ? ` (scan ${lastScanAtLabel})` : ''}.
+                      {' '}
+                      {unresolvedOpen} open unmanaged/security ticket
+                      {unresolvedOpen === 1 ? '' : 's'}.
                     </p>
                   </>
                 )}
@@ -354,8 +351,8 @@ export default function Overview() {
             loading={isLoading}
             error={lastScan.error}
           >
-            {!isLoading && !lastScan.error && lastScanAtLabel && (
-              <p className="mt-1 text-xs text-muted-foreground tabular-nums">{lastScanAtLabel}</p>
+            {!isLoading && !lastScan.error && lastScanAtFull && (
+              <p className="mt-1 text-xs text-muted-foreground tabular-nums">{lastScanAtFull}</p>
             )}
           </StatCard>
         </div>

@@ -13,7 +13,6 @@ import {
   type Severity, type Channel, type ScopeChannel, type RoutingRule,
 } from '@/hooks/useAlerts';
 import { PAGE_MAX_WIDTH } from '@/lib/pageLayout';
-import { credentialsBlockedOnThisOrigin } from '@/lib/secureContext';
 import { useEnvironments } from '@/hooks/useEnvironments';
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -70,7 +69,6 @@ function CredentialRow({
   masked,
   scope,
   backendAvailable,
-  blockPlainHttp,
 }: {
   label:            string;
   field:            string;
@@ -79,7 +77,6 @@ function CredentialRow({
   masked:           string | null;
   scope:            string | null;
   backendAvailable: boolean;
-  blockPlainHttp:   boolean;
 }) {
   const [value,    setValue]    = useState('');
   const [testing,  setTesting]  = useState(false);
@@ -89,10 +86,6 @@ function CredentialRow({
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (blockPlainHttp) {
-      toast.error('Use HTTPS to save notification credentials');
-      return;
-    }
     if (!value.trim()) return;
     try {
       await save.mutateAsync({ field, value: value.trim() });
@@ -134,7 +127,7 @@ function CredentialRow({
         <button
           type="button"
           onClick={handleTest}
-          disabled={!configured || testing || !backendAvailable || blockPlainHttp}
+          disabled={!configured || testing || !backendAvailable}
           title={!backendAvailable ? 'Backend not connected' : undefined}
           className="flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
         >
@@ -160,12 +153,12 @@ function CredentialRow({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           autoComplete="off"
-          disabled={!backendAvailable || blockPlainHttp}
+          disabled={!backendAvailable}
           className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-w-0 disabled:opacity-50"
         />
         <button
           type="submit"
-          disabled={!value.trim() || save.isPending || !backendAvailable || blockPlainHttp}
+          disabled={!value.trim() || save.isPending || !backendAvailable}
           title={!backendAvailable ? 'Backend not connected' : !value.trim() ? 'Enter a value to save' : undefined}
           className="flex items-center gap-1.5 rounded-md border border-transparent bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:border-border disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100 transition-colors whitespace-nowrap"
         >
@@ -420,7 +413,6 @@ export default function Alerts() {
   const routing   = useRoutingRules(scope);
 
   const ns = settings.data;
-  const blockPlainHttp = credentialsBlockedOnThisOrigin();
   const scopeLabel = activeEnvironments.find((e) => e.slug === scope)?.slug ?? scope ?? '';
 
   return (
@@ -446,23 +438,11 @@ export default function Alerts() {
           </div>
         ) : (
           <div className="space-y-3">
-            {blockPlainHttp && (
-              <div className="flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
-                <AlertTriangle size={13} className="shrink-0" />
-                <span>
-                  This page is not in a <strong>secure context</strong> (use HTTPS).
-                  Saving PagerDuty or Slack credentials is disabled — put TLS in front of the dashboard
-                  (see <code className="font-mono">compose.tls.yaml</code>) so secrets are not sent in cleartext.
-                </span>
-              </div>
-            )}
             {!ns?.backendAvailable && (
               <div className="flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
                 <AlertTriangle size={13} className="shrink-0" />
                 <span>
-                  <strong>Backend not connected</strong> — the notification-settings endpoint returned 404.
-                  Wire up <code className="font-mono">serve.py</code> to enable saving credentials,
-                  sending tests, and updating routing rules.
+                  Notification settings are temporarily unavailable. Try again in a moment.
                 </span>
               </div>
             )}
@@ -474,7 +454,6 @@ export default function Alerts() {
               masked={ns?.pagerduty_masked ?? null}
               scope={scope}
               backendAvailable={ns?.backendAvailable ?? false}
-              blockPlainHttp={blockPlainHttp}
             />
             <CredentialRow
               label="Slack Webhook URL"
@@ -484,7 +463,6 @@ export default function Alerts() {
               masked={ns?.slack_masked ?? null}
               scope={scope}
               backendAvailable={ns?.backendAvailable ?? false}
-              blockPlainHttp={blockPlainHttp}
             />
           </div>
         )}

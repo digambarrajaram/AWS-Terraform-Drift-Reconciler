@@ -28,12 +28,14 @@ const STAGES = [
 
 const TRIVY_ONLY_STAGES = [
   { key: 'trivy_only_scan', label: 'Security Scan' },
-  { key: 'trivy_only_pr',   label: 'Security PR'    },
+  { key: 'alert_agent',     label: 'Alert Agent'   },
+  { key: 'trivy_only_pr',   label: 'Security PR'   },
 ] as const;
 
 const UNMANAGED_ONLY_STAGES = [
   { key: 'unmanaged_scan', label: 'Unmanaged Scan' },
-  { key: 'drift_pr',       label: 'Unmanaged PR'   },
+  { key: 'alert_agent',  label: 'Alert Agent'    },
+  { key: 'drift_pr',     label: 'Unmanaged PR'   },
 ] as const;
 
 const DRIFT_ONLY_STAGES = [

@@ -131,6 +131,33 @@ class AlertStateSchemaTests(unittest.TestCase):
         finally:
             ag._account_label = prev
 
+    @patch("graph_nodes.pga.trigger_pagerduty_alert", return_value={"status": "success"})
+    @patch("graph_nodes.slack.notify_all", return_value=1)
+    @patch("graph_nodes._load_routing_rules", return_value={
+        "HIGH": "pagerduty", "MEDIUM": "slack", "LOW": "slack",
+    })
+    def test_security_issue_alerts_use_security_event_type(self, _rules, mock_slack, mock_pd):
+        import agent as ag
+        from graph_nodes import dispatch_finding_alerts, security_issue_to_finding
+
+        prev = ag._account_label
+        ag._account_label = "prod-setup"
+        try:
+            finding = security_issue_to_finding({
+                "rule_id": "AWS-0132",
+                "severity": "HIGH",
+                "title": "S3 bucket should block public access",
+                "resource": "aws_s3_bucket.logs",
+            })
+            out = dispatch_finding_alerts([finding], "run-abc")
+            self.assertEqual(out["pagerduty"], 1)
+            summary = mock_pd.call_args.kwargs["summary"]
+            self.assertIn("Security finding:", summary)
+            self.assertIn("aws_s3_bucket.logs", summary)
+            mock_slack.assert_called_once()
+        finally:
+            ag._account_label = prev
+
 
 if __name__ == "__main__":
     unittest.main()

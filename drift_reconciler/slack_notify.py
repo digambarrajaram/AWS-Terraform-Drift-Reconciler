@@ -86,11 +86,16 @@ def notify_all(findings: list[dict[str, Any]], account_label: str) -> int:
 
         region = os.environ.get("AWS_REGION", "unknown")
 
-        # Build header — distinguish unmanaged from drift.
-        unmanaged_count = sum(1 for f in batch if f.get("status") in ("unmanaged", "unmanaged_tagged"))
+        # Build header — distinguish unmanaged, security, and drift.
+        unmanaged_count = sum(
+            1 for f in batch if f.get("status") in ("unmanaged", "unmanaged_tagged")
+        )
+        security_count = sum(1 for f in batch if f.get("finding_kind") == "security")
         if unmanaged_count == len(batch):
             kind = "unmanaged resource finding"
-        elif unmanaged_count == 0:
+        elif security_count == len(batch):
+            kind = "security finding"
+        elif unmanaged_count == 0 and security_count == 0:
             kind = "drift finding"
         else:
             kind = "finding"

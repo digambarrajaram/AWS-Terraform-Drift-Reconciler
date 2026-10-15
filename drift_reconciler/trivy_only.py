@@ -14,6 +14,17 @@ from trivy_agent import (
 )
 
 
+def _dispatch_security_alerts(issues: list[dict], run_id: str | None) -> dict:
+    """PagerDuty/Slack for actionable Trivy issues (same rules as drift)."""
+    import agent as _ag
+    from graph_nodes import dispatch_finding_alerts, security_issues_to_findings
+
+    if not issues:
+        return {"pagerduty": 0, "slack": 0}
+    _ag.report_stage(run_id, "alert_agent")
+    return dispatch_finding_alerts(security_issues_to_findings(issues), run_id)
+
+
 def _verify_fixes_cleared(
     tmpdir: str,
     all_fixes: list[dict],
@@ -191,8 +202,10 @@ def finalize_trivy_only_scan(run_id: str | None, results: dict) -> None:
         if results.get("findings_actionable") is not None
         else max(0, findings_total - findings_excepted)
     )
+    alerts_sent = results.get("alerts_sent") or {"pagerduty": 0, "slack": 0}
     summary = {
         "mode": "trivy_only",
+        "alerts_sent": alerts_sent,
         "security": {
             # ``found`` remains "PRs opened" for existing UI cards.
             "found": len(pr_urls) > 0,
@@ -279,10 +292,12 @@ def run_trivy_only_scan(tf_dir: str, account_label: str, scope: str, run_id: str
                 kept.append(i)
         issues = kept
         total = len(raw_issues)
+        scan_alerts = _dispatch_security_alerts(issues, run_id)
         findings_meta = {
             "findings_total": total,
             "findings_excepted": len(suppressed),
             "findings_actionable": len(issues),
+            "alerts_sent": scan_alerts,
         }
 
         if suppressed and not issues:

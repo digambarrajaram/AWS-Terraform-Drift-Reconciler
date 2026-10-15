@@ -231,34 +231,63 @@ def _pd_dedup_key(finding: dict, run_id: str | None = None) -> str:
     run_suffix = ""
     if run_id:
         run_suffix = "-" + str(run_id).replace("-", "")[-8:]
-    return f"drift-{rid}-{digest}-{day}{run_suffix}"
+    kind = finding.get("finding_kind") or "drift"
+    return f"{kind}-{rid}-{digest}-{day}{run_suffix}"
 
 
-def drift_alert(state: State):
+_SECURITY_SEV_TO_RISK: dict[str, str] = {
+    "CRITICAL": "HIGH",
+    "HIGH": "HIGH",
+    "MEDIUM": "MEDIUM",
+    "LOW": "LOW",
+    "UNKNOWN": "LOW",
+}
+
+
+def security_issue_to_finding(issue: dict) -> dict:
+    """Map a Trivy issue dict to the shared alert/PR finding shape."""
+    sev = (issue.get("severity") or "UNKNOWN").upper()
+    risk = _SECURITY_SEV_TO_RISK.get(sev, "LOW")
+    rule_id = issue.get("rule_id") or "unknown"
+    target = issue.get("target") or ""
+    basename = os.path.basename(target) if target else "unknown"
+    resource = (issue.get("resource") or "").strip()
+    resource_id = resource or f"trivy:{rule_id}:{basename}"
+    title = (issue.get("title") or issue.get("description") or rule_id).strip()
+    return {
+        "resource_id": resource_id,
+        "risk_level": risk,
+        "drift_summary": f"`{rule_id}` — {title}",
+        "plan_output": issue.get("resolution") or issue.get("description") or "",
+        "finding_kind": "security",
+        "rule_id": rule_id,
+        "status": "security",
+    }
+
+
+def security_issues_to_findings(issues: list[dict]) -> list[dict]:
+    return [security_issue_to_finding(i) for i in issues]
+
+
+def _alert_event_type(finding: dict) -> str:
+    if finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
+        return "Unmanaged resource"
+    if finding.get("finding_kind") == "security":
+        return "Security finding"
+    return "Drift detected"
+
+
+def dispatch_finding_alerts(active: list[dict], run_id: str | None) -> dict:
+    """Route *active* findings to PagerDuty/Slack using severity rules."""
     import agent as _ag
-    _ag.report_stage(state.get("run_id"), "alert_agent")
-    """Route findings by severity using Supabase routing rules, falling
-    back to hardcoded HIGH→PagerDuty / else→Slack if unreachable.
 
-    Channel semantics:
-      - pagerduty → page PagerDuty *and* post Slack (if webhook configured)
-      - slack     → Slack only
-      - none      → silence
-    """
-    if not state.get("drift_detected"):
-        return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
-
-    active = [f for f in state["drift_findings"]
-              if f.get("status") != "externally_managed"]
     if not active:
-        return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
+        return {"pagerduty": 0, "slack": 0}
 
     rules = _load_routing_rules()
     print(f"  [alert_agent] routing rules for {_ag._account_label}: {rules}")
 
     pd_findings = [f for f in active if _finding_channel(rules, f) == "pagerduty"]
-    # Slack gets explicit slack-routed findings PLUS pagerduty-routed ones
-    # (so "PagerDuty for any severity" still produces Slack messages).
     slack_findings = [
         f for f in active if _finding_channel(rules, f) in ("slack", "pagerduty")
     ]
@@ -283,9 +312,6 @@ def drift_alert(state: State):
         for sev in ("HIGH", "MEDIUM", "LOW")
         if (rules.get(sev) or _DEFAULT_ROUTING.get(sev, "slack")) == "pagerduty"
     }
-    # Only warn when this scan has severities configured for PagerDuty but none
-    # were paged (misconfiguration or dispatch failure). LOW→Slack with only
-    # LOW findings is expected — not an error.
     if (
         active
         and not pd_findings
@@ -304,18 +330,9 @@ def drift_alert(state: State):
             "on Alerts and Save each row."
         )
 
-    # PagerDuty → one page per finding.
-    # Use severity=critical so PD high-urgency phone/SMS rules fire.
-    # Dedup includes drift fingerprint + day + run so we don't silently no-op
-    # against an already-open incident the way a stable drift-<resource> key did
-    # (Send Test has no dedup_key → always called; drift alerts did not).
     pd_sent = 0
-    run_id = state.get("run_id")
     for finding in pd_findings:
-        if finding.get("status") in unmanaged_scanner.UNMANAGED_STATUSES:
-            event_type = "Unmanaged resource"
-        else:
-            event_type = "Drift detected"
+        event_type = _alert_event_type(finding)
         risk = finding.get("risk_level") or "LOW"
         summary = f"{event_type}: {finding['resource_id']} [{risk}]"
         cost = finding.get("cost_impact")
@@ -334,9 +351,10 @@ def drift_alert(state: State):
                 "risk_level": risk,
                 "account": _ag._account_label,
                 "run_id": run_id,
+                "finding_kind": finding.get("finding_kind") or "drift",
             },
         )
-        if result:  # PagerDuty returns {} on failure, non-empty dict on dispatch
+        if result:
             pd_sent += 1
             print(
                 f"  [alert_agent] PagerDuty accepted: {finding['resource_id']} "
@@ -345,7 +363,6 @@ def drift_alert(state: State):
         else:
             print(f"  [alert_agent] PagerDuty FAILED for {finding['resource_id']}")
 
-    # Slack → batched (includes PD-routed findings for visibility).
     slack_sent = 0
     if slack_findings:
         try:
@@ -370,7 +387,32 @@ def drift_alert(state: State):
         alerts_payload["errors"] = unique_errs
         print(f"  [alert_agent] alert errors: {unique_errs}")
 
+    return alerts_payload
+
+
+def drift_alert(state: State):
+    import agent as _ag
+    _ag.report_stage(state.get("run_id"), "alert_agent")
+    """Route findings by severity using Supabase routing rules, falling
+    back to hardcoded HIGH→PagerDuty / else→Slack if unreachable.
+
+    Channel semantics:
+      - pagerduty → page PagerDuty *and* post Slack (if webhook configured)
+      - slack     → Slack only
+      - none      → silence
+    """
+    if not state.get("drift_detected"):
+        return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
+
+    active = [f for f in state["drift_findings"]
+              if f.get("status") != "externally_managed"]
+    if not active:
+        return {"messages": [], "alerts_sent": {"pagerduty": 0, "slack": 0}}
+
+    alerts_payload = dispatch_finding_alerts(active, state.get("run_id"))
     return {"messages": [], "alerts_sent": alerts_payload}
+
+
 def drift_pr_from_finding(state: State):
     import agent as _ag
     _ag.report_stage(state.get("run_id"), "drift_pr")

@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 
 /**
  * Show a background "updating…" hint only after a fetch runs briefly, and
- * clear immediately when the fetch settles — avoids flicker from fast polls
- * and stuck flags when isRefetching overlaps interval refetches.
+ * clear immediately when the fetch settles.
+ * ponytail: debounce in a tiny hook instead of copying setTimeout logic per page.
  */
 export function useQueryUpdating(isFetching: boolean, isLoading: boolean): boolean {
   const [show, setShow] = useState(false);

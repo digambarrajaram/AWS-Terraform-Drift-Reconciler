@@ -7,7 +7,7 @@ export interface PendingApplyPollRow {
 
 const FAST_POLL_MS = 3_000;
 const SLOW_POLL_MS = 30_000;
-/** Stop fast-polling claimed rows that never reach a terminal status. */
+// ponytail: cap fast-poll so stale approved/rejected rows cannot hammer the API forever.
 const CLAIM_FAST_POLL_MAX_MS = 2 * 60 * 60 * 1000;
 
 export function isPendingApplyJobInFlight(row: PendingApplyPollRow): boolean {

@@ -36,6 +36,7 @@ test/Scripts/
 test/pyvenv.cfg
 
 # Temporary files
+_tmp_*
 *.tmp
 *.swp
 *.swo
